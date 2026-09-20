@@ -55,7 +55,7 @@ static void send_response(uint8_t sequence, const char *text) {
 
 static void process_command(uint8_t sequence, const char *command) {
     if (strcmp(command, "HELLO") == 0) {
-        send_response(sequence, "LUMIPAD|3|FW=QMK-0.2.0|CAPS=MEM");
+        send_response(sequence, "LUMIPAD|3|FW=0.2.0|CAPS=MEM");
         return;
     }
 
