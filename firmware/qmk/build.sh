@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 QMK_SPEC="${QMK_SPEC:-42e50c9f96cb1bc57d59c9ebf4f52df54a5f045c}"
-TINYUSB_SPEC="${TINYUSB_SPEC:-334e95fac52a607150157ae5199a19e11f843982}"
+TINYUSB_SPEC="${TINYUSB_SPEC:-1a89cb79bd833aac67afec1974fc644369d019d5}"
 WORK="$ROOT/.qmk-real-build"
 QMK="$WORK/qmk"
 IDF_PROJ="$ROOT/firmware/qmk-idf"
@@ -24,7 +24,7 @@ git -C "$QMK" submodule update --init --depth 1 lib/lufa lib/printf
 echo "==> Fetch compatible Espressif TinyUSB @ $TINYUSB_SPEC"
 rm -rf "$QMK/lib/tinyusb"
 git init -q "$QMK/lib/tinyusb"
-git -C "$QMK/lib/tinyusb" remote add origin https://github.com/espressif/tinyusb.git
+git -C "$QMK/lib/tinyusb" remote add origin https://github.com/morganvenable/lalboard-tinyusb-clone.git
 git -C "$QMK/lib/tinyusb" fetch -q --depth 1 origin "$TINYUSB_SPEC"
 git -C "$QMK/lib/tinyusb" checkout -q FETCH_HEAD
 
