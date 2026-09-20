@@ -5,27 +5,38 @@ import shlex
 import sys
 
 commands = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-entry = next((x for x in commands if x.get("file", "").endswith("stub.c")), None)
-if entry is None:
-    raise SystemExit("stub.c compile command not found")
 
-parts = shlex.split(entry.get("command") or " ".join(entry.get("arguments", [])))
+# The old ESP32-S2 QMK fork is compiled outside ESP-IDF's CMake graph.
+# Reuse the full ESP-IDF compile database so QMK sees every public/private
+# component include directory required by its ESP32/TinyUSB platform layer.
 selected = []
-i = 0
-while i < len(parts):
-    token = parts[i]
-    if token.startswith("-I") and len(token) > 2:
-        selected.append(token)
-    elif token == "-I" and i + 1 < len(parts):
-        selected.extend([token, parts[i + 1]])
-        i += 1
-    elif token == "-isystem" and i + 1 < len(parts):
-        selected.extend([token, parts[i + 1]])
-        i += 1
-    i += 1
+seen = set()
 
-# Some ESP-IDF components expose headers from non-standard public folders
-# that are not present in the main component's generated compile command.
+def add(token):
+    if token not in seen:
+        seen.add(token)
+        selected.append(token)
+
+for entry in commands:
+    command = entry.get("command")
+    args = entry.get("arguments")
+    parts = shlex.split(command) if command else list(args or [])
+
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        if token.startswith("-I") and len(token) > 2:
+            add(token)
+        elif token == "-I" and i + 1 < len(parts):
+            add("-I" + parts[i + 1])
+            i += 1
+        elif token == "-isystem" and i + 1 < len(parts):
+            add("-isystem")
+            add(parts[i + 1])
+            i += 1
+        i += 1
+
+# TinyUSB's FreeRTOS OSAL includes these headers without the "freertos/" prefix.
 idf_path = Path("/opt/esp/idf")
 for extra in (
     idf_path / "components/freertos/include/freertos",
@@ -34,7 +45,7 @@ for extra in (
     idf_path / "components/wear_levelling/include",
     idf_path / "components/spi_flash/include",
 ):
-    selected.append("-I" + str(extra))
+    add("-I" + str(extra))
 
-selected.append("-DESP_PLATFORM")
+add("-DESP_PLATFORM")
 print(" ".join(shlex.quote(x) for x in selected))
