@@ -91,11 +91,17 @@ v0.1 đã có kết nối Lumi Raw HID, Profile, PC Monitor cơ bản trên LCD,
 
 RGB/GIF upload đầy đủ sẽ thêm sau khi xác nhận đúng phần cứng LCD + USB + matrix.
 
+### USB trên Windows / VIA
+
+Firmware chạy bình thường là thiết bị HID composite (Keyboard + VIA Raw HID), vì vậy **không cần và không hiện COM**. COM chỉ xuất hiện khi ESP32-S2 vào ROM BOOT để bootstrap/flash. Để vào ROM BOOT: giữ BOOT, nhấn RESET một lần, thả RESET rồi thả BOOT.
+
+Từ v0.1.6, Raw HID IN dùng endpoint riêng với Raw HID OUT và USB serial đổi sang `PIXELPRO-0106` để Windows tạo device instance mới thay vì giữ descriptor cũ. VIA vẫn dùng VID/PID `303A:4009`, Usage Page `0xFF60`, Usage `0x61`, report 32 byte.
+
 ## Build / nạp
 
 GitHub Actions build firmware hiện hành trong `firmware/idf` bằng ESP-IDF v5.5.1, target `esp32s2`. Push main, pull request và chạy thủ công đều kiểm tra build; pull request không phát hành release.
 
-Artifact `pixel-pro-v0.1.5` chứa firmware. `PIXEL_PRO_merged.bin` dùng bootstrap tại offset 0x0; `PIXEL_PRO_OTA.bin` và `firmware-manifest.json` dùng cập nhật trong app. `firmware/PixelPro_S2/PixelPro_S2.ino` là bản Arduino bring-up cũ, không phải target của workflow hiện hành.
+Artifact `pixel-pro-v0.1.6` chứa firmware. `PIXEL_PRO_merged.bin` dùng bootstrap tại offset 0x0; `PIXEL_PRO_OTA.bin` và `firmware-manifest.json` dùng cập nhật trong app. `firmware/PixelPro_S2/PixelPro_S2.ino` là bản Arduino bring-up cũ, không phải target của workflow hiện hành.
 
 ## Lưu ý
 
