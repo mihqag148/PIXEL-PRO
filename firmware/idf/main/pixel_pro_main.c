@@ -1,5 +1,5 @@
 /*
- * PIXEL PRO v0.1.5
+ * PIXEL PRO v0.1.6
  * ESP32-S2 Mini / ESP-IDF + TinyUSB
  *
  * USB interface 0: standard HID keyboard
@@ -37,7 +37,7 @@
 #include "class/hid/hid_device.h"
 #include "mbedtls/base64.h"
 
-#define FW_VERSION "0.1.5"
+#define FW_VERSION "0.1.6"
 
 #define USB_VID 0x303A
 #define USB_PID 0x4009
@@ -68,7 +68,12 @@ enum {
 
 #define EPNUM_KEYBOARD_IN 0x81
 #define EPNUM_RAW_OUT     0x02
-#define EPNUM_RAW_IN      0x82
+/*
+ * Keep Raw HID IN on a different endpoint number from Raw HID OUT.
+ * This is valid on ESP32-S2 and avoids host/controller edge cases seen with
+ * paired EP2 IN/OUT during VIA/HidSharp writes.
+ */
+#define EPNUM_RAW_IN      0x83
 
 #define TUSB_DESC_TOTAL_LEN \
     (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_HID_INOUT_DESC_LEN)
@@ -85,7 +90,7 @@ static const tusb_desc_device_t device_descriptor = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = 0x0105,
+    .bcdDevice = 0x0106,
     .iManufacturer = STRID_MANUFACTURER,
     .iProduct = STRID_PRODUCT,
     .iSerialNumber = STRID_SERIAL,
@@ -96,7 +101,7 @@ static const char *string_descriptor[] = {
     (char[]){0x09, 0x04},
     "Lumi3D",
     "PIXEL PRO",
-    "PIXELPRO",
+    "PIXELPRO-0106",
     "PIXEL PRO Keyboard",
     "PIXEL PRO VIA Raw HID",
 };
@@ -340,7 +345,7 @@ static void process_via(const uint8_t req[RAW_SIZE])
                     break;
 
                 case 0x04: { // firmware version
-                    uint32_t value = 0x00000105;
+                    uint32_t value = 0x00000106;
                     resp[2] = (value >> 24) & 0xFF;
                     resp[3] = (value >> 16) & 0xFF;
                     resp[4] = (value >> 8) & 0xFF;
