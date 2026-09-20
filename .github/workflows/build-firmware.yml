@@ -1,0 +1,55 @@
+name: Build PIXEL PRO ESP32-S2 firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - ".github/workflows/build-firmware.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.12
+
+      - name: Install TFT_eSPI
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "TFT_eSPI"
+
+      - name: Compile
+        run: |
+          mkdir -p build
+          TFT_FLAGS="-DUSER_SETUP_LOADED -DILI9486_DRIVER -DTFT_PARALLEL_8_BIT -DTFT_RD=-1 -DTFT_WR=9 -DTFT_DC=10 -DTFT_CS=11 -DTFT_RST=12 -DTFT_D0=1 -DTFT_D1=2 -DTFT_D2=3 -DTFT_D3=4 -DTFT_D4=5 -DTFT_D5=6 -DTFT_D6=7 -DTFT_D7=8 -DLOAD_GLCD=1 -DLOAD_FONT2=1 -DLOAD_FONT4=1"
+          arduino-cli compile \
+            --fqbn "esp32:esp32:lolin_s2_mini:CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default" \
+            --output-dir build \
+            --build-property "compiler.cpp.extra_flags=${TFT_FLAGS}" \
+            --build-property "compiler.c.extra_flags=${TFT_FLAGS}" \
+            --warnings all \
+            firmware/PixelPro_S2
+          echo "=== build output ==="
+          find build -maxdepth 1 -type f -printf "%f %s bytes\n" | sort
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel-pro-s2-firmware
+          path: |
+            build/*.bin
+            build/*.elf
+            build/*.map
+          if-no-files-found: error
