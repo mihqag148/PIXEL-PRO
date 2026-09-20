@@ -25,26 +25,18 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@2.0.17
 
-      - name: Install TFT_eSPI
-        run: |
-          arduino-cli lib update-index
-          arduino-cli lib install "TFT_eSPI"
-
       - name: Compile
         run: |
           mkdir -p build
-          TFT_FLAGS="-DUSER_SETUP_LOADED -DILI9486_DRIVER -DTFT_PARALLEL_8_BIT -DTFT_RD=-1 -DTFT_WR=9 -DTFT_DC=10 -DTFT_CS=11 -DTFT_RST=12 -DTFT_D0=1 -DTFT_D1=2 -DTFT_D2=3 -DTFT_D3=4 -DTFT_D4=5 -DTFT_D5=6 -DTFT_D6=7 -DTFT_D7=8 -DLOAD_GLCD=1 -DLOAD_FONT2=1 -DLOAD_FONT4=1"
           arduino-cli compile \
             --fqbn "esp32:esp32:lolin_s2_mini:CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default" \
             --output-dir build \
-            --build-property "compiler.cpp.extra_flags=${TFT_FLAGS}" \
-            --build-property "compiler.c.extra_flags=${TFT_FLAGS}" \
             --warnings all \
             firmware/PixelPro_S2
           ESPTOOL=$(find "$HOME/.arduino15/packages/esp32/tools/esptool_py" -name esptool.py | head -n 1)
           BOOTAPP="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.17/tools/partitions/boot_app0.bin"
           python "$ESPTOOL" --chip esp32s2 merge_bin \
-            -o build/PIXEL_PRO_S2_v0.1.0_merged.bin \
+            -o build/PIXEL_PRO_S2_v0.1.1_merged.bin \
             0x1000 build/PixelPro_S2.ino.bootloader.bin \
             0x8000 build/PixelPro_S2.ino.partitions.bin \
             0xE000 "$BOOTAPP" \
