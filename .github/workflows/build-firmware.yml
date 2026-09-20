@@ -41,6 +41,14 @@ jobs:
             --build-property "compiler.c.extra_flags=${TFT_FLAGS}" \
             --warnings all \
             firmware/PixelPro_S2
+          ESPTOOL=$(find "$HOME/.arduino15/packages/esp32/tools/esptool_py" -name esptool.py | head -n 1)
+          BOOTAPP="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.17/tools/partitions/boot_app0.bin"
+          python "$ESPTOOL" --chip esp32s2 merge_bin \
+            -o build/PIXEL_PRO_S2_v0.1.0_merged.bin \
+            0x1000 build/PixelPro_S2.ino.bootloader.bin \
+            0x8000 build/PixelPro_S2.ino.partitions.bin \
+            0xE000 "$BOOTAPP" \
+            0x10000 build/PixelPro_S2.ino.bin
           echo "=== build output ==="
           find build -maxdepth 1 -type f -printf "%f %s bytes\n" | sort
 
