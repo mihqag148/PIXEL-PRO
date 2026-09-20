@@ -31,6 +31,7 @@ for extra in (
     idf_path / "components/fatfs/vfs",
     idf_path / "components/fatfs/src",
     idf_path / "components/wear_levelling/include",
+    idf_path / "components/spi_flash/include",
 ):
     selected.append("-I" + str(extra))
 
