@@ -95,7 +95,7 @@ RGB/GIF upload đầy đủ sẽ thêm sau khi xác nhận đúng phần cứng 
 
 Firmware chạy bình thường là thiết bị HID composite (Keyboard + VIA Raw HID), vì vậy **không cần và không hiện COM**. COM chỉ xuất hiện khi ESP32-S2 vào ROM BOOT để bootstrap/flash. Để vào ROM BOOT: giữ BOOT, nhấn RESET một lần, thả RESET rồi thả BOOT.
 
-Từ v0.1.6, Raw HID IN dùng endpoint riêng với Raw HID OUT và USB serial đổi sang `PIXELPRO-0106` để Windows tạo device instance mới thay vì giữ descriptor cũ. VIA vẫn dùng VID/PID `303A:4009`, Usage Page `0xFF60`, Usage `0x61`, report 32 byte.
+Từ v0.1.6, Raw HID IN dùng endpoint riêng với Raw HID OUT và USB serial đổi sang `PIXELPRO-0106` để Windows tạo device instance mới thay vì giữ descriptor cũ. VIA vẫn dùng VID/PID `303A:4009`, Usage Page `0xFF60`, Usage `0x61`, report 32 byte. File `via/pixel-pro-s2.json` là VIA v3 definition và không dùng field legacy `lighting`.
 
 ## Build / nạp
 
