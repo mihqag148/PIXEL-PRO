@@ -110,9 +110,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          BUILD=dist/firmware
-
-          if gh release view "$FW_TAG" >/dev/null 2>&1; then
+          # upload-artifact uses firmware/idf as the artifact root because\n          # the artifact also includes sdkconfig. Therefore release binaries\n          # are restored under dist/firmware/build/.\n          BUILD=dist/firmware/build\n\n          if gh release view "$FW_TAG" >/dev/null 2>&1; then
             echo "Release $FW_TAG already exists; preserved. Bump the firmware version for a new release."
           else
             gh release create "$FW_TAG"               --target "${GITHUB_SHA}"               --title "PIXEL PRO $FW_VERSION"               --notes "PIXEL PRO firmware $FW_VERSION. Includes one-time merged bootstrap image and in-app OTA image."               --latest               "$BUILD/PIXEL_PRO_merged.bin"               "$BUILD/PIXEL_PRO_OTA.bin"               "$BUILD/firmware-manifest.json"
