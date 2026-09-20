@@ -82,7 +82,7 @@ Firmware hỗ trợ 5 layer/profile, đọc/ghi keycode, bulk keymap buffer, enc
 App Windows có source và release riêng tại [Lumipad-APP](https://github.com/mihqag148/Lumipad-APP).
 Repo này chỉ chứa firmware/hardware và VIA definition. JSON VIA được copy vào app khi đóng gói; không cần checkout repo app để build firmware.
 
-Mã QMK Raw HID tham khảo trong qmk/lumi_raw_hid được chuyển từ repo RYNOR ONE; đây là firmware-side adapter, không phải app desktop và không tham gia ESP-IDF build.
+Mã QMK Raw HID tham khảo trong `qmk/lumi_raw_hid` được copy từ repo RYNOR ONE; đây là firmware-side adapter, không phải app desktop và không tham gia ESP-IDF build.
 
 
 HELLO: LUMIPAD|3|FW=0.1.0|CAPS=PROFILE,ACTION,PCMON,PANEL,MEM,SAVERSTATE
