@@ -110,7 +110,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          BUILD=dist/firmware
+          # upload-artifact uses firmware/idf as the artifact root because
+          # the artifact also includes sdkconfig. Therefore release binaries
+          # are restored under dist/firmware/build/.
+          BUILD=dist/firmware/build
 
           if gh release view "$FW_TAG" >/dev/null 2>&1; then
             echo "Release $FW_TAG already exists; preserved. Bump the firmware version for a new release."
