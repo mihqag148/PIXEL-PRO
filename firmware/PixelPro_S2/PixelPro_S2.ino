@@ -14,13 +14,14 @@
 #include "esp32-hal-tinyusb.h"
 #include "tusb.h"
 
-#define PIXEL_FW_VERSION "0.1.1"
+#define PIXEL_FW_VERSION "0.1.2"
 #define PIXEL_USB_VID 0x303A
 #define PIXEL_USB_PID 0x4009
 
 static constexpr uint8_t REPORT_ID_KEYBOARD = 1;
 static constexpr size_t RAW_REPORT_SIZE = 32;
 static constexpr uint8_t BOOT_BUTTON = 0; // D0 / BOOT on ESP32-S2 Mini
+static constexpr uint8_t STATUS_LED = 15;  // onboard LED on LOLIN S2 Mini
 
 struct RawPacket {
   uint8_t data[RAW_REPORT_SIZE];
@@ -343,7 +344,7 @@ static bool initUsb() {
   cfg.product_name = "PIXEL PRO";
   cfg.manufacturer_name = "Lumi3D";
   cfg.serial_number = "PIXELPRO";
-  cfg.fw_version = 0x0101;
+  cfg.fw_version = 0x0102;
   cfg.usb_version = 0x0200;
   cfg.usb_class = 0;
   cfg.usb_subclass = 0;
@@ -358,6 +359,8 @@ static bool initUsb() {
 
 void setup() {
   pinMode(BOOT_BUTTON, INPUT_PULLUP);
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, HIGH);
   initUsb();
 }
 
@@ -370,5 +373,17 @@ void loop() {
   }
 
   scanBootButton();
+
+  // Slow heartbeat when firmware is alive; faster after USB enumeration.
+  static uint32_t lastBlink = 0;
+  static bool ledState = false;
+  const uint32_t interval = tud_mounted() ? 250 : 1000;
+  const uint32_t now = millis();
+  if (now - lastBlink >= interval) {
+    lastBlink = now;
+    ledState = !ledState;
+    digitalWrite(STATUS_LED, ledState ? HIGH : LOW);
+  }
+
   delay(1);
 }
