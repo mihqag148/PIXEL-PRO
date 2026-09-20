@@ -1,4 +1,4 @@
-# PIXEL PRO – Lumi Macropad (ESP32-S2 Mini)
+# PIXEL PRO — firmware / hardware (ESP32-S2 Mini)
 
 Firmware thử phần cứng đầu tiên cho ESP32-S2 Mini + ILI9486 3.5 inch 480x320 8-bit parallel + 8 phím + EC11.
 
@@ -77,7 +77,13 @@ VIA definition nằm tại via/pixel-pro-s2.json. Mở VIA, bật Design tab, Lo
 
 Firmware hỗ trợ 5 layer/profile, đọc/ghi keycode, bulk keymap buffer, encoder CW/CCW, reset dynamic keymap và jump bootloader. Keymap lưu NVS nên tắt nguồn không mất.
 
-## Lumi Macropad App
+## LumiPad app integration
+
+App Windows có source và release riêng tại [Lumipad-APP](https://github.com/mihqag148/Lumipad-APP).
+Repo này chỉ chứa firmware/hardware và VIA definition. JSON VIA được copy vào app khi đóng gói; không cần checkout repo app để build firmware.
+
+Mã QMK Raw HID tham khảo trong qmk/lumi_raw_hid được chuyển từ repo RYNOR ONE; đây là firmware-side adapter, không phải app desktop và không tham gia ESP-IDF build.
+
 
 HELLO: LUMIPAD|3|FW=0.1.0|CAPS=PROFILE,ACTION,PCMON,PANEL,MEM,SAVERSTATE
 
@@ -87,9 +93,9 @@ RGB/GIF upload đầy đủ sẽ thêm sau khi xác nhận đúng phần cứng 
 
 ## Build / nạp
 
-GitHub Actions build cho board esp32:esp32:lolin_s2_mini bằng Arduino-ESP32 3.3.12.
+GitHub Actions build firmware hiện hành trong `firmware/idf` bằng ESP-IDF v5.5.1, target `esp32s2`. Push main, pull request và chạy thủ công đều kiểm tra build; pull request không phát hành release.
 
-Artifact pixel-pro-s2-firmware chứa file bin. Nếu build tạo file merged.bin thì nạp merged.bin tại offset 0x0. Hoặc mở firmware/PixelPro_S2/PixelPro_S2.ino bằng Arduino IDE và Upload.
+Artifact `pixel-pro-v0.1.5` chứa firmware. `PIXEL_PRO_merged.bin` dùng bootstrap tại offset 0x0; `PIXEL_PRO_OTA.bin` và `firmware-manifest.json` dùng cập nhật trong app. `firmware/PixelPro_S2/PixelPro_S2.ino` là bản Arduino bring-up cũ, không phải target của workflow hiện hành.
 
 ## Lưu ý
 

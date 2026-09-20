@@ -6,6 +6,10 @@ on:
     paths:
       - "firmware/idf/**"
       - ".github/workflows/build-firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/idf/**"
+      - ".github/workflows/build-firmware.yml"
   workflow_dispatch:
 
 permissions:
@@ -78,6 +82,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish PIXEL PRO firmware release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
