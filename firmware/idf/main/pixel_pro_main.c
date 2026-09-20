@@ -1,5 +1,5 @@
 /*
- * PIXEL PRO v0.1.6
+ * PIXEL PRO v0.1.7
  * ESP32-S2 Mini / ESP-IDF + TinyUSB
  *
  * USB interface 0: standard HID keyboard
@@ -37,7 +37,7 @@
 #include "class/hid/hid_device.h"
 #include "mbedtls/base64.h"
 
-#define FW_VERSION "0.1.6"
+#define FW_VERSION "0.1.7"
 
 #define USB_VID 0x303A
 #define USB_PID 0x4009
@@ -46,6 +46,10 @@
 #define LED_GPIO  GPIO_NUM_15
 
 #define RAW_SIZE 32
+#define LUMI_MAGIC0 'L'
+#define LUMI_MAGIC1 'Q'
+#define LUMI_FRAME_VERSION 1
+
 #define VIA_LAYERS 5
 #define MATRIX_ROWS 2
 #define MATRIX_COLS 4
@@ -90,7 +94,7 @@ static const tusb_desc_device_t device_descriptor = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = 0x0106,
+    .bcdDevice = 0x0107,
     .iManufacturer = STRID_MANUFACTURER,
     .iProduct = STRID_PRODUCT,
     .iSerialNumber = STRID_SERIAL,
@@ -101,7 +105,7 @@ static const char *string_descriptor[] = {
     (char[]){0x09, 0x04},
     "Lumi3D",
     "PIXEL PRO",
-    "PIXELPRO-0106",
+    "PIXELPRO-0107",
     "PIXEL PRO Keyboard",
     "PIXEL PRO VIA Raw HID",
 };
@@ -199,6 +203,11 @@ typedef struct {
 } raw_packet_t;
 
 static QueueHandle_t raw_queue;
+static QueueHandle_t raw_tx_queue;
+
+static void build_via_response(
+    const uint8_t req[RAW_SIZE],
+    uint8_t resp[RAW_SIZE]);
 
 void tud_hid_set_report_cb(
     uint8_t instance,
@@ -210,7 +219,33 @@ void tud_hid_set_report_cb(
     (void)report_id;
     (void)report_type;
 
-    if (instance != ITF_NUM_RAW || buffer == NULL || bufsize < RAW_SIZE || raw_queue == NULL) {
+    if (instance != ITF_NUM_RAW ||
+        buffer == NULL ||
+        bufsize < RAW_SIZE ||
+        raw_queue == NULL ||
+        raw_tx_queue == NULL) {
+        return;
+    }
+
+    /*
+     * VIA/WebHID expects a very fast request/response turnaround.
+     * Reply to VIA packets directly from TinyUSB's OUT callback, matching
+     * TinyUSB's official generic HID IN/OUT example. Lumi's longer protocol
+     * remains queued so OTA/NVS work never blocks the USB callback.
+     */
+    if (buffer[0] != LUMI_MAGIC0 ||
+        buffer[1] != LUMI_MAGIC1 ||
+        buffer[2] != LUMI_FRAME_VERSION) {
+        raw_packet_t response;
+        build_via_response(buffer, response.data);
+
+        if (!tud_hid_n_report(
+                ITF_NUM_RAW,
+                0,
+                response.data,
+                RAW_SIZE)) {
+            xQueueSend(raw_tx_queue, &response, 0);
+        }
         return;
     }
 
@@ -232,6 +267,7 @@ static bool raw_send(const uint8_t data[RAW_SIZE])
 static uint16_t keymap[VIA_LAYERS][MATRIX_ROWS][MATRIX_COLS];
 static nvs_handle_t via_nvs;
 static bool via_nvs_opened;
+static volatile bool via_save_pending;
 
 static void keymap_defaults(void)
 {
@@ -311,9 +347,10 @@ static void set_keymap_byte_at(uint16_t offset, uint8_t value)
 /* Current QMK VIA protocol version */
 #define VIA_PROTOCOL_VERSION 0x000D
 
-static void process_via(const uint8_t req[RAW_SIZE])
+static void build_via_response(
+    const uint8_t req[RAW_SIZE],
+    uint8_t resp[RAW_SIZE])
 {
-    uint8_t resp[RAW_SIZE];
     memcpy(resp, req, RAW_SIZE);
 
     switch (req[0]) {
@@ -345,7 +382,7 @@ static void process_via(const uint8_t req[RAW_SIZE])
                     break;
 
                 case 0x04: { // firmware version
-                    uint32_t value = 0x00000106;
+                    uint32_t value = 0x00000107;
                     resp[2] = (value >> 24) & 0xFF;
                     resp[3] = (value >> 16) & 0xFF;
                     resp[4] = (value >> 8) & 0xFF;
@@ -396,7 +433,7 @@ static void process_via(const uint8_t req[RAW_SIZE])
 
             if (layer < VIA_LAYERS && row < MATRIX_ROWS && col < MATRIX_COLS) {
                 keymap[layer][row][col] = ((uint16_t)req[4] << 8) | req[5];
-                keymap_save();
+                via_save_pending = true;
             }
             break;
         }
@@ -404,7 +441,7 @@ static void process_via(const uint8_t req[RAW_SIZE])
         case 0x06: // dynamic_keymap_reset
         case 0x0A: // EEPROM reset
             keymap_defaults();
-            keymap_save();
+            via_save_pending = true;
             break;
 
         case 0x0C: // macro count
@@ -444,7 +481,7 @@ static void process_via(const uint8_t req[RAW_SIZE])
             for (uint8_t i = 0; i < size; ++i) {
                 set_keymap_byte_at(offset + i, req[4 + i]);
             }
-            keymap_save();
+            via_save_pending = true;
             break;
         }
 
@@ -453,17 +490,10 @@ static void process_via(const uint8_t req[RAW_SIZE])
             break;
     }
 
-    for (int retry = 0; retry < 50; ++retry) {
-        if (raw_send(resp)) return;
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
 }
 
 /* ---------------- Lumi framing on the same Raw HID ---------------- */
 
-#define LUMI_MAGIC0 'L'
-#define LUMI_MAGIC1 'Q'
-#define LUMI_FRAME_VERSION 1
 #define LUMI_FLAG_START 0x01
 #define LUMI_FLAG_END 0x02
 #define LUMI_FLAG_RESPONSE 0x04
@@ -845,7 +875,13 @@ static void process_raw_packet(const uint8_t data[RAW_SIZE])
         data[2] == LUMI_FRAME_VERSION) {
         process_lumi_frame(data);
     } else {
-        process_via(data);
+        uint8_t resp[RAW_SIZE];
+        build_via_response(data, resp);
+
+        for (int retry = 0; retry < 50; ++retry) {
+            if (raw_send(resp)) break;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 }
 
@@ -897,10 +933,22 @@ static void usb_task(void *arg)
 {
     (void)arg;
     raw_packet_t packet;
+    raw_packet_t tx;
 
     while (1) {
-        if (xQueueReceive(raw_queue, &packet, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (xQueueReceive(raw_tx_queue, &tx, 0) == pdTRUE) {
+            if (!raw_send(tx.data)) {
+                xQueueSendToFront(raw_tx_queue, &tx, 0);
+            }
+        }
+
+        if (xQueueReceive(raw_queue, &packet, pdMS_TO_TICKS(5)) == pdTRUE) {
             process_raw_packet(packet.data);
+        }
+
+        if (via_save_pending) {
+            via_save_pending = false;
+            keymap_save();
         }
     }
 }
@@ -946,7 +994,9 @@ void app_main(void)
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 
     raw_queue = xQueueCreate(16, sizeof(raw_packet_t));
-    ESP_ERROR_CHECK(raw_queue ? ESP_OK : ESP_ERR_NO_MEM);
+    raw_tx_queue = xQueueCreate(16, sizeof(raw_packet_t));
+    ESP_ERROR_CHECK(
+        (raw_queue && raw_tx_queue) ? ESP_OK : ESP_ERR_NO_MEM);
 
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device = &device_descriptor;
