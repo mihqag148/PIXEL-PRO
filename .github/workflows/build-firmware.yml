@@ -7,13 +7,11 @@ on:
       - "firmware/idf/**"
       - ".github/workflows/build-firmware.yml"
   pull_request:
-    paths:
-      - "firmware/idf/**"
-      - ".github/workflows/build-firmware.yml"
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FW_VERSION: "0.1.5"
@@ -81,18 +79,41 @@ jobs:
             firmware/idf/sdkconfig
           if-no-files-found: error
 
+  pr-checks:
+    name: PR checks
+    needs: build
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require successful build
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pixel-pro-v0.1.5
+          path: dist/firmware
       - name: Publish PIXEL PRO firmware release
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          BUILD=firmware/idf/build
+          BUILD=dist/firmware
 
           if gh release view "$FW_TAG" >/dev/null 2>&1; then
-            gh release upload "$FW_TAG"               "$BUILD/PIXEL_PRO_merged.bin"               "$BUILD/PIXEL_PRO_OTA.bin"               "$BUILD/firmware-manifest.json"               --clobber
-            gh release edit "$FW_TAG"               --title "PIXEL PRO $FW_VERSION"               --notes "PIXEL PRO firmware $FW_VERSION. Includes one-time merged bootstrap image and in-app OTA image."               --latest
+            echo "Release $FW_TAG already exists; preserved. Bump the firmware version for a new release."
           else
             gh release create "$FW_TAG"               --target "${GITHUB_SHA}"               --title "PIXEL PRO $FW_VERSION"               --notes "PIXEL PRO firmware $FW_VERSION. Includes one-time merged bootstrap image and in-app OTA image."               --latest               "$BUILD/PIXEL_PRO_merged.bin"               "$BUILD/PIXEL_PRO_OTA.bin"               "$BUILD/firmware-manifest.json"
           fi
