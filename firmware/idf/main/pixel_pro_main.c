@@ -1,5 +1,5 @@
 /*
- * PIXEL PRO v0.1.4
+ * PIXEL PRO v0.1.5
  * ESP32-S2 Mini / ESP-IDF + TinyUSB
  *
  * USB interface 0: standard HID keyboard
@@ -15,10 +15,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 
@@ -31,8 +34,9 @@
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 #include "class/hid/hid_device.h"
+#include "mbedtls/base64.h"
 
-#define FW_VERSION "0.1.4"
+#define FW_VERSION "0.1.5"
 
 #define USB_VID 0x303A
 #define USB_PID 0x4009
@@ -80,7 +84,7 @@ static const tusb_desc_device_t device_descriptor = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = 0x0104,
+    .bcdDevice = 0x0105,
     .iManufacturer = STRID_MANUFACTURER,
     .iProduct = STRID_PRODUCT,
     .iSerialNumber = STRID_SERIAL,
@@ -335,7 +339,7 @@ static void process_via(const uint8_t req[RAW_SIZE])
                     break;
 
                 case 0x04: { // firmware version
-                    uint32_t value = 0x00000104;
+                    uint32_t value = 0x00000105;
                     resp[2] = (value >> 24) & 0xFF;
                     resp[3] = (value >> 16) & 0xFF;
                     resp[4] = (value >> 8) & 0xFF;
@@ -499,10 +503,248 @@ static void lumi_send_response(uint8_t sequence, const char *text)
     }
 }
 
+
+/* ---------------- Firmware OTA over Lumi Raw HID ---------------- */
+
+static esp_ota_handle_t fw_ota_handle;
+static const esp_partition_t *fw_ota_partition;
+static size_t fw_ota_expected;
+static size_t fw_ota_written;
+static bool fw_ota_active;
+
+static void fw_ota_reset_state(bool abort_transfer)
+{
+    if (fw_ota_active && abort_transfer) {
+        esp_ota_abort(fw_ota_handle);
+    }
+
+    fw_ota_handle = 0;
+    fw_ota_partition = NULL;
+    fw_ota_expected = 0;
+    fw_ota_written = 0;
+    fw_ota_active = false;
+}
+
+static void delayed_restart_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(450));
+    esp_restart();
+}
+
+static void fw_ota_error(uint8_t sequence, const char *code)
+{
+    char response[96];
+    snprintf(
+        response,
+        sizeof(response),
+        "FWERR|%s|%u|%u",
+        code,
+        (unsigned)fw_ota_written,
+        (unsigned)fw_ota_expected);
+    lumi_send_response(sequence, response);
+}
+
+static void fw_ota_begin_command(uint8_t sequence, const char *command)
+{
+    const char *size_text = command + strlen("FWBEGIN|");
+    char *end = NULL;
+    unsigned long requested = strtoul(size_text, &end, 10);
+
+    if (end == size_text || *end != '\0' || requested == 0) {
+        fw_ota_error(sequence, "SIZE");
+        return;
+    }
+
+    if (fw_ota_active) {
+        fw_ota_reset_state(true);
+    }
+
+    const esp_partition_t *partition =
+        esp_ota_get_next_update_partition(NULL);
+
+    if (partition == NULL || requested > partition->size) {
+        fw_ota_error(sequence, "PARTITION");
+        return;
+    }
+
+    esp_ota_handle_t handle = 0;
+    esp_err_t err =
+        esp_ota_begin(partition, (size_t)requested, &handle);
+
+    if (err != ESP_OK) {
+        fw_ota_error(sequence, "BEGIN");
+        return;
+    }
+
+    fw_ota_handle = handle;
+    fw_ota_partition = partition;
+    fw_ota_expected = (size_t)requested;
+    fw_ota_written = 0;
+    fw_ota_active = true;
+
+    char response[96];
+    snprintf(
+        response,
+        sizeof(response),
+        "FWREADY|%u|%s",
+        (unsigned)fw_ota_expected,
+        partition->label);
+    lumi_send_response(sequence, response);
+}
+
+static void fw_ota_chunk_command(uint8_t sequence, const char *command)
+{
+    if (!fw_ota_active) {
+        fw_ota_error(sequence, "NOSESSION");
+        return;
+    }
+
+    const char *offset_text = command + strlen("FWCHUNK|");
+    char *end = NULL;
+    unsigned long offset = strtoul(offset_text, &end, 10);
+
+    if (end == offset_text || *end != '|') {
+        fw_ota_error(sequence, "OFFSET");
+        return;
+    }
+
+    const char *encoded = end + 1;
+    size_t encoded_len = strlen(encoded);
+
+    if (encoded_len == 0 || encoded_len > 320) {
+        fw_ota_error(sequence, "CHUNK");
+        return;
+    }
+
+    uint8_t decoded[192];
+    size_t decoded_len = 0;
+
+    int decode_result =
+        mbedtls_base64_decode(
+            decoded,
+            sizeof(decoded),
+            &decoded_len,
+            (const unsigned char *)encoded,
+            encoded_len);
+
+    if (decode_result != 0 || decoded_len == 0) {
+        fw_ota_error(sequence, "BASE64");
+        return;
+    }
+
+    /*
+     * If the host lost an ACK and retries the last chunk, simply return the
+     * current committed position instead of writing duplicate bytes.
+     */
+    if ((size_t)offset < fw_ota_written) {
+        char response[64];
+        snprintf(
+            response,
+            sizeof(response),
+            "FWACK|%u",
+            (unsigned)fw_ota_written);
+        lumi_send_response(sequence, response);
+        return;
+    }
+
+    if ((size_t)offset != fw_ota_written ||
+        fw_ota_written + decoded_len > fw_ota_expected) {
+        fw_ota_error(sequence, "ORDER");
+        return;
+    }
+
+    esp_err_t err =
+        esp_ota_write(
+            fw_ota_handle,
+            decoded,
+            decoded_len);
+
+    if (err != ESP_OK) {
+        fw_ota_error(sequence, "WRITE");
+        return;
+    }
+
+    fw_ota_written += decoded_len;
+
+    char response[64];
+    snprintf(
+        response,
+        sizeof(response),
+        "FWACK|%u",
+        (unsigned)fw_ota_written);
+    lumi_send_response(sequence, response);
+}
+
+static void fw_ota_status_command(uint8_t sequence)
+{
+    char response[80];
+    snprintf(
+        response,
+        sizeof(response),
+        "FWSTAT|%u|%u|%u",
+        fw_ota_active ? 1U : 0U,
+        (unsigned)fw_ota_written,
+        (unsigned)fw_ota_expected);
+    lumi_send_response(sequence, response);
+}
+
+static void fw_ota_end_command(uint8_t sequence)
+{
+    if (!fw_ota_active) {
+        fw_ota_error(sequence, "NOSESSION");
+        return;
+    }
+
+    if (fw_ota_written != fw_ota_expected) {
+        fw_ota_error(sequence, "INCOMPLETE");
+        return;
+    }
+
+    esp_err_t err = esp_ota_end(fw_ota_handle);
+    if (err != ESP_OK) {
+        fw_ota_reset_state(false);
+        fw_ota_error(sequence, "VERIFY");
+        return;
+    }
+
+    err = esp_ota_set_boot_partition(fw_ota_partition);
+    if (err != ESP_OK) {
+        fw_ota_reset_state(false);
+        fw_ota_error(sequence, "BOOT");
+        return;
+    }
+
+    size_t completed = fw_ota_written;
+    fw_ota_reset_state(false);
+
+    char response[64];
+    snprintf(
+        response,
+        sizeof(response),
+        "FWDONE|%u",
+        (unsigned)completed);
+    lumi_send_response(sequence, response);
+
+    xTaskCreate(
+        delayed_restart_task,
+        "fw_restart",
+        2048,
+        NULL,
+        12,
+        NULL);
+}
+
+static void fw_ota_abort_command(uint8_t sequence)
+{
+    fw_ota_reset_state(true);
+    lumi_send_response(sequence, "FWABORTED");
+}
+
 static void process_lumi_command(uint8_t sequence, const char *command)
 {
     if (strcmp(command, "HELLO") == 0) {
-        lumi_send_response(sequence, "LUMIPAD|3|FW=" FW_VERSION "|CAPS=MEM");
+        lumi_send_response(sequence, "LUMIPAD|3|FW=" FW_VERSION "|CAPS=MEM,FWOTA");
         return;
     }
 
@@ -512,6 +754,43 @@ static void process_lumi_command(uint8_t sequence, const char *command)
          * response; richer memory statistics can be restored later.
          */
         lumi_send_response(sequence, "MEM|0|4194304|0|327680");
+        return;
+    }
+
+    if (strncmp(command, "FWBEGIN|", 8) == 0) {
+        fw_ota_begin_command(sequence, command);
+        return;
+    }
+
+    if (strncmp(command, "FWCHUNK|", 8) == 0) {
+        fw_ota_chunk_command(sequence, command);
+        return;
+    }
+
+    if (strcmp(command, "FWSTAT") == 0) {
+        fw_ota_status_command(sequence);
+        return;
+    }
+
+    if (strcmp(command, "FWEND") == 0) {
+        fw_ota_end_command(sequence);
+        return;
+    }
+
+    if (strcmp(command, "FWABORT") == 0) {
+        fw_ota_abort_command(sequence);
+        return;
+    }
+
+    if (strcmp(command, "SYS|RESTART") == 0) {
+        lumi_send_response(sequence, "OK|RESTART");
+        xTaskCreate(
+            delayed_restart_task,
+            "sys_restart",
+            2048,
+            NULL,
+            12,
+            NULL);
         return;
     }
 }
