@@ -29,6 +29,7 @@ while i < len(parts):
 idf_path = Path("/opt/esp/idf")
 for extra in (
     idf_path / "components/fatfs/vfs",
+    idf_path / "components/fatfs/src",
     idf_path / "components/wear_levelling/include",
 ):
     selected.append("-I" + str(extra))
