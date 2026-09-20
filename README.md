@@ -73,7 +73,7 @@ Lumi protocol dùng cùng Raw HID với magic LQ, tương thích QmkRawHidLink t
 
 VID dev: 0x303A. PID dev: 0x4009.
 
-VIA definition nằm tại via/pixel-pro-s2.json. Mở VIA, bật Design tab, Load Draft Definition rồi chọn JSON.
+VIA V2 definition nằm tại `via/pixel-pro-s2.json`. Trong VIA > Design, bật `Use V2 definitions (deprecated)` rồi Load Draft Definition. Nếu muốn dùng V3, tắt công tắc V2 và dùng `via/pixel-pro-s2-v3.json`.
 
 Firmware hỗ trợ 5 layer/profile, đọc/ghi keycode, bulk keymap buffer, encoder CW/CCW, reset dynamic keymap và jump bootloader. Keymap lưu NVS nên tắt nguồn không mất.
 
@@ -95,13 +95,13 @@ RGB/GIF upload đầy đủ sẽ thêm sau khi xác nhận đúng phần cứng 
 
 Firmware chạy bình thường là thiết bị HID composite (Keyboard + VIA Raw HID), vì vậy **không cần và không hiện COM**. COM chỉ xuất hiện khi ESP32-S2 vào ROM BOOT để bootstrap/flash. Để vào ROM BOOT: giữ BOOT, nhấn RESET một lần, thả RESET rồi thả BOOT.
 
-Từ v0.1.6, Raw HID IN dùng endpoint riêng với Raw HID OUT và USB serial đổi sang `PIXELPRO-0106` để Windows tạo device instance mới thay vì giữ descriptor cũ. VIA vẫn dùng VID/PID `303A:4009`, Usage Page `0xFF60`, Usage `0x61`, report 32 byte. File `via/pixel-pro-s2.json` là VIA v3 definition và không dùng field legacy `lighting`.
+Từ v0.1.7, USB serial là `PIXELPRO-0107`. VIA Raw HID vẫn dùng VID/PID `303A:4009`, Usage Page `0xFF60`, Usage `0x61`, report 32 byte. Request VIA được trả lời trực tiếp ngay trong callback TinyUSB; Lumi/OTA vẫn xử lý qua task riêng. `via/pixel-pro-s2.json` là V2 definition (`lighting: none`), còn `via/pixel-pro-s2-v3.json` là V3 definition.
 
 ## Build / nạp
 
 GitHub Actions build firmware hiện hành trong `firmware/idf` bằng ESP-IDF v5.5.1, target `esp32s2`. Push main, pull request và chạy thủ công đều kiểm tra build; pull request không phát hành release.
 
-Artifact `pixel-pro-v0.1.6` chứa firmware. `PIXEL_PRO_merged.bin` dùng bootstrap tại offset 0x0; `PIXEL_PRO_OTA.bin` và `firmware-manifest.json` dùng cập nhật trong app. `firmware/PixelPro_S2/PixelPro_S2.ino` là bản Arduino bring-up cũ, không phải target của workflow hiện hành.
+Artifact `pixel-pro-v0.1.7` chứa firmware. `PIXEL_PRO_merged.bin` dùng bootstrap tại offset 0x0; `PIXEL_PRO_OTA.bin` và `firmware-manifest.json` dùng cập nhật trong app. `firmware/PixelPro_S2/PixelPro_S2.ino` là bản Arduino bring-up cũ, không phải target của workflow hiện hành.
 
 ## Lưu ý
 
