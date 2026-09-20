@@ -14,8 +14,8 @@ permissions:
   contents: read
 
 env:
-  FW_VERSION: "0.1.5"
-  FW_TAG: "v0.1.5"
+  FW_VERSION: "0.1.6"
+  FW_TAG: "v0.1.6"
 
 jobs:
   build:
@@ -31,7 +31,7 @@ jobs:
           esp_idf_version: v5.5.1
           target: esp32s2
           path: firmware/idf
-          command: idf.py build && idf.py merge-bin -o PIXEL_PRO_v0.1.5_merged.bin -f raw
+          command: idf.py build && idf.py merge-bin -o PIXEL_PRO_v0.1.6_merged.bin -f raw
 
       - name: Prepare release files
         shell: bash
@@ -40,7 +40,7 @@ jobs:
           BUILD=firmware/idf/build
           sudo chown -R "$(id -u):$(id -g)" "$BUILD"
           cp "$BUILD/pixel_pro.bin" "$BUILD/PIXEL_PRO_OTA.bin"
-          cp "$BUILD/PIXEL_PRO_v0.1.5_merged.bin" "$BUILD/PIXEL_PRO_merged.bin"
+          cp "$BUILD/PIXEL_PRO_v0.1.6_merged.bin" "$BUILD/PIXEL_PRO_merged.bin"
 
           OTA_SHA=$(sha256sum "$BUILD/PIXEL_PRO_OTA.bin" | awk '{print $1}')
           MERGED_SHA=$(sha256sum "$BUILD/PIXEL_PRO_merged.bin" | awk '{print $1}')
@@ -57,7 +57,7 @@ jobs:
             "mergedAsset": "PIXEL_PRO_merged.bin",
             "mergedSize": $MERGED_SIZE,
             "mergedSha256": "$MERGED_SHA",
-            "requiresBootstrapVersion": "0.1.5"
+            "requiresBootstrapVersion": "0.1.6"
           }
           EOF
 
@@ -68,9 +68,9 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pixel-pro-v0.1.5
+          name: pixel-pro-v0.1.6
           path: |
-            firmware/idf/build/PIXEL_PRO_v0.1.5_merged.bin
+            firmware/idf/build/PIXEL_PRO_v0.1.6_merged.bin
             firmware/idf/build/PIXEL_PRO_merged.bin
             firmware/idf/build/PIXEL_PRO_OTA.bin
             firmware/idf/build/firmware-manifest.json
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: pixel-pro-v0.1.5
+          name: pixel-pro-v0.1.6
           path: dist/firmware
       - name: Publish PIXEL PRO firmware release
         shell: bash
