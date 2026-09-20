@@ -8,6 +8,13 @@ on:
       - ".github/workflows/build-firmware.yml"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+env:
+  FW_VERSION: "0.1.5"
+  FW_TAG: "v0.1.5"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -22,7 +29,34 @@ jobs:
           esp_idf_version: v5.5.1
           target: esp32s2
           path: firmware/idf
-          command: idf.py build && idf.py merge-bin -o PIXEL_PRO_v0.1.4_merged.bin -f raw
+          command: idf.py build && idf.py merge-bin -o PIXEL_PRO_v0.1.5_merged.bin -f raw
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD=firmware/idf/build
+          cp "$BUILD/pixel_pro.bin" "$BUILD/PIXEL_PRO_OTA.bin"
+          cp "$BUILD/PIXEL_PRO_v0.1.5_merged.bin" "$BUILD/PIXEL_PRO_merged.bin"
+
+          OTA_SHA=$(sha256sum "$BUILD/PIXEL_PRO_OTA.bin" | awk '{print $1}')
+          MERGED_SHA=$(sha256sum "$BUILD/PIXEL_PRO_merged.bin" | awk '{print $1}')
+          OTA_SIZE=$(stat -c%s "$BUILD/PIXEL_PRO_OTA.bin")
+          MERGED_SIZE=$(stat -c%s "$BUILD/PIXEL_PRO_merged.bin")
+
+          cat > "$BUILD/firmware-manifest.json" <<EOF
+          {
+            "product": "PIXEL PRO",
+            "version": "$FW_VERSION",
+            "otaAsset": "PIXEL_PRO_OTA.bin",
+            "otaSize": $OTA_SIZE,
+            "otaSha256": "$OTA_SHA",
+            "mergedAsset": "PIXEL_PRO_merged.bin",
+            "mergedSize": $MERGED_SIZE,
+            "mergedSha256": "$MERGED_SHA",
+            "requiresBootstrapVersion": "0.1.5"
+          }
+          EOF
 
       - name: Show build output
         run: |
@@ -31,11 +65,28 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pixel-pro-v0.1.4
+          name: pixel-pro-v0.1.5
           path: |
-            firmware/idf/build/PIXEL_PRO_v0.1.4_merged.bin
-            firmware/idf/build/*.bin
+            firmware/idf/build/PIXEL_PRO_v0.1.5_merged.bin
+            firmware/idf/build/PIXEL_PRO_merged.bin
+            firmware/idf/build/PIXEL_PRO_OTA.bin
+            firmware/idf/build/firmware-manifest.json
             firmware/idf/build/*.elf
             firmware/idf/build/*.map
             firmware/idf/sdkconfig
           if-no-files-found: error
+
+      - name: Publish PIXEL PRO firmware release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BUILD=firmware/idf/build
+
+          if gh release view "$FW_TAG" >/dev/null 2>&1; then
+            gh release upload "$FW_TAG"               "$BUILD/PIXEL_PRO_merged.bin"               "$BUILD/PIXEL_PRO_OTA.bin"               "$BUILD/firmware-manifest.json"               --clobber
+            gh release edit "$FW_TAG"               --title "PIXEL PRO $FW_VERSION"               --notes "PIXEL PRO firmware $FW_VERSION. Includes one-time merged bootstrap image and in-app OTA image."               --latest
+          else
+            gh release create "$FW_TAG"               --target "${GITHUB_SHA}"               --title "PIXEL PRO $FW_VERSION"               --notes "PIXEL PRO firmware $FW_VERSION. Includes one-time merged bootstrap image and in-app OTA image."               --latest               "$BUILD/PIXEL_PRO_merged.bin"               "$BUILD/PIXEL_PRO_OTA.bin"               "$BUILD/firmware-manifest.json"
+          fi
