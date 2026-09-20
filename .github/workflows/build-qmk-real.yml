@@ -1,0 +1,54 @@
+name: Build PIXEL PRO real QMK proof
+
+on:
+  push:
+    branches:
+      - feature/real-qmk-esp32s2
+    paths:
+      - "firmware/qmk/**"
+      - "firmware/qmk-idf/**"
+      - ".github/workflows/build-qmk-real.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qmk-real-build:
+    name: Real QMK ESP32-S2 build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PIXEL PRO
+        uses: actions/checkout@v4
+
+      - name: Build real QMK + ESP-IDF link image
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v4.4.7
+          target: esp32s2
+          path: .
+          command: bash firmware/qmk/build.sh
+
+      - name: Show QMK artifacts
+        run: find dist/qmk -maxdepth 1 -type f -printf "%f %s bytes\n" | sort
+
+      - name: Upload real QMK proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel-pro-real-qmk-proof
+          path: dist/qmk/*
+          if-no-files-found: error
+
+  qmk-real-checks:
+    name: QMK real checks
+    needs: qmk-real-build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require real QMK build
+        env:
+          BUILD_RESULT: ${{ needs.qmk-real-build.result }}
+        run: test "$BUILD_RESULT" = success
