@@ -28,6 +28,7 @@ while i < len(parts):
 # that are not present in the main component's generated compile command.
 idf_path = Path("/opt/esp/idf")
 for extra in (
+    idf_path / "components/freertos/include/freertos",
     idf_path / "components/fatfs/vfs",
     idf_path / "components/fatfs/src",
     idf_path / "components/wear_levelling/include",
