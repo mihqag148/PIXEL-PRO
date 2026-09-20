@@ -24,11 +24,15 @@ if(EXISTS "${QMK_ARCHIVE}")
         REQUIRES ${QMK_IDF_REQUIRES}
     )
 
+    # Do NOT wrap the QMK target in a broad --whole-archive region. ESP-IDF
+    # expands transitive component dependencies around component link
+    # interfaces; broad whole-archive forced those same IDF archives into the
+    # image more than once. app_main() is referenced by ESP-IDF startup, so
+    # normal static archive resolution pulls the QMK entry object and then its
+    # dependent QMK objects naturally.
     target_link_libraries(
         ${COMPONENT_LIB}
         INTERFACE
-        "-Wl,--whole-archive"
         pixel_pro_qmk_core
-        "-Wl,--no-whole-archive"
     )
 endif()
