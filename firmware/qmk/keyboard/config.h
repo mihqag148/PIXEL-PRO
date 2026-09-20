@@ -5,6 +5,7 @@
 #define DEVICE_VER      0x0200
 #define MANUFACTURER    Lumi3D
 #define PRODUCT         PIXEL_PRO_QMK
+#define SERIAL_NUMBER   PIXELPRO_QMK_0200
 
 /*
  * Two physical matrix rows (K1..K8) plus one virtual row for the EC11
