@@ -24,5 +24,14 @@ while i < len(parts):
         i += 1
     i += 1
 
+# Some ESP-IDF components expose headers from non-standard public folders
+# that are not present in the main component's generated compile command.
+idf_path = Path("/opt/esp/idf")
+for extra in (
+    idf_path / "components/fatfs/vfs",
+    idf_path / "components/wear_levelling/include",
+):
+    selected.append("-I" + str(extra))
+
 selected.append("-DESP_PLATFORM")
 print(" ".join(shlex.quote(x) for x in selected))
