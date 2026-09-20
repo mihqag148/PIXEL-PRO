@@ -36,6 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           BUILD=firmware/idf/build
+          sudo chown -R "$(id -u):$(id -g)" "$BUILD"
           cp "$BUILD/pixel_pro.bin" "$BUILD/PIXEL_PRO_OTA.bin"
           cp "$BUILD/PIXEL_PRO_v0.1.5_merged.bin" "$BUILD/PIXEL_PRO_merged.bin"
 
