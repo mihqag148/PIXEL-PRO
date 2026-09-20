@@ -17,6 +17,10 @@ git -C "$QMK" remote add origin https://github.com/morganvenable/lalboard-qmk-cl
 git -C "$QMK" fetch -q --depth 1 origin "$QMK_SPEC"
 git -C "$QMK" checkout -q FETCH_HEAD
 
+echo "==> Fetch QMK compatibility submodules"
+git -C "$QMK" submodule sync -- lib/lufa lib/printf
+git -C "$QMK" submodule update --init --depth 1 lib/lufa lib/printf
+
 echo "==> Fetch compatible Espressif TinyUSB @ $TINYUSB_SPEC"
 rm -rf "$QMK/lib/tinyusb"
 git init -q "$QMK/lib/tinyusb"
