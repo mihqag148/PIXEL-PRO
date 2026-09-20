@@ -891,17 +891,21 @@ static bool initUsb() {
     USB_INTERFACE_HID, TUD_HID_INOUT_DESC_LEN, pixel_hid_load_descriptor);
   if (err != ESP_OK) return false;
 
-  tinyusb_device_config_t cfg = TINYUSB_CONFIG_DEFAULT();
+  tinyusb_device_config_t cfg = {};
   cfg.vid = PIXEL_USB_VID;
   cfg.pid = PIXEL_USB_PID;
   cfg.product_name = "PIXEL PRO";
   cfg.manufacturer_name = "Lumi3D";
   cfg.serial_number = "PIXELPRO-S2";
+  cfg.fw_version = 0x0100;
+  cfg.usb_version = 0x0200;
   cfg.usb_class = 0;
   cfg.usb_subclass = 0;
   cfg.usb_protocol = 0;
   cfg.usb_attributes = TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP;
   cfg.usb_power_ma = 500;
+  cfg.webusb_enabled = false;
+  cfg.webusb_url = nullptr;
   return tinyusb_init(&cfg) == ESP_OK;
 }
 
