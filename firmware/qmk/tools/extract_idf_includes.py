@@ -13,6 +13,12 @@ selected = []
 seen = set()
 
 def add(token):
+    # Do not add ESP-IDF's flat driver header directory. It contains timer.h,
+    # gpio.h, etc. and would shadow QMK's own headers. The parent
+    # components/driver/include path is enough for explicit driver/... includes.
+    normalized = token.replace("\\", "/")
+    if normalized.endswith("/components/driver/include/driver"):
+        return
     if token not in seen:
         seen.add(token)
         selected.append(token)
