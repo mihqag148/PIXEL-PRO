@@ -4,52 +4,38 @@ on:
   push:
     branches: [main]
     paths:
-      - "firmware/**"
+      - "firmware/idf/**"
       - ".github/workflows/build-firmware.yml"
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
+      - name: Build ESP-IDF firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.1
+          target: esp32s2
+          path: firmware/idf
+          command: idf.py build && idf.py merge-bin -o PIXEL_PRO_v0.1.4_merged.bin -f raw
 
-      - name: Install ESP32 core
+      - name: Show build output
         run: |
-          arduino-cli config init --overwrite
-          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32@2.0.17
-
-      - name: Compile
-        run: |
-          mkdir -p build
-          arduino-cli compile \
-            --fqbn "esp32:esp32:lolin_s2_mini:CDCOnBoot=dis_cdc,MSCOnBoot=default,DFUOnBoot=default" \
-            --output-dir build \
-            --warnings all \
-            firmware/PixelPro_S2
-          ESPTOOL=$(find "$HOME/.arduino15/packages/esp32/tools/esptool_py" -name esptool.py | head -n 1)
-          BOOTAPP="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.17/tools/partitions/boot_app0.bin"
-          python "$ESPTOOL" --chip esp32s2 merge_bin \
-            -o build/PIXEL_PRO_S2_v0.1.3_merged.bin \
-            0x1000 build/PixelPro_S2.ino.bootloader.bin \
-            0x8000 build/PixelPro_S2.ino.partitions.bin \
-            0xE000 "$BOOTAPP" \
-            0x10000 build/PixelPro_S2.ino.bin
-          echo "=== build output ==="
-          find build -maxdepth 1 -type f -printf "%f %s bytes\n" | sort
+          find firmware/idf/build -maxdepth 2 -type f -printf "%p %s bytes\n" | sort | tail -n 80
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pixel-pro-s2-firmware
+          name: pixel-pro-v0.1.4
           path: |
-            build/*.bin
-            build/*.elf
-            build/*.map
+            firmware/idf/build/PIXEL_PRO_v0.1.4_merged.bin
+            firmware/idf/build/*.bin
+            firmware/idf/build/*.elf
+            firmware/idf/build/*.map
+            firmware/idf/sdkconfig
           if-no-files-found: error
