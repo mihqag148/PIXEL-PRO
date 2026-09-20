@@ -29,6 +29,9 @@ cp -R "$ROOT/firmware/qmk/keyboard" "$QMK/keyboards/pixel_pro"
 python3 "$ROOT/firmware/qmk/tools/patch_qmk.py" "$QMK"
 
 python3 -m pip install -q -r "$QMK/requirements.txt"
+# This 2021-era QMK CLI uses MILCInterface._entrypoint, which was removed
+# from newer MILC releases.
+python3 -m pip install -q "milc==1.6.0"
 
 echo "==> Generate ESP-IDF include paths"
 cd "$IDF_PROJ"
