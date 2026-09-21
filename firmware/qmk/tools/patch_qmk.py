@@ -11,6 +11,7 @@ include_anchor = '#include "host_driver.h"\n'
 include_patch = '''#include "host_driver.h"
 #ifdef RAW_ENABLE
 #    include "raw_hid.h"
+#    include "freertos/queue.h"
 #endif
 '''
 if include_anchor not in text:
@@ -20,6 +21,43 @@ text = text.replace(include_anchor, include_patch, 1)
 if "#include <string.h>" not in text:
     text = text.replace("#include <stdarg.h>\n", "#include <stdarg.h>\n#include <string.h>\n", 1)
 
+driver_anchor = '''host_driver_t esp_idf_driver = {keyboard_leds, send_keyboard, send_mouse, send_system, send_consumer};
+
+int main(void) __attribute__((weak));'''
+driver_patch = '''host_driver_t esp_idf_driver = {keyboard_leds, send_keyboard, send_mouse, send_system, send_consumer};
+
+#ifdef RAW_ENABLE
+#define PIXEL_RAW_QUEUE_DEPTH 8
+static QueueHandle_t pixel_raw_rx_queue;
+
+static void pixel_raw_queue_init(void) {
+    if (pixel_raw_rx_queue == NULL) {
+        pixel_raw_rx_queue = xQueueCreate(PIXEL_RAW_QUEUE_DEPTH, RAW_EPSIZE);
+    }
+}
+#endif
+
+int main(void) __attribute__((weak));'''
+if driver_anchor not in text:
+    raise SystemExit("TinyUSB host driver anchor not found")
+text = text.replace(driver_anchor, driver_patch, 1)
+
+main_anchor = '''int main(void) {
+    eeprom_driver_init();
+
+    keyboard_setup();'''
+main_patch = '''int main(void) {
+    eeprom_driver_init();
+
+#ifdef RAW_ENABLE
+    pixel_raw_queue_init();
+#endif
+
+    keyboard_setup();'''
+if main_anchor not in text:
+    raise SystemExit("TinyUSB main init anchor not found")
+text = text.replace(main_anchor, main_patch, 1)
+
 callback_anchor = '''            break;
     }
 }
@@ -28,13 +66,28 @@ uint16_t const* tud_descriptor_string_cb'''
 callback_patch = '''            break;
 
 #ifdef RAW_ENABLE
-        case RAW_INTERFACE:
-            if (bufsize == RAW_EPSIZE) {
-                uint8_t raw[RAW_EPSIZE];
-                memcpy(raw, buffer, RAW_EPSIZE);
-                raw_hid_receive(raw, RAW_EPSIZE);
+        case RAW_INTERFACE: {
+            const uint8_t *payload = buffer;
+            uint16_t payload_size = bufsize;
+
+            /*
+             * Interrupt OUT arrives as 32 bytes. Some host stacks may deliver
+             * SET_REPORT with the report-ID byte included; normalize both
+             * shapes before placing the QMK/VIA packet on the queue.
+             */
+            if (payload_size == RAW_EPSIZE + 1 && payload[0] == 0) {
+                payload++;
+                payload_size--;
+            }
+
+            if (payload_size == RAW_EPSIZE) {
+                pixel_raw_queue_init();
+                if (pixel_raw_rx_queue != NULL) {
+                    (void)xQueueSend(pixel_raw_rx_queue, payload, 0);
+                }
             }
             break;
+        }
 #endif
     }
 }
@@ -53,14 +106,28 @@ void raw_hid_send(uint8_t *data, uint8_t length) {
     }
 
     uint8_t itf_index = tud_hid_itf_num_to_index(RAW_INTERFACE);
-    if (!wait_for_hid_ready(itf_index)) {
+    if (itf_index == 0xFF || !wait_for_hid_ready(itf_index)) {
         return;
     }
 
-    tud_hid_n_report(itf_index, 0, data, RAW_EPSIZE);
+    (void)tud_hid_n_report(itf_index, 0, data, RAW_EPSIZE);
 }
 
 void raw_hid_task(void) {
+    uint8_t raw[RAW_EPSIZE];
+
+    pixel_raw_queue_init();
+    if (pixel_raw_rx_queue == NULL) {
+        return;
+    }
+
+    /*
+     * Process Raw HID in QMK's normal keyboard task instead of calling VIA
+     * and submitting an IN transfer re-entrantly from TinyUSB's OUT callback.
+     */
+    while (xQueueReceive(pixel_raw_rx_queue, raw, 0) == pdTRUE) {
+        raw_hid_receive(raw, RAW_EPSIZE);
+    }
 }
 #endif
 
@@ -127,4 +194,4 @@ if via_anchor not in text:
 text = text.replace(via_anchor, via_patch, 1)
 via.write_text(text, encoding="utf-8")
 
-print("Patched ESP32-S2 QMK TinyUSB Raw HID endpoints + Lumi dispatcher")
+print("Patched ESP32-S2 QMK Raw HID queue, endpoints and Lumi dispatcher")
