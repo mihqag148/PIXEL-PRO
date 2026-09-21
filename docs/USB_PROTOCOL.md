@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.3.0 keeps native USB HID + CDC and adds 20 keymap profiles.
+Firmware 1.3.1 keeps native USB HID + CDC, 20 keymap profiles, and adds live memory telemetry.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.3.0|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.1|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,MEM|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -78,7 +78,24 @@ KEYS|<mask>|P=<profile>|L=<layer>
 
 GET_LAYER returns active profile/layer state.
 
+## Memory telemetry
+
+Request:
+
+MEM
+
+or:
+
+GET_MEMORY
+
+Response:
+
+MEM|<flash used>|<flash total>|<SRAM used>|<SRAM total>|<PSRAM used>|<PSRAM total>
+
+All values are bytes. Flash used is the compiled sketch size and flash total is the physical flash-chip size. SRAM uses the Arduino heap size/free heap counters. PSRAM reports zero total on hardware where PSRAM is unavailable.
+
 ## Other commands
+
 
 - HELLO
 - GET_INFO
