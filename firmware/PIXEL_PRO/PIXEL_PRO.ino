@@ -1346,15 +1346,9 @@ static bool beginGifUpload(
     return false;
   }
 
-  stopSaver();
-  closeGifDecoder();
-  closeGifUploadFile();
-  closeJpegUploadFile();
-
-  LittleFS.remove(GIF_TMP_PATH);
-  LittleFS.remove(GIF_PATH);
-  LittleFS.remove(JPEG_TMP_PATH);
-  LittleFS.remove(JPEG_PATH);
+  // Drop any previous raw/GIF/JPEG media before allocating the new
+  // compressed upload. This also frees legacy PSRAM frame buffers.
+  clearSaverBuffer();
 
   size_t total =
       LittleFS.totalBytes();
