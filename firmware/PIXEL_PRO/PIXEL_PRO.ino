@@ -15,7 +15,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.5";
+static constexpr char FW_VERSION[] = "1.3.6";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -1892,6 +1892,36 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "SAVERINFO") {
+    size_t total =
+        littleFsReady
+            ? LittleFS.totalBytes()
+            : 0;
+
+    size_t used =
+        littleFsReady
+            ? LittleFS.usedBytes()
+            : 0;
+
+    size_t freeBytes =
+        total > used
+            ? total - used
+            : 0;
+
+    char out[128];
+    snprintf(
+        out,
+        sizeof(out),
+        "SAVERINFO|TOTAL=%lu|USED=%lu|FREE=%lu|FLASH=%lu",
+        static_cast<unsigned long>(total),
+        static_cast<unsigned long>(used),
+        static_cast<unsigned long>(freeBytes),
+        static_cast<unsigned long>(ESP.getFlashChipSize()));
+
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper == "SAVERSTATE") {
     if (saverUploading) {
       cdcPrintln("SAVERSTATE|UPLOADING");
@@ -1947,13 +1977,50 @@ static void handleCommand(String command) {
             height) ||
         !gifDimensionsSupported(
             width,
-            height) ||
-        !beginGifUpload(
+            height)) {
+      cdcPrintln("ERR|BAD_SAVGIFBEGIN");
+      return;
+    }
+
+    size_t total =
+        littleFsReady
+            ? LittleFS.totalBytes()
+            : 0;
+
+    size_t used =
+        littleFsReady
+            ? LittleFS.usedBytes()
+            : 0;
+
+    size_t freeBytes =
+        total > used
+            ? total - used
+            : 0;
+
+    if (!littleFsReady) {
+      cdcPrintln("ERR|FS_NOT_READY");
+      return;
+    }
+
+    if (static_cast<size_t>(byteCount) + 4096 > freeBytes) {
+      char out[96];
+      snprintf(
+          out,
+          sizeof(out),
+          "ERR|NO_SPACE|NEED=%lu|FREE=%lu|TOTAL=%lu",
+          static_cast<unsigned long>(byteCount),
+          static_cast<unsigned long>(freeBytes),
+          static_cast<unsigned long>(total));
+      cdcPrintln(out);
+      return;
+    }
+
+    if (!beginGifUpload(
             byteCount,
             width,
             height,
             scaleMode)) {
-      cdcPrintln("ERR|SAVGIFBEGIN");
+      cdcPrintln("ERR|SAVGIFBEGIN_ALLOC");
       return;
     }
 
@@ -2551,7 +2618,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0135);
+  USB.firmwareVersion(0x0136);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -2561,7 +2628,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.5");
+  cdcPrintln("BOOT|PIXELPRO|1.3.6");
 }
 
 void loop() {
