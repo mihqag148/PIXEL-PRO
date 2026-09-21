@@ -7,7 +7,7 @@ QMK upstream does not support ESP32-S2, so this build pins the experimental
 ESP32-S2 QMK fork:
 
 - QMK core: `morganvenable/lalboard-qmk-clone@42e50c9...`
-- TinyUSB: `espressif/tinyusb@334e95f...`
+- TinyUSB: `morganvenable/lalboard-tinyusb-clone@1a89cb7...`
 
 The build keeps QMK's real `quantum/via.c`, dynamic keymap, matrix, encoder,
 key processing and Raw HID. A small platform patch completes Raw HID support in
@@ -22,7 +22,12 @@ for packets beginning with `LQ`; normal VIA packets remain handled by QMK.
 - VIA: real QMK VIA
 - 5 dynamic layers
 - VID/PID: 303A:4009
-- LumiPad: HELLO + MEM only for connection bring-up
+- Raw HID endpoint layout on ESP32-S2: OUT EP2 / IN EP3
+- LumiPad: single-packet HELLO for physical USB bring-up
+
+Version 0.2.1 changes the USB device identity so Windows builds a fresh HID
+instance and corrects the Raw HID endpoint direction to the layout already
+proven stable on PIXEL PRO's ESP32-S2 hardware.
 
 LCD, GIF/video, RGB and OTA are intentionally not in the first QMK proof build.
 They will be reintroduced only after the QMK/VIA USB path is confirmed on real
