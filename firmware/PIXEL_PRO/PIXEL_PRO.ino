@@ -1522,7 +1522,11 @@ static bool beginGifUpload(
 
   gifUploadWidth = width;
   gifUploadHeight = height;
-  gifUploadScaleMode = scaleMode;
+
+  // PIXEL PRO no longer accepts host-side Fill/Fit for uploaded GIFs.
+  // Small GIFs stay pixel-sized; only oversized canvases are reduced to fit.
+  (void)scaleMode;
+  gifUploadScaleMode = GIF_SCALE_CENTER;
 
   saverBytesReceived = 0;
   saverDataBytes = expectedBytes;
@@ -1663,39 +1667,18 @@ static void loadPersistedGif() {
   }
 
   saverFormat = SAVER_GIF;
-  uint8_t scaleVersion =
-      preferences.getUChar(
-          "gscalev",
-          0);
 
-  uint8_t storedScale =
-      preferences.getUChar(
-          "gscale",
-          GIF_SCALE_CENTER);
-
-  if (storedScale > GIF_SCALE_SPAN) {
-    storedScale = GIF_SCALE_CENTER;
-  }
-
-  // v1.3.5-v1.3.7 could persist Fill/Fit as the implicit default, which
-  // enlarges a small GIF. Migrate that old default once. After v2 is marked,
-  // an explicitly selected Fill/Fit mode is preserved normally.
-  if (scaleVersion < 2 &&
-      (storedScale == GIF_SCALE_FILL ||
-       storedScale == GIF_SCALE_FIT)) {
-    storedScale = GIF_SCALE_CENTER;
-    preferences.putUChar(
-        "gscale",
-        storedScale);
-  }
-
+  // Always migrate persisted media to Center/no-upscale. Older builds could
+  // leave Fill/Fit in NVS and make a small GIF look huge after reboot.
+  gifScaleMode = GIF_SCALE_CENTER;
+  preferences.putUChar(
+      "gscale",
+      static_cast<uint8_t>(
+          GIF_SCALE_CENTER));
   preferences.putUChar(
       "gscalev",
-      2);
+      3);
 
-  gifScaleMode =
-      static_cast<GifScaleMode>(
-          storedScale);
   saverWidth = width;
   saverHeight = height;
   saverDataBytes = fileSize;
@@ -3537,6 +3520,81 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("RGB_EFFECT|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    uint16_t profile = 0;
+    uint16_t effect = 0;
+
+    if (first < 0 ||
+        second < 0 ||
+        !parseUnsigned(
+            command.substring(
+                first + 1,
+                second),
+            PROFILE_COUNT - 1,
+            profile) ||
+        !parseUnsigned(
+            command.substring(
+                second + 1),
+            3,
+            effect)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_EFFECT");
+      return;
+    }
+
+    rgbEffects[profile] =
+        static_cast<uint8_t>(
+            effect);
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_EFFECT");
+    return;
+  }
+
+  if (upper.startsWith("RGB_SPEED|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t speed = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            100,
+            speed) ||
+        speed < 10) {
+      cdcPrintln(
+          "ERR|BAD_RGB_SPEED");
+      return;
+    }
+
+    rgbSpeedPercent =
+        static_cast<uint8_t>(
+            speed);
+
+    saveRgbProfiles();
+    rgbLastFrameAt = 0;
+
+    cdcPrintln(
+        "OK|RGB_SPEED");
+    return;
+  }
+
   if (upper.startsWith("RGB_ENABLE|")) {
     int sep =
         command.indexOf('|');
@@ -3826,7 +3884,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0140);
+  USB.firmwareVersion(0x0141);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -3840,12 +3898,13 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.4.0");
+  cdcPrintln("BOOT|PIXELPRO|1.4.1");
 }
 
 void loop() {
   pollKeys();
   pollCdc();
+  pollRgbEffect();
   pollSaver();
 
   if (bootloaderArmed &&
