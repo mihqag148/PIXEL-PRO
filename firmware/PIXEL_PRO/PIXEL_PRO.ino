@@ -1583,22 +1583,33 @@ static int jpegDraw(JPEGDRAW *draw) {
 
   int x = draw->x;
   int y = draw->y;
-  int width = draw->iWidth;
+  int sourceStride = draw->iWidth;
+  int width =
+      draw->iWidthUsed > 0
+          ? draw->iWidthUsed
+          : draw->iWidth;
   int height = draw->iHeight;
 
   if (x < 0 ||
       y < 0 ||
       x + width > TFT_WIDTH ||
-      y + height > TFT_HEIGHT) {
+      y + height > TFT_HEIGHT ||
+      sourceStride < width) {
     return 0;
   }
 
-  tft->draw16bitRGBBitmap(
-      x,
-      y,
-      draw->pPixels,
-      width,
-      height);
+  // iWidthUsed can be smaller than the MCU row stride on odd image widths.
+  // Draw row-by-row so edge padding never writes outside the centered image.
+  for (int row = 0; row < height; ++row) {
+    tft->draw16bitRGBBitmap(
+        x,
+        y + row,
+        draw->pPixels +
+            static_cast<size_t>(row) *
+            sourceStride,
+        width,
+        1);
+  }
 
   return 1;
 }
