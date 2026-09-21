@@ -115,4 +115,4 @@ jobs:
             echo "Release $TAG already exists; preserved."
             exit 0
           fi
-          gh release create "$TAG" --target "$GITHUB_SHA"             --title "PIXEL PRO Native USB $VERSION"             --notes "ESP32-S2 native TinyUSB firmware: HID keyboard + USB CDC + Firmware MSC. No ZMK, QMK or VIA."             dist/*
+          gh release create "$TAG" --target "$GITHUB_SHA"             --title "PIXEL PRO Native USB $VERSION"             --notes "ESP32-S2 native TinyUSB firmware: HID keyboard + USB CDC + Firmware MSC."             dist/*
