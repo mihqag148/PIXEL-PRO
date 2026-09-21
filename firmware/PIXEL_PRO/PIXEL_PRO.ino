@@ -11,13 +11,14 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.1";
+static constexpr char FW_VERSION[] = "1.3.2";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
 static constexpr uint8_t PROFILE_COUNT = 20;
 static constexpr uint8_t LAYER_COUNT = 4;
 static constexpr uint8_t MACRO_COUNT = 20;
+static constexpr uint8_t ACTION_COUNT = 32;
 static constexpr uint8_t MACRO_MAX_LEN = 80;
 static constexpr uint32_t DEBOUNCE_MS = 8;
 
@@ -27,6 +28,7 @@ static constexpr uint8_t BIND_CONSUMER = 2;
 static constexpr uint8_t BIND_LAYER = 3;
 static constexpr uint8_t BIND_MACRO = 4;
 static constexpr uint8_t BIND_TRANSPARENT = 5;
+static constexpr uint8_t BIND_ACTION = 6;
 
 static constexpr uint8_t LAYER_MO = 1;
 static constexpr uint8_t LAYER_TG = 2;
@@ -127,6 +129,12 @@ static bool bindingIsValid(const KeyBinding &binding) {
 
     case BIND_MACRO:
       return binding.keyCode < MACRO_COUNT &&
+             binding.modifiers == 0 &&
+             binding.consumerCode == 0;
+
+    case BIND_ACTION:
+      return binding.keyCode >= 1 &&
+             binding.keyCode <= ACTION_COUNT &&
              binding.modifiers == 0 &&
              binding.consumerCode == 0;
 
@@ -254,6 +262,14 @@ static String serializeBinding(const KeyBinding &binding) {
           out,
           sizeof(out),
           "M:%u:0",
+          static_cast<unsigned>(binding.keyCode));
+      return String(out);
+
+    case BIND_ACTION:
+      snprintf(
+          out,
+          sizeof(out),
+          "A:%u:0",
           static_cast<unsigned>(binding.keyCode));
       return String(out);
 
@@ -388,6 +404,16 @@ static bool parseBindingToken(String token, KeyBinding &binding) {
     return true;
   }
 
+  if (type == 'A') {
+    if (code < 1 || code > ACTION_COUNT || mods != 0) {
+      return false;
+    }
+
+    binding.type = BIND_ACTION;
+    binding.keyCode = static_cast<uint8_t>(code);
+    return true;
+  }
+
   return false;
 }
 
@@ -472,7 +498,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,MEM|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -910,6 +936,17 @@ static void emitKeyEvent(uint8_t index, bool pressed) {
           static_cast<unsigned>(activeProfile),
           static_cast<unsigned>(layer));
       cdcPrintln(macroOut);
+    } else if (resolved.type == BIND_ACTION) {
+      char actionOut[64];
+      snprintf(
+          actionOut,
+          sizeof(actionOut),
+          "ACTION|%u|KEY=%u|P=%u|L=%u",
+          static_cast<unsigned>(resolved.keyCode),
+          static_cast<unsigned>(index + 1),
+          static_cast<unsigned>(activeProfile),
+          static_cast<unsigned>(layer));
+      cdcPrintln(actionOut);
     }
   } else {
     applyLayerRelease(activeBindings[index]);
@@ -985,7 +1022,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0130);
+  USB.firmwareVersion(0x0132);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -995,7 +1032,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.0");
+  cdcPrintln("BOOT|PIXELPRO|1.3.2");
 }
 
 void loop() {
