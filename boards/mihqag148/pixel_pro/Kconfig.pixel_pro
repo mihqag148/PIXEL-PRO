@@ -1,2 +1,0 @@
-config BOARD_PIXEL_PRO
-    select SOC_ESP32S2_FN4R2

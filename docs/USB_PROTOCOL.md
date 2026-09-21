@@ -1,27 +1,42 @@
-# PIXEL PRO companion protocol, version 1
+# PIXEL PRO USB CDC protocol v1
 
-Firmware 0.3.1. Product PIXEL PRO ZMK. Manufacturer LumiPad Development.
-VID 0x1209 / PID 0x0001 is a development-only test identity, not an allocated
-production identity. Obtain an allocated PID before distributing hardware.
-Bring-up serial PIXELPRO-S2-DEV-001 is fixed; use one prototype at a time.
+Transport: native USB CDC ACM at 115200 baud. The baud value is informational for USB CDC.
 
-Two independent HID interfaces: HID_0 is the ZMK keyboard; HID_1 is vendor
-usage page 0xFF00, usage 1. Keyboard functionality does not require LumiPad.
-Vendor reports have 64 data bytes, no report IDs. The HID interrupt endpoint MPS is 64 bytes (Windows/HidSharp prepends
-the mandatory zero byte, so API buffers are 65 bytes).
+The same USB device also exposes standard HID keyboard and Firmware MSC interfaces.
 
-GET_REPORT FEATURE (report ID 0) is the HELLO request. It returns a
-zero-padded ASCII string:
-PIXELPRO|ZMK|0.3.1|KEYS=00|NAV=0|DROP=0
+## Host commands
 
-KEYS and NAV are hexadecimal pressed-bit masks. DROP counts reports lost
-to backpressure. Poll FEATURE to resynchronize after loss or reconnect.
-Interrupt IN reports: KEY|1|DOWN, KEY|1|UP ... KEY|8|UP;
-NAV|1|DOWN ... NAV|3|UP. Navigation order: left, press, right.
-No interrupt OUT endpoint or output report is defined in phase 1.
-Feature requests use endpoint zero. Reject other products/protocols.
+Commands are ASCII, one command per line, terminated by LF.
 
-Transport runs on Zephyr's native legacy USB stack and adapted DesignWare
-controller driver. No alternate USB stack is linked.
+- HELLO
+- GET_INFO
+- GET_KEYS
+- PING
+- REBOOT
 
-Windows compatibility: USB boot protocol is disabled so HID_1 remains a generic vendor HID interface rather than inheriting boot-HID subclass semantics.
+## Device responses
+
+HELLO / GET_INFO:
+
+PIXELPRO|1|FW=1.0.0|MCU=ESP32S2|KEYS=8|CAPS=HID,CDC,MSC|VID=303A|PID=80C2
+
+GET_KEYS:
+
+KEYS|00
+
+Key transitions are asynchronous:
+
+KEY|1|DOWN
+KEY|1|UP
+...
+KEY|8|DOWN
+KEY|8|UP
+
+PING returns:
+
+PONG|PIXELPRO
+
+Unknown commands return ERR|UNKNOWN_COMMAND.
+
+LumiPad identifies PIXEL PRO by probing CDC ports for the PIXELPRO|1| response. This
+avoids coupling the app to a fragile HID vendor interface.
