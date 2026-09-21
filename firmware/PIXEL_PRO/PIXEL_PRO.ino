@@ -105,7 +105,7 @@ static bool bindingIsValid(const KeyBinding &binding) {
              binding.consumerCode == 0;
 
     case BIND_KEYBOARD:
-      return binding.keyCode != 0 &&
+      return (binding.keyCode != 0 || binding.modifiers != 0) &&
              (binding.modifiers & 0xF0) == 0 &&
              binding.consumerCode == 0;
 
@@ -338,7 +338,7 @@ static bool parseBindingToken(String token, KeyBinding &binding) {
   }
 
   if (type == 'K') {
-    if (code == 0 || code > 0xFF || mods > 0x0F) {
+    if ((code == 0 && mods == 0) || code > 0xFF || mods > 0x0F) {
       return false;
     }
 
