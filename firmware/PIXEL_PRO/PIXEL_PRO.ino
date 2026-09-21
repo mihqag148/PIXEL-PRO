@@ -362,8 +362,13 @@ static void setDefaultRgbProfiles() {
           static_cast<uint8_t>(255 - key * 16);
       rgbProfiles[profile][key][1] =
           static_cast<uint8_t>(96 + key * 18);
+      uint16_t blue =
+          static_cast<uint16_t>(profile) * 5U;
       rgbProfiles[profile][key][2] =
-          static_cast<uint8_t>(min<int>(120, profile * 5));
+          static_cast<uint8_t>(
+              blue > 120U
+                  ? 120U
+                  : blue);
     }
   }
 }
@@ -3644,12 +3649,18 @@ void setup() {
   preferences.begin("pixelpro", false);
   loadKeymap();
   loadMacros();
+  loadRgbProfiles();
+
+  rgbStrip.begin();
+  rgbStrip.clear();
+  applyRgbProfile();
+
   initKeys();
   initDisplay();
 
   littleFsReady = LittleFS.begin(true);
   if (littleFsReady) {
-    loadPersistedGif();
+    loadPersistedMedia();
   }
 
   lastUserActivityAt = millis();
@@ -3667,7 +3678,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0139);
+  USB.firmwareVersion(0x0140);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -3681,7 +3692,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.9");
+  cdcPrintln("BOOT|PIXELPRO|1.4.0");
 }
 
 void loop() {
