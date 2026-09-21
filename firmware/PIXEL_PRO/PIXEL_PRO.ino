@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.4.0";
+static constexpr char FW_VERSION[] = "1.4.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -40,7 +40,7 @@ static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
-static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 1024UL * 1024UL;
+static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
@@ -138,8 +138,14 @@ static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
+// Effects match the original Lumi RGB UI: 0 rainbow, 1 purple ping-pong,
+// 2 orange blink, 3 static per-key colors.
+static uint8_t rgbEffects[PROFILE_COUNT] = {};
 static bool rgbEnabled = true;
 static uint8_t rgbBrightnessPercent = 25;
+static uint8_t rgbSpeedPercent = 50;
+static uint32_t rgbLastFrameAt = 0;
+static uint16_t rgbAnimationStep = 0;
 static Adafruit_NeoPixel rgbStrip(
     RGB_LED_COUNT,
     RGB_PIN,
@@ -357,6 +363,8 @@ static void saveMacro(uint8_t index) {
 
 static void setDefaultRgbProfiles() {
   for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+    rgbEffects[profile] = 3;
+
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
       rgbProfiles[profile][key][0] =
           static_cast<uint8_t>(255 - key * 16);
@@ -379,10 +387,17 @@ static void saveRgbProfiles() {
       "rgbkeys",
       rgbProfiles,
       sizeof(rgbProfiles));
+  preferences.putBytes(
+      "rgbfx",
+      rgbEffects,
+      sizeof(rgbEffects));
   preferences.putBool("rgben", rgbEnabled);
   preferences.putUChar(
       "rgbbr",
       rgbBrightnessPercent);
+  preferences.putUChar(
+      "rgbspd",
+      rgbSpeedPercent);
 }
 
 static void loadRgbProfiles() {
@@ -406,6 +421,19 @@ static void loadRgbProfiles() {
           "rgben",
           true);
 
+  if (preferences.getBytesLength("rgbfx") == sizeof(rgbEffects)) {
+    preferences.getBytes(
+        "rgbfx",
+        rgbEffects,
+        sizeof(rgbEffects));
+
+    for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+      if (rgbEffects[profile] > 3) {
+        rgbEffects[profile] = 3;
+      }
+    }
+  }
+
   rgbBrightnessPercent =
       static_cast<uint8_t>(
           constrain(
@@ -414,9 +442,28 @@ static void loadRgbProfiles() {
                   25),
               0,
               100));
+
+  rgbSpeedPercent =
+      static_cast<uint8_t>(
+          constrain(
+              preferences.getUChar(
+                  "rgbspd",
+                  50),
+              10,
+              100));
 }
 
-static void applyRgbProfile() {
+static uint16_t rgbFrameIntervalMs() {
+  return static_cast<uint16_t>(
+      map(
+          rgbSpeedPercent,
+          10,
+          100,
+          180,
+          24));
+}
+
+static void applyRgbBrightness() {
   uint8_t brightness =
       rgbEnabled
           ? static_cast<uint8_t>(
@@ -429,6 +476,10 @@ static void applyRgbProfile() {
           : 0;
 
   rgbStrip.setBrightness(brightness);
+}
+
+static void renderRgbStatic() {
+  applyRgbBrightness();
 
   for (uint8_t key = 0; key < KEY_COUNT; ++key) {
     uint8_t led =
@@ -442,6 +493,98 @@ static void applyRgbProfile() {
   }
 
   rgbStrip.show();
+}
+
+static void pollRgbEffect(bool force = false) {
+  uint8_t effect =
+      rgbEffects[activeProfile];
+
+  if (effect == 3) {
+    if (force) {
+      renderRgbStatic();
+    }
+    return;
+  }
+
+  uint32_t now =
+      millis();
+
+  uint16_t interval =
+      rgbFrameIntervalMs();
+
+  if (!force &&
+      static_cast<uint32_t>(
+          now - rgbLastFrameAt) <
+          interval) {
+    return;
+  }
+
+  rgbLastFrameAt =
+      now;
+
+  applyRgbBrightness();
+
+  if (effect == 0) {
+    // Rainbow across logical K1..K8 while respecting the physical LED map.
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint16_t hue =
+          static_cast<uint16_t>(
+              rgbAnimationStep * 512U +
+              key * (65535U / KEY_COUNT));
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.ColorHSV(
+              hue,
+              255,
+              255));
+    }
+  } else if (effect == 1) {
+    // Purple point travels K1→K8→K1.
+    rgbStrip.clear();
+
+    uint8_t phase =
+        static_cast<uint8_t>(
+            rgbAnimationStep % 14U);
+
+    uint8_t position =
+        phase < 8
+            ? phase
+            : static_cast<uint8_t>(
+                  14U - phase);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          key == position
+              ? rgbStrip.Color(190, 40, 255)
+              : rgbStrip.Color(8, 0, 14));
+    }
+  } else {
+    // Original orange blink preset.
+    bool on =
+        (rgbAnimationStep & 1U) == 0;
+
+    uint32_t color =
+        on
+            ? rgbStrip.Color(255, 90, 0)
+            : rgbStrip.Color(0, 0, 0);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          color);
+    }
+  }
+
+  rgbStrip.show();
+  rgbAnimationStep++;
+}
+
+static void applyRgbProfile() {
+  rgbAnimationStep = 0;
+  rgbLastFrameAt = 0;
+  pollRgbEffect(true);
 }
 
 static bool parseRgbHex(
@@ -1379,7 +1522,11 @@ static bool beginGifUpload(
 
   gifUploadWidth = width;
   gifUploadHeight = height;
-  gifUploadScaleMode = scaleMode;
+
+  // PIXEL PRO no longer accepts host-side Fill/Fit for uploaded GIFs.
+  // Small GIFs stay pixel-sized; only oversized canvases are reduced to fit.
+  (void)scaleMode;
+  gifUploadScaleMode = GIF_SCALE_CENTER;
 
   saverBytesReceived = 0;
   saverDataBytes = expectedBytes;
@@ -1520,39 +1667,18 @@ static void loadPersistedGif() {
   }
 
   saverFormat = SAVER_GIF;
-  uint8_t scaleVersion =
-      preferences.getUChar(
-          "gscalev",
-          0);
 
-  uint8_t storedScale =
-      preferences.getUChar(
-          "gscale",
-          GIF_SCALE_CENTER);
-
-  if (storedScale > GIF_SCALE_SPAN) {
-    storedScale = GIF_SCALE_CENTER;
-  }
-
-  // v1.3.5-v1.3.7 could persist Fill/Fit as the implicit default, which
-  // enlarges a small GIF. Migrate that old default once. After v2 is marked,
-  // an explicitly selected Fill/Fit mode is preserved normally.
-  if (scaleVersion < 2 &&
-      (storedScale == GIF_SCALE_FILL ||
-       storedScale == GIF_SCALE_FIT)) {
-    storedScale = GIF_SCALE_CENTER;
-    preferences.putUChar(
-        "gscale",
-        storedScale);
-  }
-
+  // Always migrate persisted media to Center/no-upscale. Older builds could
+  // leave Fill/Fit in NVS and make a small GIF look huge after reboot.
+  gifScaleMode = GIF_SCALE_CENTER;
+  preferences.putUChar(
+      "gscale",
+      static_cast<uint8_t>(
+          GIF_SCALE_CENTER));
   preferences.putUChar(
       "gscalev",
-      2);
+      3);
 
-  gifScaleMode =
-      static_cast<GifScaleMode>(
-          storedScale);
   saverWidth = width;
   saverHeight = height;
   saverDataBytes = fileSize;
@@ -2372,7 +2498,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -3394,6 +3520,81 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("RGB_EFFECT|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    uint16_t profile = 0;
+    uint16_t effect = 0;
+
+    if (first < 0 ||
+        second < 0 ||
+        !parseUnsigned(
+            command.substring(
+                first + 1,
+                second),
+            PROFILE_COUNT - 1,
+            profile) ||
+        !parseUnsigned(
+            command.substring(
+                second + 1),
+            3,
+            effect)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_EFFECT");
+      return;
+    }
+
+    rgbEffects[profile] =
+        static_cast<uint8_t>(
+            effect);
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_EFFECT");
+    return;
+  }
+
+  if (upper.startsWith("RGB_SPEED|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t speed = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            100,
+            speed) ||
+        speed < 10) {
+      cdcPrintln(
+          "ERR|BAD_RGB_SPEED");
+      return;
+    }
+
+    rgbSpeedPercent =
+        static_cast<uint8_t>(
+            speed);
+
+    saveRgbProfiles();
+    rgbLastFrameAt = 0;
+
+    cdcPrintln(
+        "OK|RGB_SPEED");
+    return;
+  }
+
   if (upper.startsWith("RGB_ENABLE|")) {
     int sep =
         command.indexOf('|');
@@ -3683,7 +3884,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0140);
+  USB.firmwareVersion(0x0141);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -3697,12 +3898,13 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.4.0");
+  cdcPrintln("BOOT|PIXELPRO|1.4.1");
 }
 
 void loop() {
   pollKeys();
   pollCdc();
+  pollRgbEffect();
   pollSaver();
 
   if (bootloaderArmed &&

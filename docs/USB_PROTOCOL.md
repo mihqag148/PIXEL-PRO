@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.4.0 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
+Firmware 1.4.1 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.4.0|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.4.1|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -214,7 +214,7 @@ All values are bytes. Flash used is the compiled sketch size and flash total is 
 
 ## Native USB reboot safety
 
-Firmware 1.4.0 disables the Arduino USB CDC DTR/RTS reboot hook during normal
+Firmware 1.4.1 disables the Arduino USB CDC DTR/RTS reboot hook during normal
 Lumi Macropad communication. Opening, closing, or relaunching the Windows app
 therefore cannot request ROM bootloader mode. Firmware update continues to use
 the explicit ROM BOOT/esptool flow.
@@ -222,7 +222,7 @@ the explicit ROM BOOT/esptool flow.
 
 ## Explicit ROM bootloader entry
 
-Firmware 1.4.0 keeps normal CDC reboot handling disabled. Lumi Macropad must first send:
+Firmware 1.4.1 keeps normal CDC reboot handling disabled. Lumi Macropad must first send:
 
 ARM_BOOTLOADER
 
@@ -254,3 +254,21 @@ RGB is stored per keymap profile in logical key order K1..K8.
 - `RGB_BRIGHTNESS|0..100`
 
 Physical LED mapping: 1→K1, 2→K2, 3→K3, 4→K4, 5→K8, 6→K7, 7→K6, 8→K5.
+
+
+## PIXEL PRO RGB effects v1.4.1
+
+PIXEL PRO now supports per-profile RGB mode in addition to per-key static colors.
+
+- `RGB_EFFECT|profile|effect`
+  - `0` Rainbow
+  - `1` Purple Ping-Pong
+  - `2` Orange Blink
+  - `3` Static per-key colors
+- `RGB_SPEED|10..100`
+
+The active effect is stored per keymap profile. Speed is global.
+
+## GIF sizing v1.4.1
+
+The 1 MiB value in Lumi Macropad is a soft optimization target, not a hard firmware rejection limit. Firmware accepts a larger direct GIF when it fits the LittleFS media partition. Uploaded and persisted GIFs always use Center/no-upscale mode: small GIFs are never enlarged, while oversized GIFs are reduced only as needed to fit the 480×320 display.
