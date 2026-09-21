@@ -38,7 +38,7 @@ jobs:
           ./setup.sh -t xtensa-espressif_esp32s2_zephyr-elf -h -c
       - name: Fetch pinned sources
         run: |
-          west init -l pixel-pro/config
+          west init -l pixel-pro --mf config/west.yml
           west update --narrow -o=--depth=1
           west zephyr-export
           pip install -r zephyr/scripts/requirements.txt
