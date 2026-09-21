@@ -1,0 +1,13 @@
+#pragma once
+
+#include "quantum.h"
+
+#define LAYOUT( \
+    k00, k01, k02, k03, \
+    k10, k11, k12, k13, \
+    k20                  \
+) {                      \
+    { k00, k01, k02, k03 }, \
+    { k10, k11, k12, k13 }, \
+    { k20, KC_NO, KC_NO, KC_NO } \
+}

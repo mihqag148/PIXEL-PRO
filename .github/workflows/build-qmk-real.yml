@@ -1,0 +1,123 @@
+name: Build and release PIXEL PRO QMK firmware
+
+on:
+  push:
+    branches:
+      - main
+      - feature/real-qmk-esp32s2
+    paths:
+      - "firmware/qmk/**"
+      - "firmware/qmk-idf/**"
+      - "via/**"
+      - ".github/workflows/build-qmk-real.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FW_VERSION: "0.2.0"
+  FW_TAG: "v0.2.0"
+
+jobs:
+  qmk-real-build:
+    name: Real QMK ESP32-S2 build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PIXEL PRO
+        uses: actions/checkout@v4
+
+      - name: Build real QMK + ESP-IDF link image
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v4.4.7
+          target: esp32s2
+          path: .
+          command: bash firmware/qmk/build.sh
+
+      - name: Prepare QMK release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" dist/qmk
+          MERGED="dist/qmk/PIXEL_PRO_QMK_merged.bin"
+          APP="dist/qmk/PIXEL_PRO_QMK_app.bin"
+          MERGED_SHA=$(sha256sum "$MERGED" | awk '{print $1}')
+          APP_SHA=$(sha256sum "$APP" | awk '{print $1}')
+          MERGED_SIZE=$(stat -c%s "$MERGED")
+          APP_SIZE=$(stat -c%s "$APP")
+          cat > dist/qmk/firmware-manifest.json <<EOF
+          {
+            "product": "PIXEL PRO",
+            "firmware": "QMK",
+            "version": "$FW_VERSION",
+            "mergedAsset": "PIXEL_PRO_QMK_merged.bin",
+            "mergedSize": $MERGED_SIZE,
+            "mergedSha256": "$MERGED_SHA",
+            "appAsset": "PIXEL_PRO_QMK_app.bin",
+            "appSize": $APP_SIZE,
+            "appSha256": "$APP_SHA",
+            "viaProtocol": "0x000D",
+            "usbVid": "0x303A",
+            "usbPid": "0x4009"
+          }
+          EOF
+
+      - name: Show QMK artifacts
+        run: find dist/qmk -maxdepth 1 -type f -printf "%f %s bytes\n" | sort
+
+      - name: Upload QMK firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel-pro-qmk-v0.2.0
+          path: dist/qmk/*
+          if-no-files-found: error
+
+  pr-checks:
+    name: PR checks
+    needs: qmk-real-build
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require real QMK build
+        env:
+          BUILD_RESULT: ${{ needs.qmk-real-build.result }}
+        run: test "$BUILD_RESULT" = success
+
+  release:
+    needs: qmk-real-build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pixel-pro-qmk-v0.2.0
+          path: dist/qmk
+
+      - name: Publish PIXEL PRO QMK release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$FW_TAG" >/dev/null 2>&1; then
+            echo "Release $FW_TAG already exists; preserved."
+            exit 0
+          fi
+
+          gh release create "$FW_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "PIXEL PRO QMK $FW_VERSION" \
+            --notes "PIXEL PRO real QMK firmware with VIA dynamic keymap, Raw HID, matrix and encoder support. LumiPad can install PIXEL_PRO_QMK_merged.bin automatically through ESP32-S2 ROM BOOT." \
+            --latest \
+            dist/qmk/PIXEL_PRO_QMK_merged.bin \
+            dist/qmk/PIXEL_PRO_QMK_app.bin \
+            dist/qmk/firmware-manifest.json \
+            dist/qmk/build-info.txt
