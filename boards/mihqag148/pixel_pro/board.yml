@@ -1,6 +1,0 @@
-board:
-  name: pixel_pro
-  full_name: PIXEL PRO S2 Mini
-  vendor: others
-  socs:
-    - name: esp32s2
