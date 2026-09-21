@@ -37,6 +37,11 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.3.12
 
+      - name: Install Arduino_GFX 1.6.8
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "GFX Library for Arduino@1.6.8"
+
       - name: Compile ESP32-S2 native USB firmware
         run: |
           mkdir -p build dist
