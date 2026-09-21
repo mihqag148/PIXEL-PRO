@@ -755,9 +755,9 @@ static void pollSaver() {
   }
 
   uint16_t duration =
-      max<uint16_t>(
-          GIF_MIN_FRAME_MS,
-          saverDurations[saverFrameIndex]);
+      saverDurations[saverFrameIndex] < GIF_MIN_FRAME_MS
+          ? GIF_MIN_FRAME_MS
+          : saverDurations[saverFrameIndex];
 
   if (static_cast<uint32_t>(now - saverFrameStartedAt) < duration) {
     return;
@@ -794,9 +794,9 @@ static bool parseSaverDurations(
     }
 
     saverDurations[i] =
-        max<uint16_t>(
-            GIF_MIN_FRAME_MS,
-            duration);
+        duration < GIF_MIN_FRAME_MS
+            ? GIF_MIN_FRAME_MS
+            : duration;
 
     start = comma + 1;
   }
@@ -933,7 +933,7 @@ static bool finishSaverUpload() {
 }
 
 static String deviceHello() {
-  char out[210];
+  char out[320];
   snprintf(
       out,
       sizeof(out),
@@ -1544,6 +1544,9 @@ static void pollCdc() {
 
 static void emitKeyEvent(uint8_t index, bool pressed) {
   if (pressed) {
+    lastUserActivityAt = millis();
+    stopSaver();
+
     uint8_t layer = currentLayer();
     KeyBinding resolved = resolveBinding(layer, index);
     activeBindings[index] = resolved;
@@ -1634,6 +1637,8 @@ void setup() {
   loadKeymap();
   loadMacros();
   initKeys();
+  initDisplay();
+  lastUserActivityAt = millis();
 
   uint64_t mac = ESP.getEfuseMac();
   char serial[24];
@@ -1648,7 +1653,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0132);
+  USB.firmwareVersion(0x0133);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -1658,11 +1663,12 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.2");
+  cdcPrintln("BOOT|PIXELPRO|1.3.3");
 }
 
 void loop() {
   pollKeys();
   pollCdc();
+  pollSaver();
   delay(1);
 }
