@@ -71,6 +71,40 @@ if send_anchor not in text:
 text = text.replace(send_anchor, send_patch, 1)
 tiny.write_text(text, encoding="utf-8")
 
+# The old ESP32-S2 QMK fork numbers the Raw HID IN endpoint before OUT by
+# default (IN=EP2, OUT=EP3). PIXEL PRO hardware bring-up already proved the
+# stable ESP32-S2/Windows layout is OUT=EP2 and IN=EP3. Keep keyboard IN on
+# EP1 and the shared consumer endpoint on EP4.
+usb_desc = root / "tmk_core/protocol/usb_descriptor.h"
+text = usb_desc.read_text(encoding="utf-8")
+endpoint_anchor = '''#ifdef RAW_ENABLE
+    RAW_IN_EPNUM,
+#    if STM32_USB_USE_OTG1
+#        define RAW_OUT_EPNUM RAW_IN_EPNUM
+#    else
+    RAW_OUT_EPNUM,
+#    endif
+#endif
+'''
+endpoint_patch = '''#ifdef RAW_ENABLE
+#    ifdef PROTOCOL_TINYUSB
+    RAW_OUT_EPNUM,
+    RAW_IN_EPNUM,
+#    else
+    RAW_IN_EPNUM,
+#        if STM32_USB_USE_OTG1
+#            define RAW_OUT_EPNUM RAW_IN_EPNUM
+#        else
+    RAW_OUT_EPNUM,
+#        endif
+#    endif
+#endif
+'''
+if endpoint_anchor not in text:
+    raise SystemExit("Raw HID endpoint enum anchor not found")
+text = text.replace(endpoint_anchor, endpoint_patch, 1)
+usb_desc.write_text(text, encoding="utf-8")
+
 via = root / "quantum/via.c"
 text = via.read_text(encoding="utf-8")
 
@@ -93,4 +127,4 @@ if via_anchor not in text:
 text = text.replace(via_anchor, via_patch, 1)
 via.write_text(text, encoding="utf-8")
 
-print("Patched experimental ESP32-S2 QMK TinyUSB Raw HID + Lumi dispatcher")
+print("Patched ESP32-S2 QMK TinyUSB Raw HID endpoints + Lumi dispatcher")
