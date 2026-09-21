@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.3.4 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display, and changes PIXEL PRO GIF playback to direct on-device decoding of the original compressed GIF file.
+Firmware 1.3.5 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.3.4|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.5|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -112,14 +112,17 @@ i8080 parallel), and maximum media FPS.
 PIXEL PRO accepts the original compressed GIF file. The app does not convert GIFs
 to raw RGB332 frame arrays and does not resize them to 240×160.
 
-Supported GIF logical canvas sizes:
+Supported GIF logical canvas sizes are 1×1 through 1024×1024. The original compressed GIF is not converted into a reduced raw-frame asset.
 
-- 480×320 landscape
-- 320×480 native portrait; firmware rotates this to landscape without resizing
+- 480×320 displays 1:1.
+- Native 320×480 is rotated to landscape before the selected scale transform.
+- Other sizes are scaled on-device.
 
 Start a GIF upload:
 
-SAVGIFBEGIN|<file bytes>|<width>|<height>
+SAVGIFBEGIN|<file bytes>|<width>|<height>|<FILL|FIT|STRETCH|TILE|CENTER|SPAN>
+
+For backward compatibility, omitting the final scale token defaults to FILL.
 
 Success:
 
@@ -142,8 +145,9 @@ Success:
 OK|SAVER|READY
 
 The original LZW-compressed GIF is persisted in LittleFS. AnimatedGIF decodes it
-on-device and outputs RGB565 to the ILI9486. Frame timing is kept, with a 17 ms
-minimum interval so playback is capped at 60 FPS.
+on-device and outputs RGB565 to the ILI9486. Scaling/cropping is performed while
+rendering, so storage remains the original GIF file rather than raw resized frames.
+Frame timing is kept, with a 17 ms minimum interval so playback is capped at 60 FPS.
 
 ### Static image / legacy compatibility
 

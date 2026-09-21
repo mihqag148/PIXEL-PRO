@@ -15,7 +15,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.4";
+static constexpr char FW_VERSION[] = "1.3.5";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -138,6 +138,15 @@ enum SaverPixelFormat : uint8_t {
   SAVER_GIF = 3,
 };
 
+enum GifScaleMode : uint8_t {
+  GIF_SCALE_FILL = 0,
+  GIF_SCALE_FIT = 1,
+  GIF_SCALE_STRETCH = 2,
+  GIF_SCALE_TILE = 3,
+  GIF_SCALE_CENTER = 4,
+  GIF_SCALE_SPAN = 5,
+};
+
 static bool displayReady = false;
 static uint16_t *renderBuffer = nullptr;
 
@@ -172,6 +181,13 @@ static bool gifPortraitSource = false;
 static uint16_t gifCanvasWidth = 0;
 static uint16_t gifCanvasHeight = 0;
 static uint32_t gifNextFrameAt = 0;
+static GifScaleMode gifScaleMode = GIF_SCALE_FILL;
+static GifScaleMode gifUploadScaleMode = GIF_SCALE_FILL;
+static bool gifRotate90 = false;
+static float gifScaleX = 1.0f;
+static float gifScaleY = 1.0f;
+static float gifOffsetX = 0.0f;
+static float gifOffsetY = 0.0f;
 
 static void stopSaver();
 
@@ -732,6 +748,86 @@ static int32_t gifSeekFile(
   return file->iPos;
 }
 
+static GifScaleMode parseGifScaleMode(String value) {
+  value.trim();
+  value.toUpperCase();
+
+  if (value == "FIT") return GIF_SCALE_FIT;
+  if (value == "STRETCH") return GIF_SCALE_STRETCH;
+  if (value == "TILE") return GIF_SCALE_TILE;
+  if (value == "CENTER") return GIF_SCALE_CENTER;
+  if (value == "SPAN") return GIF_SCALE_SPAN;
+  return GIF_SCALE_FILL;
+}
+
+static void configureGifTransform() {
+  gifRotate90 =
+      gifCanvasWidth == GIF_NATIVE_WIDTH &&
+      gifCanvasHeight == GIF_NATIVE_HEIGHT;
+
+  float sourceW =
+      gifRotate90
+          ? static_cast<float>(gifCanvasHeight)
+          : static_cast<float>(gifCanvasWidth);
+
+  float sourceH =
+      gifRotate90
+          ? static_cast<float>(gifCanvasWidth)
+          : static_cast<float>(gifCanvasHeight);
+
+  float fit =
+      min(
+          TFT_WIDTH / sourceW,
+          TFT_HEIGHT / sourceH);
+
+  float fill =
+      max(
+          TFT_WIDTH / sourceW,
+          TFT_HEIGHT / sourceH);
+
+  gifScaleX = 1.0f;
+  gifScaleY = 1.0f;
+
+  switch (gifScaleMode) {
+    case GIF_SCALE_FIT:
+      gifScaleX = gifScaleY = fit;
+      break;
+
+    case GIF_SCALE_STRETCH:
+      gifScaleX = TFT_WIDTH / sourceW;
+      gifScaleY = TFT_HEIGHT / sourceH;
+      break;
+
+    case GIF_SCALE_CENTER:
+      gifScaleX = gifScaleY = 1.0f;
+      break;
+
+    case GIF_SCALE_SPAN:
+      gifScaleX = gifScaleY = fill * 1.08f;
+      break;
+
+    case GIF_SCALE_TILE:
+      // Animated GIF tiling is intentionally lightweight: use Fit instead
+      // of expanding the compressed file into several raw copies.
+      gifScaleX = gifScaleY = fit;
+      break;
+
+    case GIF_SCALE_FILL:
+    default:
+      gifScaleX = gifScaleY = fill;
+      break;
+  }
+
+  float drawW = sourceW * gifScaleX;
+  float drawH = sourceH * gifScaleY;
+
+  gifOffsetX =
+      (TFT_WIDTH - drawW) * 0.5f;
+
+  gifOffsetY =
+      (TFT_HEIGHT - drawH) * 0.5f;
+}
+
 static void gifDraw(GIFDRAW *draw) {
   if (draw == nullptr ||
       renderBuffer == nullptr ||
@@ -751,70 +847,81 @@ static void gifDraw(GIFDRAW *draw) {
 
   int width = draw->iWidth;
 
-  if (!gifPortraitSource) {
-    if (sourceY < 0 ||
-        sourceY >= TFT_HEIGHT ||
-        sourceX >= TFT_WIDTH) {
-      return;
-    }
-
-    int clippedX =
-        sourceX < 0 ? 0 : sourceX;
-
-    int sourceSkip =
-        clippedX - sourceX;
-
-    int copyWidth =
-        width - sourceSkip;
-
-    if (clippedX + copyWidth > TFT_WIDTH) {
-      copyWidth =
-          TFT_WIDTH - clippedX;
-    }
-
-    if (copyWidth <= 0) {
-      return;
-    }
-
-    memcpy(
-        renderBuffer +
-            static_cast<size_t>(sourceY) *
-                TFT_WIDTH +
-            clippedX,
-        pixels + sourceSkip,
-        static_cast<size_t>(copyWidth) *
-            sizeof(uint16_t));
-
-    return;
-  }
-
   for (int x = 0; x < width; ++x) {
     int sx = sourceX + x;
     int sy = sourceY;
 
     if (sx < 0 ||
-        sx >= GIF_NATIVE_WIDTH ||
         sy < 0 ||
-        sy >= GIF_NATIVE_HEIGHT) {
+        sx >= gifCanvasWidth ||
+        sy >= gifCanvasHeight) {
       continue;
     }
 
-    int dx =
-        TFT_WIDTH - 1 - sy;
+    float rx =
+        gifRotate90
+            ? static_cast<float>(
+                  gifCanvasHeight - 1 - sy)
+            : static_cast<float>(sx);
 
-    int dy = sx;
+    float ry =
+        gifRotate90
+            ? static_cast<float>(sx)
+            : static_cast<float>(sy);
 
-    if (dx < 0 ||
-        dx >= TFT_WIDTH ||
-        dy < 0 ||
-        dy >= TFT_HEIGHT) {
+    int dx0 =
+        static_cast<int>(
+            floorf(
+                gifOffsetX +
+                rx * gifScaleX));
+
+    int dx1 =
+        static_cast<int>(
+            ceilf(
+                gifOffsetX +
+                (rx + 1.0f) * gifScaleX)) - 1;
+
+    int dy0 =
+        static_cast<int>(
+            floorf(
+                gifOffsetY +
+                ry * gifScaleY));
+
+    int dy1 =
+        static_cast<int>(
+            ceilf(
+                gifOffsetY +
+                (ry + 1.0f) * gifScaleY)) - 1;
+
+    if (dx1 < 0 ||
+        dy1 < 0 ||
+        dx0 >= TFT_WIDTH ||
+        dy0 >= TFT_HEIGHT) {
       continue;
     }
 
-    renderBuffer[
-        static_cast<size_t>(dy) *
-            TFT_WIDTH +
-        dx] = pixels[x];
+    dx0 = dx0 < 0 ? 0 : dx0;
+    dy0 = dy0 < 0 ? 0 : dy0;
+    dx1 =
+        dx1 >= TFT_WIDTH
+            ? TFT_WIDTH - 1
+            : dx1;
+    dy1 =
+        dy1 >= TFT_HEIGHT
+            ? TFT_HEIGHT - 1
+            : dy1;
+
+    uint16_t color = pixels[x];
+
+    for (int dy = dy0; dy <= dy1; ++dy) {
+      uint16_t *row =
+          renderBuffer +
+          static_cast<size_t>(dy) * TFT_WIDTH;
+
+      for (int dx = dx0; dx <= dx1; ++dx) {
+        row[dx] = color;
+      }
+    }
   }
 }
 
@@ -843,10 +950,10 @@ static bool gifDimensionsSupported(
     uint16_t width,
     uint16_t height) {
   return
-      (width == GIF_LANDSCAPE_WIDTH &&
-       height == GIF_LANDSCAPE_HEIGHT) ||
-      (width == GIF_NATIVE_WIDTH &&
-       height == GIF_NATIVE_HEIGHT);
+      width >= 1 &&
+      height >= 1 &&
+      width <= 1024 &&
+      height <= 1024;
 }
 
 static bool readGifHeader(
@@ -951,6 +1058,8 @@ static bool openGifDecoder() {
       gifCanvasWidth == GIF_NATIVE_WIDTH &&
       gifCanvasHeight == GIF_NATIVE_HEIGHT;
 
+  configureGifTransform();
+
   memset(
       renderBuffer,
       0,
@@ -1021,7 +1130,8 @@ static void closeGifUploadFile() {
 static bool beginGifUpload(
     uint32_t expectedBytes,
     uint16_t width,
-    uint16_t height) {
+    uint16_t height,
+    GifScaleMode scaleMode) {
   if (!littleFsReady ||
       expectedBytes < 10 ||
       !gifDimensionsSupported(
@@ -1066,6 +1176,7 @@ static bool beginGifUpload(
 
   gifUploadWidth = width;
   gifUploadHeight = height;
+  gifUploadScaleMode = scaleMode;
 
   saverBytesReceived = 0;
   saverDataBytes = expectedBytes;
@@ -1175,6 +1286,10 @@ static bool finishGifUpload() {
   saverHeight = actualHeight;
   saverDataBytes = actualSize;
   saverBytesReceived = actualSize;
+  gifScaleMode = gifUploadScaleMode;
+  preferences.putUChar(
+      "gscale",
+      static_cast<uint8_t>(gifScaleMode));
 
   return true;
 }
@@ -1199,6 +1314,18 @@ static void loadPersistedGif() {
   }
 
   saverFormat = SAVER_GIF;
+  uint8_t storedScale =
+      preferences.getUChar(
+          "gscale",
+          GIF_SCALE_FILL);
+
+  if (storedScale > GIF_SCALE_SPAN) {
+    storedScale = GIF_SCALE_FILL;
+  }
+
+  gifScaleMode =
+      static_cast<GifScaleMode>(
+          storedScale);
   saverWidth = width;
   saverHeight = height;
   saverDataBytes = fileSize;
@@ -1780,6 +1907,7 @@ static void handleCommand(String command) {
     int first = command.indexOf('|');
     int second = command.indexOf('|', first + 1);
     int third = command.indexOf('|', second + 1);
+    int fourth = command.indexOf('|', third + 1);
 
     if (first < 0 ||
         second < 0 ||
@@ -1792,17 +1920,30 @@ static void handleCommand(String command) {
     uint16_t width = 0;
     uint16_t height = 0;
 
+    String heightPart =
+        fourth >= 0
+            ? command.substring(third + 1, fourth)
+            : command.substring(third + 1);
+
+    String scalePart =
+        fourth >= 0
+            ? command.substring(fourth + 1)
+            : String("FILL");
+
+    GifScaleMode scaleMode =
+        parseGifScaleMode(scalePart);
+
     if (!parseUnsignedLong(
             command.substring(first + 1, second),
             16UL * 1024UL * 1024UL,
             byteCount) ||
         !parseUnsigned(
             command.substring(second + 1, third),
-            GIF_LANDSCAPE_WIDTH,
+            1024,
             width) ||
         !parseUnsigned(
-            command.substring(third + 1),
-            GIF_NATIVE_HEIGHT,
+            heightPart,
+            1024,
             height) ||
         !gifDimensionsSupported(
             width,
@@ -1810,7 +1951,8 @@ static void handleCommand(String command) {
         !beginGifUpload(
             byteCount,
             width,
-            height)) {
+            height,
+            scaleMode)) {
       cdcPrintln("ERR|SAVGIFBEGIN");
       return;
     }
@@ -2409,7 +2551,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0134);
+  USB.firmwareVersion(0x0135);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -2419,7 +2561,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.4");
+  cdcPrintln("BOOT|PIXELPRO|1.3.5");
 }
 
 void loop() {
