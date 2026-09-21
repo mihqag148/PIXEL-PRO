@@ -569,6 +569,345 @@ static bool hexDecode(const String &hex, String &out) {
   return true;
 }
 
+
+static void clearSaverBuffer() {
+  if (saverData != nullptr) {
+    free(saverData);
+    saverData = nullptr;
+  }
+
+  saverDataBytes = 0;
+  saverFrameBytes = 0;
+  saverBytesReceived = 0;
+  saverFrameCount = 0;
+  saverWidth = 0;
+  saverHeight = 0;
+  saverFormat = SAVER_NONE;
+  saverUploading = false;
+  saverReady = false;
+  saverActive = false;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = 0;
+
+  memset(saverDurations, 0, sizeof(saverDurations));
+}
+
+static void initDisplay() {
+  displayReady = tft->begin();
+
+  if (!displayReady) {
+    return;
+  }
+
+  tft->setRotation(1);
+
+  // ILI9486 FRMCTR1 has discrete frame-rate steps. FRS=0xA is the
+  // controller step nearest 60 Hz (~62 Hz). PIXEL PRO's renderer and
+  // host-media protocol are capped at 60 FPS.
+  tftBus->beginWrite();
+  tftBus->writeCommand(0xB1);
+  tftBus->write(0xA0);
+  tftBus->write(0x10);
+  tftBus->endWrite();
+
+  tft->fillScreen(RGB565_BLACK);
+
+  if (ESP.getPsramSize() > 0) {
+    renderBuffer = static_cast<uint16_t *>(
+        ps_malloc(static_cast<size_t>(TFT_WIDTH) * TFT_HEIGHT * 2));
+  }
+}
+
+static uint16_t rgb332To565(uint8_t value) {
+  uint8_t r3 = (value >> 5) & 0x07;
+  uint8_t g3 = (value >> 2) & 0x07;
+  uint8_t b2 = value & 0x03;
+
+  uint16_t r5 = static_cast<uint16_t>((r3 * 31 + 3) / 7);
+  uint16_t g6 = static_cast<uint16_t>((g3 * 63 + 3) / 7);
+  uint16_t b5 = static_cast<uint16_t>((b2 * 31 + 1) / 3);
+
+  return static_cast<uint16_t>((r5 << 11) | (g6 << 5) | b5);
+}
+
+static void renderSaverFrame(uint8_t index) {
+  if (!displayReady ||
+      !saverReady ||
+      saverData == nullptr ||
+      index >= saverFrameCount) {
+    return;
+  }
+
+  uint8_t *frame =
+      saverData + static_cast<size_t>(index) * saverFrameBytes;
+
+  if (saverFormat == SAVER_RGB565) {
+    tft->draw16bitRGBBitmap(
+        0,
+        0,
+        reinterpret_cast<uint16_t *>(frame),
+        TFT_WIDTH,
+        TFT_HEIGHT);
+    return;
+  }
+
+  if (saverFormat != SAVER_RGB332 ||
+      renderBuffer == nullptr) {
+    return;
+  }
+
+  for (uint16_t y = 0; y < GIF_HEIGHT; ++y) {
+    const uint8_t *src =
+        frame + static_cast<size_t>(y) * GIF_WIDTH;
+
+    uint16_t *row0 =
+        renderBuffer +
+        static_cast<size_t>(y * 2) * TFT_WIDTH;
+
+    uint16_t *row1 = row0 + TFT_WIDTH;
+
+    for (uint16_t x = 0; x < GIF_WIDTH; ++x) {
+      uint16_t color = rgb332To565(src[x]);
+      uint16_t dx = x * 2;
+
+      row0[dx] = color;
+      row0[dx + 1] = color;
+      row1[dx] = color;
+      row1[dx + 1] = color;
+    }
+  }
+
+  tft->draw16bitRGBBitmap(
+      0,
+      0,
+      renderBuffer,
+      TFT_WIDTH,
+      TFT_HEIGHT);
+}
+
+static void startSaverNow() {
+  if (!saverReady || saverData == nullptr || !displayReady) {
+    return;
+  }
+
+  saverActive = true;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = millis();
+  renderSaverFrame(0);
+}
+
+static void stopSaver() {
+  if (!saverActive) {
+    return;
+  }
+
+  saverActive = false;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = 0;
+
+  if (displayReady) {
+    tft->fillScreen(RGB565_BLACK);
+  }
+}
+
+static void pollSaver() {
+  uint32_t now = millis();
+
+  if (!saverActive) {
+    if (saverReady &&
+        saverDelayMs > 0 &&
+        pressedMask == 0 &&
+        static_cast<uint32_t>(now - lastUserActivityAt) >= saverDelayMs) {
+      startSaverNow();
+    }
+
+    return;
+  }
+
+  if (!saverReady ||
+      saverFrameCount <= 1 ||
+      saverFormat == SAVER_RGB565) {
+    return;
+  }
+
+  uint16_t duration =
+      max<uint16_t>(
+          GIF_MIN_FRAME_MS,
+          saverDurations[saverFrameIndex]);
+
+  if (static_cast<uint32_t>(now - saverFrameStartedAt) < duration) {
+    return;
+  }
+
+  saverFrameIndex =
+      static_cast<uint8_t>((saverFrameIndex + 1) % saverFrameCount);
+
+  saverFrameStartedAt = now;
+  renderSaverFrame(saverFrameIndex);
+}
+
+static bool parseSaverDurations(
+    const String &csv,
+    uint8_t frameCount) {
+  int start = 0;
+
+  for (uint8_t i = 0; i < frameCount; ++i) {
+    int comma = csv.indexOf(',', start);
+    bool last = i == frameCount - 1;
+
+    if ((!last && comma < 0) ||
+        (last && comma >= 0)) {
+      return false;
+    }
+
+    String token =
+        last ? csv.substring(start) : csv.substring(start, comma);
+
+    uint16_t duration = 0;
+
+    if (!parseUnsigned(token, 5000, duration)) {
+      return false;
+    }
+
+    saverDurations[i] =
+        max<uint16_t>(
+            GIF_MIN_FRAME_MS,
+            duration);
+
+    start = comma + 1;
+  }
+
+  return true;
+}
+
+static bool beginSaverUpload(
+    uint8_t frameCount,
+    uint16_t width,
+    uint16_t height,
+    SaverPixelFormat format,
+    const String &durationCsv) {
+  clearSaverBuffer();
+
+  bool staticImage =
+      format == SAVER_RGB565 &&
+      frameCount == 1 &&
+      width == TFT_WIDTH &&
+      height == TFT_HEIGHT;
+
+  bool animated =
+      format == SAVER_RGB332 &&
+      frameCount >= 1 &&
+      frameCount <= GIF_MAX_FRAMES &&
+      width == GIF_WIDTH &&
+      height == GIF_HEIGHT;
+
+  if (!staticImage && !animated) {
+    return false;
+  }
+
+  if (!parseSaverDurations(durationCsv, frameCount)) {
+    clearSaverBuffer();
+    return false;
+  }
+
+  saverFrameCount = frameCount;
+  saverWidth = width;
+  saverHeight = height;
+  saverFormat = format;
+
+  saverFrameBytes =
+      static_cast<size_t>(width) *
+      height *
+      (format == SAVER_RGB565 ? 2 : 1);
+
+  saverDataBytes =
+      saverFrameBytes * frameCount;
+
+  if (saverDataBytes == 0 ||
+      saverDataBytes > ESP.getFreePsram()) {
+    clearSaverBuffer();
+    return false;
+  }
+
+  saverData =
+      static_cast<uint8_t *>(ps_malloc(saverDataBytes));
+
+  if (saverData == nullptr) {
+    clearSaverBuffer();
+    return false;
+  }
+
+  memset(saverData, 0, saverDataBytes);
+  saverBytesReceived = 0;
+  saverUploading = true;
+  saverReady = false;
+  saverActive = false;
+
+  return true;
+}
+
+static bool writeSaverChunk(
+    uint8_t frameIndex,
+    size_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverData == nullptr ||
+      frameIndex >= saverFrameCount ||
+      offset >= saverFrameBytes) {
+    return false;
+  }
+
+  size_t expectedOffset =
+      static_cast<size_t>(frameIndex) * saverFrameBytes +
+      offset;
+
+  if (expectedOffset != saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[320] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<const unsigned char *>(encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      offset + decodedLength > saverFrameBytes ||
+      saverBytesReceived + decodedLength > saverDataBytes) {
+    return false;
+  }
+
+  memcpy(
+      saverData + saverBytesReceived,
+      decoded,
+      decodedLength);
+
+  saverBytesReceived += decodedLength;
+  return true;
+}
+
+static bool finishSaverUpload() {
+  if (!saverUploading ||
+      saverData == nullptr ||
+      saverBytesReceived != saverDataBytes) {
+    return false;
+  }
+
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = 0;
+
+  return true;
+}
+
 static String deviceHello() {
   char out[210];
   snprintf(
