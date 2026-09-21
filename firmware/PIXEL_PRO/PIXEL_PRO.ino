@@ -11,12 +11,13 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.2.0";
+static constexpr char FW_VERSION[] = "1.3.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
+static constexpr uint8_t PROFILE_COUNT = 20;
 static constexpr uint8_t LAYER_COUNT = 4;
-static constexpr uint8_t MACRO_COUNT = 8;
+static constexpr uint8_t MACRO_COUNT = 20;
 static constexpr uint8_t MACRO_MAX_LEN = 80;
 static constexpr uint32_t DEBOUNCE_MS = 8;
 
@@ -30,7 +31,7 @@ static constexpr uint8_t BIND_TRANSPARENT = 5;
 static constexpr uint8_t LAYER_MO = 1;
 static constexpr uint8_t LAYER_TG = 2;
 static constexpr uint8_t LAYER_TO = 3;
-static constexpr uint8_t KEYMAP_STORAGE_VERSION = 2;
+static constexpr uint8_t KEYMAP_STORAGE_VERSION = 3;
 
 static const uint8_t KEY_PINS[KEY_COUNT] = {1, 2, 3, 4, 5, 6, 7, 8};
 
@@ -53,12 +54,13 @@ USBHIDConsumerControl ConsumerControl;
 Preferences preferences;
 
 static KeyState keyState[KEY_COUNT] = {};
-static KeyBinding keymap[LAYER_COUNT][KEY_COUNT] = {};
+static KeyBinding keymap[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
 static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
 
 static uint8_t pressedMask = 0;
 static uint16_t activeConsumerCode = 0;
+static uint8_t activeProfile = 0;
 static uint8_t baseLayer = 0;
 static int8_t momentaryLayer = -1;
 static uint8_t toggledLayerMask = 0;
@@ -81,18 +83,20 @@ static KeyBinding transparentBinding() {
 }
 
 static void setDefaultKeymap() {
-  for (uint8_t layer = 0; layer < LAYER_COUNT; ++layer) {
-    for (uint8_t i = 0; i < KEY_COUNT; ++i) {
-      keymap[layer][i] =
-          layer == 0 ? disabledBinding() : transparentBinding();
+  for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+    for (uint8_t layer = 0; layer < LAYER_COUNT; ++layer) {
+      for (uint8_t i = 0; i < KEY_COUNT; ++i) {
+        keymap[profile][layer][i] =
+            layer == 0 ? disabledBinding() : transparentBinding();
+      }
     }
-  }
 
-  for (uint8_t i = 0; i < KEY_COUNT; ++i) {
-    keymap[0][i].type = BIND_KEYBOARD;
-    keymap[0][i].keyCode = static_cast<uint8_t>(HID_KEY_A + i);
-    keymap[0][i].modifiers = 0;
-    keymap[0][i].consumerCode = 0;
+    for (uint8_t i = 0; i < KEY_COUNT; ++i) {
+      keymap[profile][0][i].type = BIND_KEYBOARD;
+      keymap[profile][0][i].keyCode = static_cast<uint8_t>(HID_KEY_A + i);
+      keymap[profile][0][i].modifiers = 0;
+      keymap[profile][0][i].consumerCode = 0;
+    }
   }
 }
 
@@ -145,7 +149,7 @@ static void loadKeymap() {
     return;
   }
 
-  KeyBinding stored[LAYER_COUNT][KEY_COUNT] = {};
+  static KeyBinding stored[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
   size_t read = preferences.getBytes("keymap", stored, sizeof(stored));
 
   if (read != sizeof(stored)) {
@@ -153,11 +157,13 @@ static void loadKeymap() {
     return;
   }
 
-  for (uint8_t layer = 0; layer < LAYER_COUNT; ++layer) {
-    for (uint8_t i = 0; i < KEY_COUNT; ++i) {
-      if (!bindingIsValid(stored[layer][i])) {
-        saveKeymap();
-        return;
+  for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+    for (uint8_t layer = 0; layer < LAYER_COUNT; ++layer) {
+      for (uint8_t i = 0; i < KEY_COUNT; ++i) {
+        if (!bindingIsValid(stored[profile][layer][i])) {
+          saveKeymap();
+          return;
+        }
       }
     }
   }
@@ -204,7 +210,7 @@ static KeyBinding resolveBinding(uint8_t layer, uint8_t keyIndex) {
   int8_t scan = static_cast<int8_t>(layer);
 
   while (scan >= 0) {
-    const KeyBinding &binding = keymap[scan][keyIndex];
+    const KeyBinding &binding = keymap[activeProfile][scan][keyIndex];
 
     if (binding.type != BIND_TRANSPARENT) {
       return binding;
@@ -263,8 +269,10 @@ static String serializeBinding(const KeyBinding &binding) {
   }
 }
 
-static String serializeKeymap(uint8_t layer) {
+static String serializeKeymap(uint8_t profile, uint8_t layer) {
   String out = "KEYMAP|";
+  out += String(profile);
+  out += '|';
   out += String(layer);
   out += '|';
 
@@ -273,7 +281,7 @@ static String serializeKeymap(uint8_t layer) {
       out += ',';
     }
 
-    out += serializeBinding(keymap[layer][i]);
+    out += serializeBinding(keymap[profile][layer][i]);
   }
 
   return out;
