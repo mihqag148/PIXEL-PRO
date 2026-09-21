@@ -631,7 +631,7 @@ static void initDisplay() {
   tftBus->beginWrite();
   tftBus->writeCommand(0xB1);
   tftBus->write(0xA0);
-  tftBus->write(0x10);
+  tftBus->write(0x11);
   tftBus->endWrite();
 
   tft->fillScreen(RGB565_BLACK);
