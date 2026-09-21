@@ -1649,6 +1649,11 @@ static bool finishGifUpload() {
     return false;
   }
 
+  LittleFS.remove(
+      PACKED_PATH);
+  LittleFS.remove(
+      PACKED_TMP_PATH);
+
   saverUploading = false;
   saverReady = true;
   saverActive = false;
@@ -2301,9 +2306,10 @@ static void setPackedScaledPixel(
   if (dx1 <= dx0) {
     dx1 =
         static_cast<uint16_t>(
-            min<uint16_t>(
-                TFT_WIDTH,
-                dx0 + 1U));
+            dx0 + 1U >
+                    TFT_WIDTH
+                ? TFT_WIDTH
+                : dx0 + 1U);
   }
 
   for (uint16_t x = dx0;
@@ -2632,9 +2638,10 @@ static bool decodeNextPackedFrame() {
 
   packedNextFrameAt =
       millis() +
-      max<uint16_t>(
-          1,
-          durationMs);
+      (durationMs == 0
+           ? 1U
+           : static_cast<uint32_t>(
+                 durationMs));
 
   return true;
 }
@@ -2961,6 +2968,10 @@ static bool finishJpegUpload() {
       GIF_PATH);
   LittleFS.remove(
       GIF_TMP_PATH);
+  LittleFS.remove(
+      PACKED_PATH);
+  LittleFS.remove(
+      PACKED_TMP_PATH);
 
   saverUploading = false;
   saverReady = true;
@@ -3027,6 +3038,10 @@ static bool loadPersistedJpeg() {
 static void loadPersistedMedia() {
   saverReady = false;
 
+  if (loadPersistedPacked()) {
+    return;
+  }
+
   if (loadPersistedJpeg()) {
     return;
   }
@@ -3038,6 +3053,7 @@ static void clearSaverBuffer() {
   closeGifDecoder();
   closeGifUploadFile();
   closeJpegUploadFile();
+  closePackedFiles();
 
   if (jpegPlaybackFile) {
     jpegPlaybackFile.close();
@@ -3048,6 +3064,8 @@ static void clearSaverBuffer() {
     LittleFS.remove(GIF_PATH);
     LittleFS.remove(JPEG_TMP_PATH);
     LittleFS.remove(JPEG_PATH);
+    LittleFS.remove(PACKED_TMP_PATH);
+    LittleFS.remove(PACKED_PATH);
   }
 
   if (saverData != nullptr) {
@@ -3075,6 +3093,22 @@ static void clearSaverBuffer() {
   jpegUploadExpectedBytes = 0;
   jpegUploadWidth = 0;
   jpegUploadHeight = 0;
+
+  packedUploadExpectedBytes = 0;
+  packedStorageWidth = 0;
+  packedStorageHeight = 0;
+  packedFrameCount = 0;
+  packedFps = 0;
+  packedFrameIndex = 0;
+  packedPaletteCount = 0;
+  packedColorMode = 0;
+  packedDurationMs = 0;
+  packedFramesOffset = 0;
+  packedNextFrameAt = 0;
+  memset(
+      packedPalette565,
+      0,
+      sizeof(packedPalette565));
 
   memset(saverDurations, 0, sizeof(saverDurations));
 }
@@ -3177,6 +3211,25 @@ static void startSaverNow() {
     return;
   }
 
+  if (saverFormat == SAVER_PACKED) {
+    if (!openPackedPlayback()) {
+      saverReady = false;
+      return;
+    }
+
+    saverActive = true;
+    saverFrameStartedAt = millis();
+
+    tft->fillScreen(
+        RGB565_BLACK);
+
+    if (!decodeNextPackedFrame()) {
+      stopSaver();
+    }
+
+    return;
+  }
+
   if (saverFormat == SAVER_GIF) {
     if (!openGifDecoder()) {
       saverReady = false;
@@ -3226,6 +3279,10 @@ static void stopSaver() {
 
   closeGifDecoder();
 
+  if (packedPlaybackFile) {
+    packedPlaybackFile.close();
+  }
+
   if (wasActive && displayReady) {
     tft->fillScreen(RGB565_BLACK);
   }
@@ -3246,6 +3303,17 @@ static void pollSaver() {
   }
 
   if (!saverReady) {
+    return;
+  }
+
+  if (saverFormat == SAVER_PACKED) {
+    if (static_cast<int32_t>(
+            now - packedNextFrameAt) >= 0) {
+      if (!decodeNextPackedFrame()) {
+        stopSaver();
+      }
+    }
+
     return;
   }
 
