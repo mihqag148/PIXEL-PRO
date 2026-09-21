@@ -1,0 +1,84 @@
+name: Build PIXEL PRO ZMK
+on:
+  push:
+    branches: [main, feature/zmk-s2-mini]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pixel-pro
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ninja-build gperf device-tree-compiler
+          pip install west
+      - name: Cache SDK
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/zephyr-sdk-0.17.0
+          key: zephyr-sdk-0.17.0-esp32s2
+      - name: Install Xtensa SDK
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          cd ~
+          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/zephyr-sdk-0.17.0_linux-x86_64_minimal.tar.xz
+          tar xf zephyr-sdk-0.17.0_linux-x86_64_minimal.tar.xz
+          cd zephyr-sdk-0.17.0
+          ./setup.sh -t xtensa-espressif_esp32s2_zephyr-elf -h -c
+      - name: Fetch pinned sources
+        run: |
+          west init -l pixel-pro --mf config/west.yml
+          west update --narrow -o=--depth=1
+          west zephyr-export
+          pip install -r zephyr/scripts/requirements.txt
+      - name: Build ZMK firmware
+        env:
+          ZEPHYR_SDK_INSTALL_DIR: /home/runner/zephyr-sdk-0.17.0
+        run: |
+          west build -s zmk/app -b pixel_pro -d build -- -DZMK_CONFIG="$GITHUB_WORKSPACE/pixel-pro/config" -DZMK_EXTRA_MODULES="$GITHUB_WORKSPACE/pixel-pro"
+      - name: Package flashable image
+        run: |
+          mkdir -p dist
+          cp build/zephyr/zmk.bin dist/PIXEL_PRO_ZMK.bin
+          cp build/zephyr/zmk.elf dist/
+          cp build/zephyr/.config dist/build.config
+          cp build/zephyr/zephyr.dts dist/
+          cp pixel-pro/docs/FLASH.md dist/
+          west manifest --freeze > dist/west-lock.yml
+          printf 'PIXEL PRO ZMK 0.3.0\nCommit: %s\nRun: %s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/BUILD-INFO.txt
+          cd dist
+          sha256sum PIXEL_PRO_ZMK.bin > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PIXEL-PRO-ZMK-0.3.0
+          path: dist/
+          if-no-files-found: error
+      - name: Save failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zmk-build-diagnostics
+          path: |
+            build/zephyr/.config
+            build/zephyr/zephyr.dts
+            build/CMakeCache.txt
+  pr-checks:
+    name: PR checks
+    needs: build
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$BUILD_RESULT" = success
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}

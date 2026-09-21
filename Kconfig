@@ -1,0 +1,3 @@
+config PIXEL_PRO_USB
+    bool "PIXEL PRO ESP32-S2 USB and companion interface"
+    default y if BOARD_PIXEL_PRO
