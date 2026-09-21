@@ -2,6 +2,8 @@
 #include <Preferences.h>
 #include <Arduino_GFX_Library.h>
 #include <AnimatedGIF.h>
+#include <JPEGDEC.h>
+#include <Adafruit_NeoPixel.h>
 #include <LittleFS.h>
 #include <mbedtls/base64.h>
 #include "USB.h"
@@ -15,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.9";
+static constexpr char FW_VERSION[] = "1.4.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -38,6 +40,8 @@ static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
+static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 1024UL * 1024UL;
+static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -48,6 +52,8 @@ static constexpr uint8_t GIF_MAX_FRAMES = 32;
 
 static constexpr char GIF_PATH[] = "/screensaver.gif";
 static constexpr char GIF_TMP_PATH[] = "/screensaver.tmp";
+static constexpr char JPEG_PATH[] = "/screensaver.jpg";
+static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -62,6 +68,14 @@ static constexpr int8_t TFT_D4 = 37;
 static constexpr int8_t TFT_D5 = 38;
 static constexpr int8_t TFT_D6 = 39;
 static constexpr int8_t TFT_D7 = 40;
+
+static constexpr uint8_t RGB_PIN = 18;
+static constexpr uint8_t RGB_LED_COUNT = 8;
+static constexpr uint8_t RGB_STORAGE_VERSION = 1;
+// Physical LED order requested by PIXEL PRO layout:
+// LED1=K1, LED2=K2, LED3=K3, LED4=K4,
+// LED5=K8, LED6=K7, LED7=K6, LED8=K5.
+static constexpr uint8_t KEY_TO_LED[KEY_COUNT] = {0, 1, 2, 3, 7, 6, 5, 4};
 
 static constexpr uint8_t BIND_DISABLED = 0;
 static constexpr uint8_t BIND_KEYBOARD = 1;
@@ -123,6 +137,14 @@ static KeyBinding keymap[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
 static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
 
+static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
+static bool rgbEnabled = true;
+static uint8_t rgbBrightnessPercent = 25;
+static Adafruit_NeoPixel rgbStrip(
+    RGB_LED_COUNT,
+    RGB_PIN,
+    NEO_GRB + NEO_KHZ800);
+
 static uint8_t pressedMask = 0;
 static uint16_t activeConsumerCode = 0;
 static uint8_t activeProfile = 0;
@@ -136,6 +158,7 @@ enum SaverPixelFormat : uint8_t {
   SAVER_RGB332 = 1,
   SAVER_RGB565 = 2,
   SAVER_GIF = 3,
+  SAVER_JPEG = 4,
 };
 
 enum GifScaleMode : uint8_t {
@@ -172,6 +195,13 @@ static File gifUploadFile;
 static uint32_t gifUploadExpectedBytes = 0;
 static uint16_t gifUploadWidth = 0;
 static uint16_t gifUploadHeight = 0;
+
+static File jpegUploadFile;
+static uint32_t jpegUploadExpectedBytes = 0;
+static uint16_t jpegUploadWidth = 0;
+static uint16_t jpegUploadHeight = 0;
+static JPEGDEC jpegDecoder;
+static File jpegPlaybackFile;
 
 static AnimatedGIF gifDecoder;
 static File gifPlaybackFile;
@@ -321,6 +351,154 @@ static void saveMacro(uint8_t index) {
   char key[5];
   snprintf(key, sizeof(key), "m%u", index);
   preferences.putString(key, macros[index]);
+}
+
+static void setDefaultRgbProfiles() {
+  for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbProfiles[profile][key][0] =
+          static_cast<uint8_t>(255 - key * 16);
+      rgbProfiles[profile][key][1] =
+          static_cast<uint8_t>(96 + key * 18);
+      rgbProfiles[profile][key][2] =
+          static_cast<uint8_t>(min<int>(120, profile * 5));
+    }
+  }
+}
+
+static void saveRgbProfiles() {
+  preferences.putUChar("rgbver", RGB_STORAGE_VERSION);
+  preferences.putBytes(
+      "rgbkeys",
+      rgbProfiles,
+      sizeof(rgbProfiles));
+  preferences.putBool("rgben", rgbEnabled);
+  preferences.putUChar(
+      "rgbbr",
+      rgbBrightnessPercent);
+}
+
+static void loadRgbProfiles() {
+  setDefaultRgbProfiles();
+
+  if (preferences.getUChar("rgbver", 0) == RGB_STORAGE_VERSION &&
+      preferences.getBytesLength("rgbkeys") == sizeof(rgbProfiles)) {
+    size_t read =
+        preferences.getBytes(
+            "rgbkeys",
+            rgbProfiles,
+            sizeof(rgbProfiles));
+
+    if (read != sizeof(rgbProfiles)) {
+      setDefaultRgbProfiles();
+    }
+  }
+
+  rgbEnabled =
+      preferences.getBool(
+          "rgben",
+          true);
+
+  rgbBrightnessPercent =
+      static_cast<uint8_t>(
+          constrain(
+              preferences.getUChar(
+                  "rgbbr",
+                  25),
+              0,
+              100));
+}
+
+static void applyRgbProfile() {
+  uint8_t brightness =
+      rgbEnabled
+          ? static_cast<uint8_t>(
+                map(
+                    rgbBrightnessPercent,
+                    0,
+                    100,
+                    0,
+                    255))
+          : 0;
+
+  rgbStrip.setBrightness(brightness);
+
+  for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+    uint8_t led =
+        KEY_TO_LED[key];
+
+    rgbStrip.setPixelColor(
+        led,
+        rgbProfiles[activeProfile][key][0],
+        rgbProfiles[activeProfile][key][1],
+        rgbProfiles[activeProfile][key][2]);
+  }
+
+  rgbStrip.show();
+}
+
+static bool parseRgbHex(
+    const String &token,
+    uint8_t &r,
+    uint8_t &g,
+    uint8_t &b) {
+  if (token.length() != 6) {
+    return false;
+  }
+
+  char buffer[7] = {};
+  token.toCharArray(
+      buffer,
+      sizeof(buffer));
+
+  char *end = nullptr;
+  unsigned long value =
+      strtoul(
+          buffer,
+          &end,
+          16);
+
+  if (end == buffer ||
+      *end != '\0' ||
+      value > 0xFFFFFFUL) {
+    return false;
+  }
+
+  r = static_cast<uint8_t>(
+      (value >> 16) & 0xFF);
+  g = static_cast<uint8_t>(
+      (value >> 8) & 0xFF);
+  b = static_cast<uint8_t>(
+      value & 0xFF);
+
+  return true;
+}
+
+static String serializeRgbProfile(
+    uint8_t profile) {
+  String out = "RGB_PROFILE|";
+  out += String(profile);
+  out += '|';
+
+  char color[7];
+
+  for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+    if (key) {
+      out += ',';
+    }
+
+    snprintf(
+        color,
+        sizeof(color),
+        "%02X%02X%02X",
+        rgbProfiles[profile][key][0],
+        rgbProfiles[profile][key][1],
+        rgbProfiles[profile][key][2]);
+
+    out += color;
+  }
+
+  return out;
 }
 
 static uint8_t currentLayer() {
@@ -1730,7 +1908,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
