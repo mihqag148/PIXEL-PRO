@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.3.7 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
+Firmware 1.3.8 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.3.7|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.8|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -109,10 +109,11 @@ i8080 parallel), and maximum media FPS.
 
 ### Direct full-resolution GIF
 
-PIXEL PRO accepts the original compressed GIF file. The app does not convert GIFs
-to raw RGB332 frame arrays and does not resize them to 240×160.
+PIXEL PRO accepts a compressed GIF file. Lumi Macropad 1.20.10 can re-encode
+oversized/high-FPS GIFs before upload to reduce LittleFS usage; it never stores
+raw 480×320 frame dumps.
 
-Supported GIF logical canvas sizes are 1×1 through 1024×1024. The original compressed GIF is not converted into a reduced raw-frame asset.
+Supported GIF logical canvas sizes are 1×1 through 1024×1024. Small GIFs default to CENTER mode and are never enlarged unless the user explicitly selects another scale mode.
 
 - 480×320 displays 1:1.
 - 320×480 remains portrait. The selected scale transform is applied without automatic rotation.
@@ -144,7 +145,7 @@ Success:
 
 OK|SAVER|READY
 
-The original LZW-compressed GIF is persisted in LittleFS. AnimatedGIF decodes it
+The uploaded LZW-compressed GIF payload is persisted in LittleFS. AnimatedGIF decodes it
 on-device and outputs RGB565 to the ILI9486. Scaling/cropping is performed while
 rendering, so storage remains the original GIF file rather than raw resized frames.
 Frame timing is kept, with a 17 ms minimum interval so playback is capped at 60 FPS.
@@ -207,3 +208,11 @@ All values are bytes. Flash used is the compiled sketch size and flash total is 
 - GET_PROFILE
 - PING
 - REBOOT
+
+
+## Native USB reboot safety
+
+Firmware 1.3.8 disables the Arduino USB CDC DTR/RTS reboot hook during normal
+Lumi Macropad communication. Opening, closing, or relaunching the Windows app
+therefore cannot request ROM bootloader mode. Firmware update continues to use
+the explicit ROM BOOT/esptool flow.
