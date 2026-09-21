@@ -67,7 +67,19 @@ echo "==> Link QMK archive into an ESP-IDF flash image"
 cd "$IDF_PROJ"
 rm -rf build
 idf.py -B build build
-idf.py -B build merge-bin -o PIXEL_PRO_QMK_merged.bin -f raw
+
+# ESP-IDF 4.4's idf.py wrapper does not expose the newer merge-bin -o syntax.
+# Use the bundled esptool directly with the exact flash layout printed by the
+# successful ESP-IDF build.
+python3 "$IDF_PATH/components/esptool_py/esptool/esptool.py" \
+    --chip esp32s2 merge_bin \
+    -o "$IDF_PROJ/build/PIXEL_PRO_QMK_merged.bin" \
+    --flash_mode dio \
+    --flash_freq 80m \
+    --flash_size 4MB \
+    0x1000 "$IDF_PROJ/build/bootloader/bootloader.bin" \
+    0x8000 "$IDF_PROJ/build/partition_table/partition-table.bin" \
+    0x10000 "$IDF_PROJ/build/pixel_pro_qmk.bin"
 
 mkdir -p "$ROOT/dist/qmk"
 cp "$IDF_PROJ/build/pixel_pro_qmk.bin" "$ROOT/dist/qmk/PIXEL_PRO_QMK_app.bin"
