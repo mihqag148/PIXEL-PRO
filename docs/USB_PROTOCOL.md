@@ -1,8 +1,8 @@
 # PIXEL PRO USB CDC protocol v1
 
-Transport: native USB CDC ACM at 115200 baud. The baud value is informational for USB CDC.
+Transport: native USB CDC ACM. The nominal baud value is 115200; USB CDC does not depend on a physical UART baud clock.
 
-The same USB device also exposes standard HID keyboard and Firmware MSC interfaces.
+Firmware 1.0.1 exposes only HID keyboard + CDC while the Windows CDC path is validated.
 
 ## Host commands
 
@@ -18,7 +18,7 @@ Commands are ASCII, one command per line, terminated by LF.
 
 HELLO / GET_INFO:
 
-PIXELPRO|1|FW=1.0.0|MCU=ESP32S2|KEYS=8|CAPS=HID,CDC,MSC|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.0.1|MCU=ESP32S2|KEYS=8|CAPS=HID,CDC|VID=303A|PID=80C2
 
 GET_KEYS:
 
@@ -38,5 +38,8 @@ PONG|PIXELPRO
 
 Unknown commands return ERR|UNKNOWN_COMMAND.
 
-LumiPad identifies PIXEL PRO by probing CDC ports for the PIXELPRO|1| response. This
-avoids coupling the app to a fragile HID vendor interface.
+LumiPad identifies PIXEL PRO by probing CDC ports for the PIXELPRO|1| response.
+
+## USB initialization rule
+
+The build intentionally uses a generic ESP32-S2 target with USB CDC On Boot disabled. The firmware registers CDC and HID first and calls USB.begin() exactly once afterwards. This avoids the early USB auto-start behavior of the LOLIN S2 Mini board definition.

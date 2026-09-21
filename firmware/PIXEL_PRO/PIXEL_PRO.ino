@@ -2,17 +2,14 @@
 #include "USB.h"
 #include "USBHID.h"
 #include "USBHIDKeyboard.h"
-#include "FirmwareMSC.h"
 
-#if !ARDUINO_USB_CDC_ON_BOOT
+#if ARDUINO_USB_CDC_ON_BOOT
+#error PIXEL PRO composite firmware requires USB CDC On Boot disabled
+#else
 USBCDC USBSerial;
 #endif
 
-#if !ARDUINO_USB_MSC_ON_BOOT
-FirmwareMSC MSC_Update;
-#endif
-
-static constexpr char FW_VERSION[] = "1.0.0";
+static constexpr char FW_VERSION[] = "1.0.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -45,7 +42,7 @@ static String deviceHello() {
   char out[160];
   snprintf(
       out, sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|CAPS=HID,CDC,MSC|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|CAPS=HID,CDC|VID=%04X|PID=%04X",
       FW_VERSION, USB_VID_PIXEL, USB_PID_PIXEL);
   return String(out);
 }
@@ -89,6 +86,7 @@ static void pollCdc() {
       }
       continue;
     }
+
     if (cdcLine.length() < 160) {
       cdcLine += ch;
     } else {
@@ -125,6 +123,7 @@ static void initKeys() {
     keyState[i].rawPressed = pressed;
     keyState[i].stablePressed = pressed;
     keyState[i].changedAt = millis();
+
     if (pressed) {
       pressedMask |= static_cast<uint8_t>(1U << i);
     }
@@ -151,29 +150,35 @@ static void pollKeys() {
 }
 
 void setup() {
-  Serial.begin(115200);
   initKeys();
 
   uint64_t mac = ESP.getEfuseMac();
-  char serial[20];
-  snprintf(serial, sizeof(serial), "PP%012llX", static_cast<unsigned long long>(mac));
+  char serial[24];
+  snprintf(
+      serial,
+      sizeof(serial),
+      "PIXELPRO-%012llX",
+      static_cast<unsigned long long>(mac));
 
+  // CDC-on-boot is intentionally disabled in the build. All composite
+  // descriptors are therefore configured before the single USB.begin().
   USB.VID(USB_VID_PIXEL);
   USB.PID(USB_PID_PIXEL);
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0100);
+  USB.firmwareVersion(0x0101);
 
-  USBSerial.begin(115200);
-#if !ARDUINO_USB_MSC_ON_BOOT
-  MSC_Update.begin();
-#endif
+  USBSerial.begin();
   Keyboard.begin();
-  USB.begin();
 
-  delay(250);
-  cdcPrintln("BOOT|PIXELPRO|1.0.0");
+  if (!USB.begin()) {
+    // There is no second transport available here; keep running so a reset can
+    // recover without entering a reboot loop.
+  }
+
+  delay(500);
+  cdcPrintln("BOOT|PIXELPRO|1.0.1");
 }
 
 void loop() {

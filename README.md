@@ -2,8 +2,7 @@
 
 PIXEL PRO is an ESP32-S2 macro pad firmware and Windows companion application target.
 
-This repository now uses the ESP32-S2 native USB peripheral through Arduino-ESP32/TinyUSB.
-The active firmware does not depend on keyboard firmware frameworks or browser keymap protocols.
+The active firmware uses the ESP32-S2 native USB peripheral through Arduino-ESP32/TinyUSB.
 
 ## Phase 1 USB device
 
@@ -11,11 +10,10 @@ The single USB-C connection exposes:
 
 - Standard HID keyboard: works without LumiPad.
 - USB CDC serial: LumiPad configuration/diagnostics channel.
-- Firmware MSC: recovery/update drive provided by Arduino-ESP32.
 
-The public eezbotfun/8-key-macropad project is used as an architectural reference for its
-HID + CDC + storage workflow. This implementation is independent and keeps the PIXEL PRO
-hardware/product identity.
+Firmware MSC is intentionally disabled in 1.0.1 while HID + CDC are hardware-validated. Storage/update mode will return only after CDC is confirmed stable on Windows.
+
+The public eezbotfun/8-key-macropad project is used as an architectural reference for its HID + CDC + storage workflow. PIXEL PRO uses an independent implementation.
 
 ## Test keymap
 
