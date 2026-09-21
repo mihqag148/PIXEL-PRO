@@ -25,6 +25,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/usb/usb_device.h>
+#include <zephyr/drivers/interrupt_controller/intc_esp32.h>
 
 #include <usb_dwc2_hw.h>
 #include "usb_dc_dw_stm32.h"
@@ -179,13 +180,18 @@ static int usb_dw_init_pinctrl(const struct usb_dw_config *const config)
 										\
 	static void usb_dw_irq_enable_func_##n(const struct device *dev)	\
 	{									\
-		IRQ_CONNECT(DT_INST_IRQN(n),					\
-			    DT_INST_IRQ(n, priority),				\
-			    usb_dw_isr_handler,					\
-			    0,							\
-			    DW_IRQ_FLAGS(n));					\
-										\
-		irq_enable(DT_INST_IRQN(n));					\
+		ARG_UNUSED(dev);						\
+		/* ESP32-S2 DTS IRQ numbers are peripheral interrupt-matrix sources, */ \
+		/* not Xtensa CPU IRQs. Allocate source 48 through Espressif INTC so */ \
+		/* it is routed to a free CPU vector in the valid 0..31 range. */ \
+		int ret = esp_intr_alloc(DT_INST_IRQ(n, irq),			\
+			ESP_PRIO_TO_FLAGS(DT_INST_IRQ(n, priority)) |		\
+			ESP_INT_FLAGS_CHECK(DW_IRQ_FLAGS(n)),			\
+			(intr_handler_t)usb_dw_isr_handler,			\
+			NULL, NULL);						\
+		if (ret != 0) {						\
+			LOG_ERR("USB interrupt allocation failed (%d)", ret);	\
+		}								\
 	}									\
 										\
 	static const struct usb_dw_config usb_dw_cfg_##n = {			\
