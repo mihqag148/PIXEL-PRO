@@ -33,7 +33,7 @@ static int get_report(const struct device *dev, struct usb_setup_packet *setup,
         return -ENOTSUP;
     }
     memset(reply, 0, sizeof(reply));
-    snprintf(reply, sizeof(reply), "PIXELPRO|ZMK|0.3.0|KEYS=%02X|NAV=%X|DROP=%u",
+    snprintf(reply, sizeof(reply), "PIXELPRO|ZMK|0.3.1|KEYS=%02X|NAV=%X|DROP=%u",
              (unsigned)atomic_get(&key_state), (unsigned)atomic_get(&nav_state),
              (unsigned)atomic_get(&dropped));
     *data = reply;
