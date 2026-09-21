@@ -410,14 +410,14 @@ static bool parseKeymapPayload(
 }
 
 static String hexEncode(const String &input) {
-  static const char HEX[] = "0123456789ABCDEF";
+  static const char HEX_DIGITS[] = "0123456789ABCDEF";
   String out;
   out.reserve(input.length() * 2);
 
   for (size_t i = 0; i < input.length(); ++i) {
     uint8_t value = static_cast<uint8_t>(input[i]);
-    out += HEX[value >> 4];
-    out += HEX[value & 0x0F];
+    out += HEX_DIGITS[value >> 4];
+    out += HEX_DIGITS[value & 0x0F];
   }
 
   return out;
