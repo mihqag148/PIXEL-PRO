@@ -1,101 +1,82 @@
 # PIXEL PRO USB CDC protocol v1
 
-Transport: native USB CDC ACM. Nominal baud: 115200.
-
-Firmware 1.2.0 exposes HID keyboard + consumer control + CDC with a VIA-style configuration model.
+Firmware 1.3.0 keeps native USB HID + CDC and adds 20 keymap profiles.
 
 ## HELLO
 
-HELLO / GET_INFO returns:
+HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.2.0|MCU=ESP32S2|KEYS=8|LAYERS=4|MACROS=8|CAPS=HID,CDC,KEYMAP,LAYERS,MACRO|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.0|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO|VID=303A|PID=80C2
 
-## Keymap
+## Keymap profiles
 
-There are four persistent layers, each with eight physical keys.
+There are 20 persistent profiles. Each profile has 4 layers and 8 physical keys.
 
-Read a layer:
+Read one layer:
 
-GET_KEYMAP|0
+GET_KEYMAP|<profile 0-19>|<layer 0-3>
 
 Response:
 
-KEYMAP|0|K:4:0,K:5:0,K:6:0,K:7:0,K:8:0,K:9:0,K:10:0,K:11:0
+KEYMAP|<profile>|<layer>|<8 bindings>
 
-Write a complete layer:
+Write one layer:
 
-SET_KEYMAP|0|K:4:0,K:5:0,K:6:0,K:7:0,K:8:0,K:9:0,K:10:0,K:11:0
+SET_KEYMAP|<profile>|<layer>|<8 bindings>
 
 Success:
 
-OK|KEYMAP|0
+OK|KEYMAP|<profile>|<layer>
 
 Binding formats:
 
 - K:<keyboard usage>:<modifier mask>
 - C:<consumer usage>:0
 - L:<layer>:<action>
-- M:<macro slot>:0
+- M:<macro slot 0-19>:0
 - T:0:0 = transparent
 - D:0:0 = disabled
 
-Modifier mask:
-
-- 1 = Left Ctrl
-- 2 = Left Shift
-- 4 = Left Alt
-- 8 = Left GUI / Windows
-
 Layer actions:
 
-- 1 = MO(layer), momentary while held
-- 2 = TG(layer), toggle layer
-- 3 = TO(layer), switch base layer
+- 1 = MO(layer)
+- 2 = TG(layer)
+- 3 = TO(layer)
 
-Examples:
+RESET_KEYMAP resets all 20 profiles. Layer 0 becomes A-H and layers 1-3 become Transparent.
 
-- Ctrl+C: K:6:1
-- standalone Ctrl: K:0:1
-- Play/Pause: C:205:0
-- MO(1): L:1:1
-- Macro 0: M:0:0
+## Active profile / layer
 
-RESET_KEYMAP restores Layer 0 to A-H and Layers 1-3 to Transparent.
+GET_PROFILE
 
-## Macros
-
-Eight persistent ASCII macro slots are available. Each stores up to 80 printable ASCII characters.
-
-Read:
-
-GET_MACRO|0
-
-Response uses hex-encoded ASCII:
-
-MACRO|0|48656C6C6F
-
-Write:
-
-SET_MACRO|0|48656C6C6F
+SET_PROFILE|<profile 0-19>|<base layer 0-3>
 
 Success:
 
-OK|MACRO|0
+OK|PROFILE|<profile>|<layer>
 
-## Matrix test
+## Host macros
 
-Physical transitions are asynchronous:
+M1-M20 are host-driven macro slots. Firmware does not execute the macro body itself.
 
-KEY|1|DOWN|L=0
-KEY|1|UP|L=0
+When a key mapped to M1-M20 is pressed, firmware emits:
+
+MACRO|<1-20>|KEY=<1-8>|P=<profile>|L=<layer>
+
+LumiPad receives this event and executes the stored Windows macro. This lets macros include keyboard combos, mouse actions, text, media, delays, running apps/files, and Lumi Action references.
+
+## Matrix events
+
+Physical key transitions:
+
+KEY|<1-8>|DOWN|P=<profile>|L=<layer>
+KEY|<1-8>|UP|P=<profile>|L=<layer>
 
 GET_KEYS returns:
 
-KEYS|00|L=0
+KEYS|<mask>|P=<profile>|L=<layer>
 
-GET_LAYER returns:
-
-LAYER|ACTIVE=0|BASE=0|TOGGLE=0
+GET_LAYER returns active profile/layer state.
 
 ## Other commands
 
@@ -103,9 +84,6 @@ LAYER|ACTIVE=0|BASE=0|TOGGLE=0
 - GET_INFO
 - GET_KEYS
 - GET_LAYER
+- GET_PROFILE
 - PING
 - REBOOT
-
-PING returns PONG|PIXELPRO.
-
-The build uses the generic ESP32-S2 target with USB CDC On Boot disabled. CDC and HID descriptors are registered before USB.begin().
