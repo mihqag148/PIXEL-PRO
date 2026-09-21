@@ -1,4 +1,4 @@
-# Flash PIXEL PRO ZMK 0.3.0
+# Flash PIXEL PRO ZMK 0.3.1
 
 Target: LOLIN/WEMOS ESP32-S2 Mini, 4 MB flash, new wiring in HARDWARE.md.
 The Zephyr ESP_SIMPLE_BOOT image includes boot initialization and is
