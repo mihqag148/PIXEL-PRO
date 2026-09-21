@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.3.1 keeps native USB HID + CDC, 20 keymap profiles, and adds live memory telemetry.
+Firmware 1.3.2 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, and adds direct Lumi Action key bindings.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.3.1|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,MEM|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.2|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -34,6 +34,7 @@ Binding formats:
 - C:<consumer usage>:0
 - L:<layer>:<action>
 - M:<macro slot 0-19>:0
+- A:<Lumi Action 1-32>:0
 - T:0:0 = transparent
 - D:0:0 = disabled
 
@@ -65,7 +66,20 @@ MACRO|<1-20>|KEY=<1-8>|P=<profile>|L=<layer>
 
 LumiPad receives this event and executes the stored Windows macro. This lets macros include keyboard combos, mouse actions, text, media, delays, running apps/files, and Lumi Action references.
 
+## Lumi Action bindings
+
+A key can be bound directly to Lumi Action 1-32 using:
+
+A:<action id>:0
+
+When that key is pressed, firmware emits:
+
+ACTION|<1-32>|KEY=<1-8>|P=<profile>|L=<layer>
+
+The Windows app looks up the matching Lumi Action and runs its stored script.
+
 ## Matrix events
+
 
 Physical key transitions:
 
