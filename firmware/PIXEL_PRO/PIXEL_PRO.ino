@@ -1709,6 +1709,936 @@ static void loadPersistedGif() {
   saverActive = false;
 }
 
+static void closePackedFiles() {
+  if (packedUploadFile) {
+    packedUploadFile.close();
+  }
+
+  if (packedPlaybackFile) {
+    packedPlaybackFile.close();
+  }
+}
+
+static bool readPackedU16(
+    File &file,
+    uint16_t &value) {
+  uint8_t bytes[2] = {};
+
+  if (file.read(
+          bytes,
+          sizeof(bytes)) !=
+      sizeof(bytes)) {
+    return false;
+  }
+
+  value =
+      static_cast<uint16_t>(
+          bytes[0]) |
+      (static_cast<uint16_t>(
+           bytes[1]) <<
+       8);
+
+  return true;
+}
+
+static bool readPackedU32(
+    File &file,
+    uint32_t &value) {
+  uint8_t bytes[4] = {};
+
+  if (file.read(
+          bytes,
+          sizeof(bytes)) !=
+      sizeof(bytes)) {
+    return false;
+  }
+
+  value =
+      static_cast<uint32_t>(
+          bytes[0]) |
+      (static_cast<uint32_t>(
+           bytes[1]) <<
+       8) |
+      (static_cast<uint32_t>(
+           bytes[2]) <<
+       16) |
+      (static_cast<uint32_t>(
+           bytes[3]) <<
+       24);
+
+  return true;
+}
+
+static uint16_t rgb888To565(
+    uint8_t r,
+    uint8_t g,
+    uint8_t b) {
+  return static_cast<uint16_t>(
+      ((r & 0xF8) << 8) |
+      ((g & 0xFC) << 3) |
+      (b >> 3));
+}
+
+static uint16_t expectedPackedPaletteCount(
+    uint8_t mode) {
+  switch (mode) {
+    case 2:
+      return 256;
+    case 3:
+      return 16;
+    case 4:
+      return 4;
+    case 5:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+static bool readPackedHeader(
+    File &file,
+    bool loadPalette) {
+  if (!file ||
+      !file.seek(0)) {
+    return false;
+  }
+
+  uint8_t magic[4] = {};
+
+  if (file.read(
+          magic,
+          sizeof(magic)) !=
+      sizeof(magic) ||
+      magic[0] != 'P' ||
+      magic[1] != 'X' ||
+      magic[2] != 'Q' ||
+      magic[3] != '1') {
+    return false;
+  }
+
+  int modeRead =
+      file.read();
+
+  int flagsRead =
+      file.read();
+
+  if (modeRead < 0 ||
+      flagsRead < 0) {
+    return false;
+  }
+
+  uint8_t mode =
+      static_cast<uint8_t>(
+          modeRead);
+
+  uint8_t flags =
+      static_cast<uint8_t>(
+          flagsRead);
+
+  uint16_t storageWidth = 0;
+  uint16_t storageHeight = 0;
+  uint16_t displayWidth = 0;
+  uint16_t displayHeight = 0;
+  uint16_t frameCount = 0;
+  uint16_t fps = 0;
+  uint32_t durationMs = 0;
+  uint16_t paletteCount = 0;
+  uint16_t reserved = 0;
+
+  if (!readPackedU16(
+          file,
+          storageWidth) ||
+      !readPackedU16(
+          file,
+          storageHeight) ||
+      !readPackedU16(
+          file,
+          displayWidth) ||
+      !readPackedU16(
+          file,
+          displayHeight) ||
+      !readPackedU16(
+          file,
+          frameCount) ||
+      !readPackedU16(
+          file,
+          fps) ||
+      !readPackedU32(
+          file,
+          durationMs) ||
+      !readPackedU16(
+          file,
+          paletteCount) ||
+      !readPackedU16(
+          file,
+          reserved)) {
+    return false;
+  }
+
+  (void)reserved;
+
+  bool supportedStorage =
+      (storageWidth == 480 &&
+       storageHeight == 320) ||
+      (storageWidth == 360 &&
+       storageHeight == 240) ||
+      (storageWidth == 240 &&
+       storageHeight == 160);
+
+  if (mode > 5 ||
+      (flags & 0x03) != 0x03 ||
+      !supportedStorage ||
+      displayWidth != TFT_WIDTH ||
+      displayHeight != TFT_HEIGHT ||
+      frameCount == 0 ||
+      fps == 0 ||
+      fps > 60 ||
+      durationMs == 0 ||
+      paletteCount !=
+          expectedPackedPaletteCount(
+              mode)) {
+    return false;
+  }
+
+  if (file.size() == 0 ||
+      file.size() >=
+          PACKED_UPLOAD_LIMIT_BYTES) {
+    return false;
+  }
+
+  memset(
+      packedPalette565,
+      0,
+      sizeof(packedPalette565));
+
+  for (uint16_t index = 0;
+       index < paletteCount;
+       ++index) {
+    int r = file.read();
+    int g = file.read();
+    int b = file.read();
+
+    if (r < 0 ||
+        g < 0 ||
+        b < 0) {
+      return false;
+    }
+
+    if (loadPalette) {
+      packedPalette565[index] =
+          rgb888To565(
+              static_cast<uint8_t>(r),
+              static_cast<uint8_t>(g),
+              static_cast<uint8_t>(b));
+    }
+  }
+
+  packedColorMode =
+      mode;
+
+  packedStorageWidth =
+      storageWidth;
+
+  packedStorageHeight =
+      storageHeight;
+
+  packedFrameCount =
+      frameCount;
+
+  packedFps =
+      fps;
+
+  packedDurationMs =
+      durationMs;
+
+  packedPaletteCount =
+      paletteCount;
+
+  packedFramesOffset =
+      static_cast<uint32_t>(
+          file.position());
+
+  return true;
+}
+
+static bool inspectPackedFile(
+    const char *path,
+    size_t &fileSize) {
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          path)) {
+    return false;
+  }
+
+  File file =
+      LittleFS.open(
+          path,
+          "r");
+
+  if (!file) {
+    return false;
+  }
+
+  fileSize =
+      file.size();
+
+  bool ok =
+      readPackedHeader(
+          file,
+          false);
+
+  file.close();
+
+  return ok;
+}
+
+static bool beginPackedUpload(
+    uint32_t expectedBytes) {
+  if (!littleFsReady ||
+      expectedBytes < 26 ||
+      expectedBytes >=
+          PACKED_UPLOAD_LIMIT_BYTES) {
+    return false;
+  }
+
+  clearSaverBuffer();
+
+  size_t total =
+      LittleFS.totalBytes();
+
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 4096 >
+      freeBytes) {
+    return false;
+  }
+
+  packedUploadFile =
+      LittleFS.open(
+          PACKED_TMP_PATH,
+          "w");
+
+  if (!packedUploadFile) {
+    return false;
+  }
+
+  packedUploadExpectedBytes =
+      expectedBytes;
+
+  saverBytesReceived =
+      0;
+
+  saverDataBytes =
+      expectedBytes;
+
+  saverFormat =
+      SAVER_PACKED;
+
+  saverUploading =
+      true;
+
+  saverReady =
+      false;
+
+  saverActive =
+      false;
+
+  return true;
+}
+
+static bool writePackedUploadChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverFormat != SAVER_PACKED ||
+      !packedUploadFile ||
+      offset !=
+          saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[1100] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      saverBytesReceived +
+              decodedLength >
+          packedUploadExpectedBytes) {
+    return false;
+  }
+
+  size_t written =
+      packedUploadFile.write(
+          decoded,
+          decodedLength);
+
+  if (written !=
+      decodedLength) {
+    return false;
+  }
+
+  saverBytesReceived +=
+      decodedLength;
+
+  return true;
+}
+
+static bool finishPackedUpload() {
+  if (!saverUploading ||
+      saverFormat != SAVER_PACKED ||
+      saverBytesReceived !=
+          packedUploadExpectedBytes) {
+    closePackedFiles();
+    return false;
+  }
+
+  packedUploadFile.flush();
+  packedUploadFile.close();
+
+  size_t actualSize = 0;
+
+  if (!inspectPackedFile(
+          PACKED_TMP_PATH,
+          actualSize) ||
+      actualSize !=
+          packedUploadExpectedBytes) {
+    LittleFS.remove(
+        PACKED_TMP_PATH);
+
+    saverUploading =
+        false;
+
+    saverReady =
+        false;
+
+    return false;
+  }
+
+  LittleFS.remove(
+      PACKED_PATH);
+
+  if (!LittleFS.rename(
+          PACKED_TMP_PATH,
+          PACKED_PATH)) {
+    LittleFS.remove(
+        PACKED_TMP_PATH);
+
+    saverUploading =
+        false;
+
+    saverReady =
+        false;
+
+    return false;
+  }
+
+  LittleFS.remove(
+      GIF_PATH);
+
+  LittleFS.remove(
+      GIF_TMP_PATH);
+
+  LittleFS.remove(
+      JPEG_PATH);
+
+  LittleFS.remove(
+      JPEG_TMP_PATH);
+
+  saverUploading =
+      false;
+
+  saverReady =
+      true;
+
+  saverActive =
+      false;
+
+  saverFormat =
+      SAVER_PACKED;
+
+  saverWidth =
+      packedStorageWidth;
+
+  saverHeight =
+      packedStorageHeight;
+
+  saverDataBytes =
+      actualSize;
+
+  saverBytesReceived =
+      actualSize;
+
+  return true;
+}
+
+static bool loadPersistedPacked() {
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          PACKED_PATH)) {
+    return false;
+  }
+
+  size_t fileSize = 0;
+
+  if (!inspectPackedFile(
+          PACKED_PATH,
+          fileSize)) {
+    LittleFS.remove(
+        PACKED_PATH);
+
+    return false;
+  }
+
+  saverFormat =
+      SAVER_PACKED;
+
+  saverWidth =
+      packedStorageWidth;
+
+  saverHeight =
+      packedStorageHeight;
+
+  saverDataBytes =
+      fileSize;
+
+  saverBytesReceived =
+      fileSize;
+
+  saverUploading =
+      false;
+
+  saverReady =
+      true;
+
+  saverActive =
+      false;
+
+  return true;
+}
+
+static bool readPackedSingleCode(
+    File &file,
+    uint8_t mode,
+    uint16_t &color) {
+  if (mode == 0) {
+    int r = file.read();
+    int g = file.read();
+    int b = file.read();
+
+    if (r < 0 ||
+        g < 0 ||
+        b < 0) {
+      return false;
+    }
+
+    color =
+        rgb888To565(
+            static_cast<uint8_t>(r),
+            static_cast<uint8_t>(g),
+            static_cast<uint8_t>(b));
+
+    return true;
+  }
+
+  if (mode == 1) {
+    return readPackedU16(
+        file,
+        color);
+  }
+
+  int index =
+      file.read();
+
+  if (index < 0 ||
+      static_cast<uint16_t>(
+          index) >=
+          packedPaletteCount) {
+    return false;
+  }
+
+  color =
+      packedPalette565[
+          static_cast<uint8_t>(
+              index)];
+
+  return true;
+}
+
+static void setPackedScaledPixel(
+    uint16_t sourceX,
+    uint16_t color) {
+  uint16_t dx0 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  uint16_t dx1 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX + 1U) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  if (dx1 <= dx0) {
+    dx1 =
+        static_cast<uint16_t>(
+            min<uint16_t>(
+                TFT_WIDTH,
+                dx0 + 1U));
+  }
+
+  for (uint16_t x = dx0;
+       x < dx1 &&
+       x < TFT_WIDTH;
+       ++x) {
+    packedLineBuffer[x] =
+        color;
+  }
+}
+
+static bool decodePackedSpan(
+    File &file,
+    uint16_t sourceY,
+    uint16_t sourceX,
+    uint16_t sourceCount) {
+  if (sourceY >=
+          packedStorageHeight ||
+      sourceX >=
+          packedStorageWidth ||
+      sourceCount == 0 ||
+      static_cast<uint32_t>(
+          sourceX) +
+              sourceCount >
+          packedStorageWidth) {
+    return false;
+  }
+
+  uint16_t produced = 0;
+
+  while (produced <
+         sourceCount) {
+    int controlRead =
+        file.read();
+
+    if (controlRead < 0) {
+      return false;
+    }
+
+    uint8_t control =
+        static_cast<uint8_t>(
+            controlRead);
+
+    uint16_t packetCount =
+        static_cast<uint16_t>(
+            (control & 0x7F) +
+            1U);
+
+    if (produced +
+            packetCount >
+        sourceCount) {
+      return false;
+    }
+
+    bool repeat =
+        (control & 0x80) != 0;
+
+    if (repeat) {
+      uint16_t color = 0;
+
+      if (!readPackedSingleCode(
+              file,
+              packedColorMode,
+              color)) {
+        return false;
+      }
+
+      for (uint16_t i = 0;
+           i < packetCount;
+           ++i) {
+        setPackedScaledPixel(
+            static_cast<uint16_t>(
+                sourceX +
+                produced +
+                i),
+            color);
+      }
+
+      produced +=
+          packetCount;
+
+      continue;
+    }
+
+    if (packedColorMode <= 2) {
+      for (uint16_t i = 0;
+           i < packetCount;
+           ++i) {
+        uint16_t color = 0;
+
+        if (!readPackedSingleCode(
+                file,
+                packedColorMode,
+                color)) {
+          return false;
+        }
+
+        setPackedScaledPixel(
+            static_cast<uint16_t>(
+                sourceX +
+                produced +
+                i),
+            color);
+      }
+
+      produced +=
+          packetCount;
+
+      continue;
+    }
+
+    uint8_t bits =
+        packedColorMode == 3
+            ? 4
+            : packedColorMode == 4
+                ? 2
+                : 1;
+
+    size_t packedBytes =
+        (static_cast<size_t>(
+             packetCount) *
+             bits +
+         7U) /
+        8U;
+
+    uint8_t packed[64] = {};
+
+    if (packedBytes >
+            sizeof(packed) ||
+        file.read(
+            packed,
+            packedBytes) !=
+            packedBytes) {
+      return false;
+    }
+
+    uint8_t mask =
+        static_cast<uint8_t>(
+            (1U << bits) -
+            1U);
+
+    for (uint16_t i = 0;
+         i < packetCount;
+         ++i) {
+      uint16_t bitPosition =
+          static_cast<uint16_t>(
+              i *
+              bits);
+
+      uint16_t byteIndex =
+          bitPosition /
+          8U;
+
+      uint8_t shift =
+          static_cast<uint8_t>(
+              bitPosition %
+              8U);
+
+      uint8_t paletteIndex =
+          static_cast<uint8_t>(
+              (packed[byteIndex] >>
+               shift) &
+              mask);
+
+      if (paletteIndex >=
+          packedPaletteCount) {
+        return false;
+      }
+
+      setPackedScaledPixel(
+          static_cast<uint16_t>(
+              sourceX +
+              produced +
+              i),
+          packedPalette565[
+              paletteIndex]);
+    }
+
+    produced +=
+        packetCount;
+  }
+
+  uint16_t dx0 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  uint16_t dx1 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX +
+               sourceCount) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  uint16_t dy0 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceY) *
+           TFT_HEIGHT) /
+          packedStorageHeight);
+
+  uint16_t dy1 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceY + 1U) *
+           TFT_HEIGHT) /
+          packedStorageHeight);
+
+  if (dx1 <= dx0 ||
+      dy1 <= dy0 ||
+      dx1 > TFT_WIDTH ||
+      dy1 > TFT_HEIGHT) {
+    return false;
+  }
+
+  for (uint16_t y = dy0;
+       y < dy1;
+       ++y) {
+    tft->draw16bitRGBBitmap(
+        dx0,
+        y,
+        packedLineBuffer +
+            dx0,
+        dx1 - dx0,
+        1);
+  }
+
+  return true;
+}
+
+static bool openPackedPlayback() {
+  closePackedFiles();
+
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          PACKED_PATH)) {
+    return false;
+  }
+
+  packedPlaybackFile =
+      LittleFS.open(
+          PACKED_PATH,
+          "r");
+
+  if (!packedPlaybackFile) {
+    return false;
+  }
+
+  if (!readPackedHeader(
+          packedPlaybackFile,
+          true)) {
+    packedPlaybackFile.close();
+    return false;
+  }
+
+  packedFrameIndex =
+      0;
+
+  packedNextFrameAt =
+      millis();
+
+  return true;
+}
+
+static bool decodeNextPackedFrame() {
+  if (!packedPlaybackFile ||
+      packedFrameCount == 0) {
+    return false;
+  }
+
+  if (packedFrameIndex >=
+      packedFrameCount) {
+    if (!packedPlaybackFile.seek(
+            packedFramesOffset)) {
+      return false;
+    }
+
+    packedFrameIndex =
+        0;
+
+    tft->fillScreen(
+        RGB565_BLACK);
+  }
+
+  uint16_t durationMs = 0;
+  uint16_t spanCount = 0;
+
+  if (!readPackedU16(
+          packedPlaybackFile,
+          durationMs) ||
+      !readPackedU16(
+          packedPlaybackFile,
+          spanCount)) {
+    return false;
+  }
+
+  for (uint16_t span = 0;
+       span < spanCount;
+       ++span) {
+    uint16_t y = 0;
+    uint16_t x = 0;
+    uint16_t count = 0;
+
+    if (!readPackedU16(
+            packedPlaybackFile,
+            y) ||
+        !readPackedU16(
+            packedPlaybackFile,
+            x) ||
+        !readPackedU16(
+            packedPlaybackFile,
+            count) ||
+        !decodePackedSpan(
+            packedPlaybackFile,
+            y,
+            x,
+            count)) {
+      return false;
+    }
+  }
+
+  packedFrameIndex++;
+
+  packedNextFrameAt =
+      millis() +
+      max<uint16_t>(
+          1,
+          durationMs);
+
+  return true;
+}
+
 static void closeJpegUploadFile() {
   if (jpegUploadFile) {
     jpegUploadFile.close();
