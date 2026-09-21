@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.4.1";
+static constexpr char FW_VERSION[] = "1.5.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -42,6 +42,7 @@ static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
 static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
+static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -54,6 +55,8 @@ static constexpr char GIF_PATH[] = "/screensaver.gif";
 static constexpr char GIF_TMP_PATH[] = "/screensaver.tmp";
 static constexpr char JPEG_PATH[] = "/screensaver.jpg";
 static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
+static constexpr char PACKED_PATH[] = "/screensaver.pxq";
+static constexpr char PACKED_TMP_PATH[] = "/screensaver_pxq.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -165,6 +168,7 @@ enum SaverPixelFormat : uint8_t {
   SAVER_RGB565 = 2,
   SAVER_GIF = 3,
   SAVER_JPEG = 4,
+  SAVER_PACKED = 5,
 };
 
 enum GifScaleMode : uint8_t {
@@ -209,6 +213,22 @@ static uint16_t jpegUploadHeight = 0;
 static JPEGDEC jpegDecoder;
 static File jpegPlaybackFile;
 
+static File packedUploadFile;
+static File packedPlaybackFile;
+static uint32_t packedUploadExpectedBytes = 0;
+static uint16_t packedStorageWidth = 0;
+static uint16_t packedStorageHeight = 0;
+static uint16_t packedFrameCount = 0;
+static uint16_t packedFps = 0;
+static uint16_t packedFrameIndex = 0;
+static uint16_t packedPaletteCount = 0;
+static uint8_t packedColorMode = 0;
+static uint32_t packedDurationMs = 0;
+static uint32_t packedFramesOffset = 0;
+static uint32_t packedNextFrameAt = 0;
+static uint16_t packedPalette565[256] = {};
+static uint16_t packedLineBuffer[TFT_WIDTH] = {};
+
 static AnimatedGIF gifDecoder;
 static File gifPlaybackFile;
 static bool gifDecoderOpen = false;
@@ -228,6 +248,7 @@ static float gifOffsetY = 0.0f;
 static void stopSaver();
 static void clearSaverBuffer();
 static void closeJpegUploadFile();
+static void closePackedFiles();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
