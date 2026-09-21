@@ -472,7 +472,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|LAYERS=4|MACROS=8|CAPS=HID,CDC,KEYMAP,LAYERS,MACRO|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -484,8 +484,9 @@ static void sendKeyState() {
   snprintf(
       out,
       sizeof(out),
-      "KEYS|%02X|L=%u",
+      "KEYS|%02X|P=%u|L=%u",
       pressedMask,
+      static_cast<unsigned>(activeProfile),
       static_cast<unsigned>(currentLayer()));
   cdcPrintln(out);
 }
@@ -591,7 +592,8 @@ static void handleCommand(String command) {
     snprintf(
         out,
         sizeof(out),
-        "LAYER|ACTIVE=%u|BASE=%u|TOGGLE=%u",
+        "LAYER|PROFILE=%u|ACTIVE=%u|BASE=%u|TOGGLE=%u",
+        static_cast<unsigned>(activeProfile),
         static_cast<unsigned>(currentLayer()),
         static_cast<unsigned>(baseLayer),
         static_cast<unsigned>(toggledLayerMask));
@@ -600,44 +602,76 @@ static void handleCommand(String command) {
   }
 
   if (upper.startsWith("GET_KEYMAP")) {
+    uint8_t profile = activeProfile;
     uint8_t layer = 0;
 
-    int sep = command.indexOf('|');
-    if (sep >= 0) {
-      uint16_t parsed = 0;
-      if (!parseUnsigned(command.substring(sep + 1), LAYER_COUNT - 1, parsed)) {
-        cdcPrintln("ERR|BAD_LAYER");
+    int first = command.indexOf('|');
+    if (first >= 0) {
+      int second = command.indexOf('|', first + 1);
+
+      uint16_t parsedProfile = 0;
+      if (!parseUnsigned(
+              second >= 0
+                  ? command.substring(first + 1, second)
+                  : command.substring(first + 1),
+              PROFILE_COUNT - 1,
+              parsedProfile)) {
+        cdcPrintln("ERR|BAD_PROFILE");
         return;
       }
-      layer = static_cast<uint8_t>(parsed);
+
+      profile = static_cast<uint8_t>(parsedProfile);
+
+      if (second >= 0) {
+        uint16_t parsedLayer = 0;
+        if (!parseUnsigned(
+                command.substring(second + 1),
+                LAYER_COUNT - 1,
+                parsedLayer)) {
+          cdcPrintln("ERR|BAD_LAYER");
+          return;
+        }
+
+        layer = static_cast<uint8_t>(parsedLayer);
+      }
     }
 
-    cdcPrintln(serializeKeymap(layer));
+    cdcPrintln(serializeKeymap(profile, layer));
     return;
   }
 
   if (upper.startsWith("SET_KEYMAP|")) {
     int first = command.indexOf('|');
     int second = command.indexOf('|', first + 1);
+    int third = second >= 0 ? command.indexOf('|', second + 1) : -1;
 
-    uint8_t layer = 0;
-    String payload;
-
-    if (second >= 0) {
-      uint16_t parsedLayer = 0;
-      if (!parseUnsigned(
-              command.substring(first + 1, second),
-              LAYER_COUNT - 1,
-              parsedLayer)) {
-        cdcPrintln("ERR|BAD_LAYER");
-        return;
-      }
-
-      layer = static_cast<uint8_t>(parsedLayer);
-      payload = command.substring(second + 1);
-    } else {
-      payload = command.substring(first + 1);
+    if (first < 0 || second < 0 || third < 0) {
+      cdcPrintln("ERR|BAD_KEYMAP");
+      return;
     }
+
+    uint16_t parsedProfile = 0;
+    uint16_t parsedLayer = 0;
+
+    if (!parseUnsigned(
+            command.substring(first + 1, second),
+            PROFILE_COUNT - 1,
+            parsedProfile)) {
+      cdcPrintln("ERR|BAD_PROFILE");
+      return;
+    }
+
+    if (!parseUnsigned(
+            command.substring(second + 1, third),
+            LAYER_COUNT - 1,
+            parsedLayer)) {
+      cdcPrintln("ERR|BAD_LAYER");
+      return;
+    }
+
+    uint8_t profile = static_cast<uint8_t>(parsedProfile);
+    uint8_t layer = static_cast<uint8_t>(parsedLayer);
+    String payload = command.substring(third + 1);
 
     KeyBinding parsed[KEY_COUNT] = {};
 
@@ -646,12 +680,17 @@ static void handleCommand(String command) {
       return;
     }
 
-    memcpy(keymap[layer], parsed, sizeof(parsed));
+    memcpy(keymap[profile][layer], parsed, sizeof(parsed));
     saveKeymap();
     sendMappedReports();
 
-    char out[28];
-    snprintf(out, sizeof(out), "OK|KEYMAP|%u", layer);
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|KEYMAP|%u|%u",
+        static_cast<unsigned>(profile),
+        static_cast<unsigned>(layer));
     cdcPrintln(out);
     return;
   }
@@ -659,6 +698,7 @@ static void handleCommand(String command) {
   if (upper == "RESET_KEYMAP") {
     setDefaultKeymap();
     saveKeymap();
+    activeProfile = 0;
     baseLayer = 0;
     momentaryLayer = -1;
     toggledLayerMask = 0;
@@ -721,6 +761,59 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "GET_PROFILE") {
+    char out[48];
+    snprintf(
+        out,
+        sizeof(out),
+        "PROFILE|ACTIVE=%u|LAYER=%u",
+        static_cast<unsigned>(activeProfile),
+        static_cast<unsigned>(baseLayer));
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper.startsWith("SET_PROFILE|")) {
+    int first = command.indexOf('|');
+    int second = command.indexOf('|', first + 1);
+
+    if (first < 0 || second < 0) {
+      cdcPrintln("ERR|BAD_PROFILE");
+      return;
+    }
+
+    uint16_t profile = 0;
+    uint16_t layer = 0;
+
+    if (!parseUnsigned(
+            command.substring(first + 1, second),
+            PROFILE_COUNT - 1,
+            profile) ||
+        !parseUnsigned(
+            command.substring(second + 1),
+            LAYER_COUNT - 1,
+            layer)) {
+      cdcPrintln("ERR|BAD_PROFILE");
+      return;
+    }
+
+    activeProfile = static_cast<uint8_t>(profile);
+    baseLayer = static_cast<uint8_t>(layer);
+    momentaryLayer = -1;
+    toggledLayerMask = 0;
+    sendMappedReports();
+
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|PROFILE|%u|%u",
+        static_cast<unsigned>(activeProfile),
+        static_cast<unsigned>(baseLayer));
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper == "PING") {
     cdcPrintln("PONG|PIXELPRO");
     return;
@@ -774,7 +867,16 @@ static void emitKeyEvent(uint8_t index, bool pressed) {
     if (resolved.type == BIND_LAYER) {
       applyLayerPress(resolved);
     } else if (resolved.type == BIND_MACRO) {
-      executeMacro(resolved.keyCode);
+      char macroOut[64];
+      snprintf(
+          macroOut,
+          sizeof(macroOut),
+          "MACRO|%u|KEY=%u|P=%u|L=%u",
+          static_cast<unsigned>(resolved.keyCode + 1),
+          static_cast<unsigned>(index + 1),
+          static_cast<unsigned>(activeProfile),
+          static_cast<unsigned>(layer));
+      cdcPrintln(macroOut);
     }
   } else {
     applyLayerRelease(activeBindings[index]);
@@ -788,9 +890,10 @@ static void emitKeyEvent(uint8_t index, bool pressed) {
   snprintf(
       out,
       sizeof(out),
-      "KEY|%u|%s|L=%u",
+      "KEY|%u|%s|P=%u|L=%u",
       index + 1,
       pressed ? "DOWN" : "UP",
+      static_cast<unsigned>(activeProfile),
       static_cast<unsigned>(currentLayer()));
   cdcPrintln(out);
 }
@@ -849,7 +952,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0120);
+  USB.firmwareVersion(0x0130);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -859,7 +962,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.2.0");
+  cdcPrintln("BOOT|PIXELPRO|1.3.0");
 }
 
 void loop() {
