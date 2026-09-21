@@ -40,7 +40,7 @@ jobs:
       - name: Compile LOLIN S2 Mini firmware
         run: |
           mkdir -p build dist
-          arduino-cli compile             --fqbn "esp32:esp32:lolin_s2_mini:CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,PartitionScheme=default,DebugLevel=none,EraseFlash=none"             --build-path build             --output-dir dist/raw             firmware/PIXEL_PRO
+          arduino-cli compile             --fqbn "esp32:esp32:lolin_s2_mini"             --build-path build             --output-dir dist/raw             firmware/PIXEL_PRO
 
       - name: Package flash images
         run: |
