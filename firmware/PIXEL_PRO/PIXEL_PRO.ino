@@ -615,6 +615,588 @@ static bool hexDecode(const String &hex, String &out) {
 }
 
 
+
+static void *gifAlloc(uint32_t size) {
+  void *ptr = nullptr;
+
+  if (ESP.getPsramSize() > 0) {
+    ptr = ps_malloc(size);
+  }
+
+  if (ptr == nullptr) {
+    ptr = malloc(size);
+  }
+
+  return ptr;
+}
+
+static void gifFree(void *ptr) {
+  if (ptr != nullptr) {
+    free(ptr);
+  }
+}
+
+static void *gifOpenFile(
+    const char *filename,
+    int32_t *fileSize) {
+  (void)filename;
+
+  gifPlaybackFile = LittleFS.open(GIF_PATH, "r");
+
+  if (!gifPlaybackFile) {
+    return nullptr;
+  }
+
+  *fileSize =
+      static_cast<int32_t>(gifPlaybackFile.size());
+
+  return &gifPlaybackFile;
+}
+
+static void gifCloseFile(void *handle) {
+  File *file = static_cast<File *>(handle);
+
+  if (file != nullptr) {
+    file->close();
+  }
+}
+
+static int32_t gifReadFile(
+    GIFFILE *file,
+    uint8_t *buffer,
+    int32_t length) {
+  if (file == nullptr ||
+      file->fHandle == nullptr ||
+      buffer == nullptr ||
+      length <= 0) {
+    return 0;
+  }
+
+  File *source =
+      static_cast<File *>(file->fHandle);
+
+  int32_t remaining =
+      file->iSize - file->iPos;
+
+  if (remaining <= 0) {
+    return 0;
+  }
+
+  int32_t toRead =
+      length < remaining ? length : remaining;
+
+  int32_t read =
+      static_cast<int32_t>(
+          source->read(
+              buffer,
+              static_cast<size_t>(toRead)));
+
+  file->iPos =
+      static_cast<int32_t>(
+          source->position());
+
+  return read;
+}
+
+static int32_t gifSeekFile(
+    GIFFILE *file,
+    int32_t position) {
+  if (file == nullptr ||
+      file->fHandle == nullptr ||
+      position < 0) {
+    return -1;
+  }
+
+  File *source =
+      static_cast<File *>(file->fHandle);
+
+  if (!source->seek(
+          static_cast<uint32_t>(position))) {
+    return -1;
+  }
+
+  file->iPos =
+      static_cast<int32_t>(
+          source->position());
+
+  return file->iPos;
+}
+
+static void gifDraw(GIFDRAW *draw) {
+  if (draw == nullptr ||
+      renderBuffer == nullptr ||
+      draw->pPixels == nullptr) {
+    return;
+  }
+
+  const uint16_t *pixels =
+      reinterpret_cast<const uint16_t *>(
+          draw->pPixels);
+
+  int sourceY =
+      draw->iY + draw->y;
+
+  int sourceX =
+      draw->iX;
+
+  int width = draw->iWidth;
+
+  if (!gifPortraitSource) {
+    if (sourceY < 0 ||
+        sourceY >= TFT_HEIGHT ||
+        sourceX >= TFT_WIDTH) {
+      return;
+    }
+
+    int clippedX =
+        sourceX < 0 ? 0 : sourceX;
+
+    int sourceSkip =
+        clippedX - sourceX;
+
+    int copyWidth =
+        width - sourceSkip;
+
+    if (clippedX + copyWidth > TFT_WIDTH) {
+      copyWidth =
+          TFT_WIDTH - clippedX;
+    }
+
+    if (copyWidth <= 0) {
+      return;
+    }
+
+    memcpy(
+        renderBuffer +
+            static_cast<size_t>(sourceY) *
+                TFT_WIDTH +
+            clippedX,
+        pixels + sourceSkip,
+        static_cast<size_t>(copyWidth) *
+            sizeof(uint16_t));
+
+    return;
+  }
+
+  for (int x = 0; x < width; ++x) {
+    int sx = sourceX + x;
+    int sy = sourceY;
+
+    if (sx < 0 ||
+        sx >= GIF_NATIVE_WIDTH ||
+        sy < 0 ||
+        sy >= GIF_NATIVE_HEIGHT) {
+      continue;
+    }
+
+    int dx =
+        TFT_WIDTH - 1 - sy;
+
+    int dy = sx;
+
+    if (dx < 0 ||
+        dx >= TFT_WIDTH ||
+        dy < 0 ||
+        dy >= TFT_HEIGHT) {
+      continue;
+    }
+
+    renderBuffer[
+        static_cast<size_t>(dy) *
+            TFT_WIDTH +
+        dx] = pixels[x];
+  }
+}
+
+static void closeGifDecoder() {
+  if (gifDecoder.getFrameBuf() != nullptr) {
+    gifDecoder.freeFrameBuf(gifFree);
+  }
+
+  if (gifDecoderOpen) {
+    gifDecoder.close();
+  }
+
+  if (gifPlaybackFile) {
+    gifPlaybackFile.close();
+  }
+
+  gifDecoderOpen = false;
+  gifAtEnd = false;
+  gifPortraitSource = false;
+  gifCanvasWidth = 0;
+  gifCanvasHeight = 0;
+  gifNextFrameAt = 0;
+}
+
+static bool gifDimensionsSupported(
+    uint16_t width,
+    uint16_t height) {
+  return
+      (width == GIF_LANDSCAPE_WIDTH &&
+       height == GIF_LANDSCAPE_HEIGHT) ||
+      (width == GIF_NATIVE_WIDTH &&
+       height == GIF_NATIVE_HEIGHT);
+}
+
+static bool readGifHeader(
+    const char *path,
+    uint16_t &width,
+    uint16_t &height,
+    size_t &fileSize) {
+  if (!littleFsReady) {
+    return false;
+  }
+
+  File file = LittleFS.open(path, "r");
+
+  if (!file) {
+    return false;
+  }
+
+  fileSize = file.size();
+
+  uint8_t header[10] = {};
+
+  size_t read =
+      file.read(
+          header,
+          sizeof(header));
+
+  file.close();
+
+  if (read != sizeof(header) ||
+      header[0] != 'G' ||
+      header[1] != 'I' ||
+      header[2] != 'F') {
+    return false;
+  }
+
+  width =
+      static_cast<uint16_t>(
+          header[6] |
+          (header[7] << 8));
+
+  height =
+      static_cast<uint16_t>(
+          header[8] |
+          (header[9] << 8));
+
+  return gifDimensionsSupported(
+      width,
+      height);
+}
+
+static bool openGifDecoder() {
+  closeGifDecoder();
+
+  if (!littleFsReady ||
+      !LittleFS.exists(GIF_PATH) ||
+      renderBuffer == nullptr) {
+    return false;
+  }
+
+  gifDecoder.begin(
+      GIF_PALETTE_RGB565_LE);
+
+  if (!gifDecoder.open(
+          GIF_PATH,
+          gifOpenFile,
+          gifCloseFile,
+          gifReadFile,
+          gifSeekFile,
+          gifDraw)) {
+    closeGifDecoder();
+    return false;
+  }
+
+  gifCanvasWidth =
+      static_cast<uint16_t>(
+          gifDecoder.getCanvasWidth());
+
+  gifCanvasHeight =
+      static_cast<uint16_t>(
+          gifDecoder.getCanvasHeight());
+
+  if (!gifDimensionsSupported(
+          gifCanvasWidth,
+          gifCanvasHeight)) {
+    closeGifDecoder();
+    return false;
+  }
+
+  if (!gifDecoder.allocFrameBuf(gifAlloc)) {
+    closeGifDecoder();
+    return false;
+  }
+
+  if (!gifDecoder.setDrawType(
+          GIF_DRAW_COOKED)) {
+    closeGifDecoder();
+    return false;
+  }
+
+  gifPortraitSource =
+      gifCanvasWidth == GIF_NATIVE_WIDTH &&
+      gifCanvasHeight == GIF_NATIVE_HEIGHT;
+
+  memset(
+      renderBuffer,
+      0,
+      static_cast<size_t>(TFT_WIDTH) *
+          TFT_HEIGHT *
+          sizeof(uint16_t));
+
+  gifDecoderOpen = true;
+  gifAtEnd = false;
+  gifNextFrameAt = 0;
+
+  return true;
+}
+
+static bool decodeNextGifFrame() {
+  if (!gifDecoderOpen ||
+      renderBuffer == nullptr ||
+      !displayReady) {
+    return false;
+  }
+
+  if (gifAtEnd) {
+    gifDecoder.reset();
+    gifAtEnd = false;
+
+    memset(
+        renderBuffer,
+        0,
+        static_cast<size_t>(TFT_WIDTH) *
+            TFT_HEIGHT *
+            sizeof(uint16_t));
+  }
+
+  int delayMs = 0;
+
+  int hasMore =
+      gifDecoder.playFrame(
+          false,
+          &delayMs,
+          nullptr);
+
+  tft->draw16bitRGBBitmap(
+      0,
+      0,
+      renderBuffer,
+      TFT_WIDTH,
+      TFT_HEIGHT);
+
+  gifAtEnd = hasMore == 0;
+
+  uint32_t holdMs =
+      delayMs < GIF_MIN_FRAME_MS
+          ? GIF_MIN_FRAME_MS
+          : static_cast<uint32_t>(delayMs);
+
+  gifNextFrameAt =
+      millis() + holdMs;
+
+  return true;
+}
+
+static void closeGifUploadFile() {
+  if (gifUploadFile) {
+    gifUploadFile.close();
+  }
+}
+
+static bool beginGifUpload(
+    uint32_t expectedBytes,
+    uint16_t width,
+    uint16_t height) {
+  if (!littleFsReady ||
+      expectedBytes < 10 ||
+      !gifDimensionsSupported(
+          width,
+          height)) {
+    return false;
+  }
+
+  stopSaver();
+  closeGifDecoder();
+  closeGifUploadFile();
+
+  LittleFS.remove(GIF_TMP_PATH);
+  LittleFS.remove(GIF_PATH);
+
+  size_t total =
+      LittleFS.totalBytes();
+
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 4096 > freeBytes) {
+    return false;
+  }
+
+  gifUploadFile =
+      LittleFS.open(
+          GIF_TMP_PATH,
+          "w");
+
+  if (!gifUploadFile) {
+    return false;
+  }
+
+  gifUploadExpectedBytes =
+      expectedBytes;
+
+  gifUploadWidth = width;
+  gifUploadHeight = height;
+
+  saverBytesReceived = 0;
+  saverDataBytes = expectedBytes;
+  saverWidth = width;
+  saverHeight = height;
+  saverFormat = SAVER_GIF;
+  saverUploading = true;
+  saverReady = false;
+  saverActive = false;
+
+  return true;
+}
+
+static bool writeGifUploadChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverFormat != SAVER_GIF ||
+      !gifUploadFile ||
+      offset != saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[1100] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      saverBytesReceived +
+              decodedLength >
+          gifUploadExpectedBytes) {
+    return false;
+  }
+
+  size_t written =
+      gifUploadFile.write(
+          decoded,
+          decodedLength);
+
+  if (written != decodedLength) {
+    return false;
+  }
+
+  saverBytesReceived +=
+      decodedLength;
+
+  return true;
+}
+
+static bool finishGifUpload() {
+  if (!saverUploading ||
+      saverFormat != SAVER_GIF ||
+      saverBytesReceived !=
+          gifUploadExpectedBytes) {
+    closeGifUploadFile();
+    return false;
+  }
+
+  gifUploadFile.flush();
+  closeGifUploadFile();
+
+  uint16_t actualWidth = 0;
+  uint16_t actualHeight = 0;
+  size_t actualSize = 0;
+
+  if (!readGifHeader(
+          GIF_TMP_PATH,
+          actualWidth,
+          actualHeight,
+          actualSize) ||
+      actualSize !=
+          gifUploadExpectedBytes ||
+      actualWidth != gifUploadWidth ||
+      actualHeight != gifUploadHeight) {
+    LittleFS.remove(GIF_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  LittleFS.remove(GIF_PATH);
+
+  if (!LittleFS.rename(
+          GIF_TMP_PATH,
+          GIF_PATH)) {
+    LittleFS.remove(GIF_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+  saverFormat = SAVER_GIF;
+  saverWidth = actualWidth;
+  saverHeight = actualHeight;
+  saverDataBytes = actualSize;
+  saverBytesReceived = actualSize;
+
+  return true;
+}
+
+static void loadPersistedGif() {
+  if (!littleFsReady ||
+      !LittleFS.exists(GIF_PATH)) {
+    return;
+  }
+
+  uint16_t width = 0;
+  uint16_t height = 0;
+  size_t fileSize = 0;
+
+  if (!readGifHeader(
+          GIF_PATH,
+          width,
+          height,
+          fileSize)) {
+    LittleFS.remove(GIF_PATH);
+    return;
+  }
+
+  saverFormat = SAVER_GIF;
+  saverWidth = width;
+  saverHeight = height;
+  saverDataBytes = fileSize;
+  saverBytesReceived = fileSize;
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+}
+
 static void clearSaverBuffer() {
   if (saverData != nullptr) {
     free(saverData);
