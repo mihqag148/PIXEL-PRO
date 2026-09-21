@@ -55,12 +55,13 @@ static void send_response(uint8_t sequence, const char *text) {
 
 static void process_command(uint8_t sequence, const char *command) {
     if (strcmp(command, "HELLO") == 0) {
-        send_response(sequence, "LUMIPAD|3|FW=0.2.0|CAPS=MEM");
-        return;
-    }
-
-    if (strcmp(command, "MEM") == 0) {
-        send_response(sequence, "MEM|0|4194304|0|327680");
+        /*
+         * Keep bring-up HELLO within one 25-byte Lumi payload. The TinyUSB
+         * callback path can safely send one immediate reply; larger feature
+         * replies will be restored after the Raw HID path is confirmed on
+         * physical hardware.
+         */
+        send_response(sequence, "LUMIPAD|3|FW=0.2.1");
         return;
     }
 
