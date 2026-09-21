@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.4.0";
+static constexpr char FW_VERSION[] = "1.4.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -40,7 +40,7 @@ static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
-static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 1024UL * 1024UL;
+static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
@@ -138,8 +138,14 @@ static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
+// Effects match the original Lumi RGB UI: 0 rainbow, 1 purple ping-pong,
+// 2 orange blink, 3 static per-key colors.
+static uint8_t rgbEffects[PROFILE_COUNT] = {};
 static bool rgbEnabled = true;
 static uint8_t rgbBrightnessPercent = 25;
+static uint8_t rgbSpeedPercent = 50;
+static uint32_t rgbLastFrameAt = 0;
+static uint16_t rgbAnimationStep = 0;
 static Adafruit_NeoPixel rgbStrip(
     RGB_LED_COUNT,
     RGB_PIN,
@@ -357,6 +363,8 @@ static void saveMacro(uint8_t index) {
 
 static void setDefaultRgbProfiles() {
   for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+    rgbEffects[profile] = 3;
+
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
       rgbProfiles[profile][key][0] =
           static_cast<uint8_t>(255 - key * 16);
@@ -379,10 +387,17 @@ static void saveRgbProfiles() {
       "rgbkeys",
       rgbProfiles,
       sizeof(rgbProfiles));
+  preferences.putBytes(
+      "rgbfx",
+      rgbEffects,
+      sizeof(rgbEffects));
   preferences.putBool("rgben", rgbEnabled);
   preferences.putUChar(
       "rgbbr",
       rgbBrightnessPercent);
+  preferences.putUChar(
+      "rgbspd",
+      rgbSpeedPercent);
 }
 
 static void loadRgbProfiles() {
@@ -406,6 +421,19 @@ static void loadRgbProfiles() {
           "rgben",
           true);
 
+  if (preferences.getBytesLength("rgbfx") == sizeof(rgbEffects)) {
+    preferences.getBytes(
+        "rgbfx",
+        rgbEffects,
+        sizeof(rgbEffects));
+
+    for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+      if (rgbEffects[profile] > 3) {
+        rgbEffects[profile] = 3;
+      }
+    }
+  }
+
   rgbBrightnessPercent =
       static_cast<uint8_t>(
           constrain(
@@ -414,9 +442,28 @@ static void loadRgbProfiles() {
                   25),
               0,
               100));
+
+  rgbSpeedPercent =
+      static_cast<uint8_t>(
+          constrain(
+              preferences.getUChar(
+                  "rgbspd",
+                  50),
+              10,
+              100));
 }
 
-static void applyRgbProfile() {
+static uint16_t rgbFrameIntervalMs() {
+  return static_cast<uint16_t>(
+      map(
+          rgbSpeedPercent,
+          10,
+          100,
+          180,
+          24));
+}
+
+static void applyRgbBrightness() {
   uint8_t brightness =
       rgbEnabled
           ? static_cast<uint8_t>(
@@ -429,6 +476,10 @@ static void applyRgbProfile() {
           : 0;
 
   rgbStrip.setBrightness(brightness);
+}
+
+static void renderRgbStatic() {
+  applyRgbBrightness();
 
   for (uint8_t key = 0; key < KEY_COUNT; ++key) {
     uint8_t led =
@@ -442,6 +493,98 @@ static void applyRgbProfile() {
   }
 
   rgbStrip.show();
+}
+
+static void pollRgbEffect(bool force = false) {
+  uint8_t effect =
+      rgbEffects[activeProfile];
+
+  if (effect == 3) {
+    if (force) {
+      renderRgbStatic();
+    }
+    return;
+  }
+
+  uint32_t now =
+      millis();
+
+  uint16_t interval =
+      rgbFrameIntervalMs();
+
+  if (!force &&
+      static_cast<uint32_t>(
+          now - rgbLastFrameAt) <
+          interval) {
+    return;
+  }
+
+  rgbLastFrameAt =
+      now;
+
+  applyRgbBrightness();
+
+  if (effect == 0) {
+    // Rainbow across logical K1..K8 while respecting the physical LED map.
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint16_t hue =
+          static_cast<uint16_t>(
+              rgbAnimationStep * 512U +
+              key * (65535U / KEY_COUNT));
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.ColorHSV(
+              hue,
+              255,
+              255));
+    }
+  } else if (effect == 1) {
+    // Purple point travels K1→K8→K1.
+    rgbStrip.clear();
+
+    uint8_t phase =
+        static_cast<uint8_t>(
+            rgbAnimationStep % 14U);
+
+    uint8_t position =
+        phase < 8
+            ? phase
+            : static_cast<uint8_t>(
+                  14U - phase);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          key == position
+              ? rgbStrip.Color(190, 40, 255)
+              : rgbStrip.Color(8, 0, 14));
+    }
+  } else {
+    // Original orange blink preset.
+    bool on =
+        (rgbAnimationStep & 1U) == 0;
+
+    uint32_t color =
+        on
+            ? rgbStrip.Color(255, 90, 0)
+            : rgbStrip.Color(0, 0, 0);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          color);
+    }
+  }
+
+  rgbStrip.show();
+  rgbAnimationStep++;
+}
+
+static void applyRgbProfile() {
+  rgbAnimationStep = 0;
+  rgbLastFrameAt = 0;
+  pollRgbEffect(true);
 }
 
 static bool parseRgbHex(
