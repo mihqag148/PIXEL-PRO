@@ -57,6 +57,14 @@ jobs:
         run: |
           arduino-cli lib install "AnimatedGIF@2.2.0"
 
+      - name: Install JPEGDEC 1.8.4
+        run: |
+          arduino-cli lib install "JPEGDEC@1.8.4"
+
+      - name: Install Adafruit NeoPixel 1.15.5
+        run: |
+          arduino-cli lib install "Adafruit NeoPixel@1.15.5"
+
       - name: Compile ESP32-S2 native USB firmware
         run: |
           mkdir -p build dist
