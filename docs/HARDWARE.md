@@ -61,8 +61,10 @@ file in LittleFS, then decodes it on-device with AnimatedGIF.
 
 GIF files are stored in their original compressed form. Firmware accepts GIF canvases
 from 1×1 through 1024×1024 and applies Fill, Fit, Stretch, Center or Span scaling while
-decoding. Native 320×480 GIFs are rotated to the 480×320 landscape panel before the
-scale transform. No 240×160 raw-frame conversion or fixed 2× upscaling is required.
+decoding. GIF orientation is preserved exactly as stored in the file. A 320×480 portrait GIF
+remains portrait; with Fit it is centered inside the 480×320 landscape panel with
+letterboxing instead of being auto-rotated or cropped. No 240×160 raw-frame
+conversion or fixed 2× upscaling is required.
 
 Frame timing is respected but clamped to a maximum playback rate of 60 FPS
 (minimum 17 ms per frame). Static images remain full 480×320 RGB565. Actual
