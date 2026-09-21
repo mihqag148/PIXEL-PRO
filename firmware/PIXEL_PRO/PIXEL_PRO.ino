@@ -3517,7 +3517,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -3722,6 +3722,97 @@ static void handleCommand(String command) {
     } else {
       cdcPrintln("SAVERSTATE|EMPTY");
     }
+    return;
+  }
+
+  if (upper.startsWith("SAVPXBEGIN|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint32_t byteCount = 0;
+
+    if (sep < 0 ||
+        !parseUnsignedLong(
+            command.substring(
+                sep + 1),
+            PACKED_UPLOAD_LIMIT_BYTES - 1U,
+            byteCount) ||
+        byteCount < 26) {
+      cdcPrintln(
+          "ERR|BAD_SAVPXBEGIN");
+      return;
+    }
+
+    if (!beginPackedUpload(
+            byteCount)) {
+      cdcPrintln(
+          "ERR|SAVPXBEGIN_ALLOC");
+      return;
+    }
+
+    cdcPrintln(
+        "OK|SAVPXBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVPXDATA|")) {
+    int first =
+        command.indexOf('|');
+
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    if (first < 0 ||
+        second < 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVPXDATA");
+      return;
+    }
+
+    uint32_t offset = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            packedUploadExpectedBytes,
+            offset) ||
+        !writePackedUploadChunk(
+            offset,
+            command.substring(
+                second + 1))) {
+      cdcPrintln(
+          "ERR|SAVPXDATA");
+      return;
+    }
+
+    char out[40];
+
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|SAVPXDATA|%lu",
+        static_cast<unsigned long>(
+            saverBytesReceived));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "SAVPXEND") {
+    if (!finishPackedUpload()) {
+      cdcPrintln(
+          "ERR|SAVPXEND");
+      return;
+    }
+
+    lastUserActivityAt =
+        millis();
+
+    cdcPrintln(
+        "OK|SAVER|READY");
     return;
   }
 
@@ -4903,7 +4994,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0141);
+  USB.firmwareVersion(0x0150);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -4917,7 +5008,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.4.1");
+  cdcPrintln("BOOT|PIXELPRO|1.5.0");
 }
 
 void loop() {
