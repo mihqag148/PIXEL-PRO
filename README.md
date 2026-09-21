@@ -1,108 +1,17 @@
-# PIXEL PRO — firmware / hardware (ESP32-S2 Mini)
+# PIXEL PRO ZMK
 
-Firmware thử phần cứng đầu tiên cho ESP32-S2 Mini + ILI9486 3.5 inch 480x320 8-bit parallel + 8 phím + EC11.
+USB-only ZMK keyboard for LOLIN/WEMOS ESP32-S2 Mini, with a separate
+native Zephyr HID interface for LumiPad Windows.
 
-## Matrix chốt gọn nhất
+- [New wiring](docs/HARDWARE.md): K1–K8 on GPIO1–8, contacts to GND.
+- [Flash and hardware acceptance](docs/FLASH.md)
+- [Companion protocol](docs/USB_PROTOCOL.md)
+- Desktop app: https://github.com/mihqag148/Lumipad-APP
 
-8 phím dùng 2 ROW x 4 COL = 6 chân MCU. Đây là matrix chuẩn, vẫn cho phép bấm nhiều phím đồng thời khi mỗi switch có diode.
+Phase 1: A–H keyboard, optional navigation contacts, connection diagnostics.
+LCD/RGB/media features are reserved for phase 2. No encoder.
 
-### LCD ILI9486
-
-| Màn ILI9486 | ESP32-S2 Mini |
-|---|---|
-| LCD_D0 | D1 |
-| LCD_D1 | D2 |
-| LCD_D2 | D3 |
-| LCD_D3 | D4 |
-| LCD_D4 | D5 |
-| LCD_D5 | D6 |
-| LCD_D6 | D7 |
-| LCD_D7 | D8 |
-| LCD_WR | D9 |
-| LCD_RS / DC | D10 |
-| LCD_CS | D11 |
-| LCD_RST | D12 |
-| LCD_RD | 3V3 |
-| 5V | 5V |
-| GND | GND |
-| 3V3 trên shield | không nối |
-| SD_SS/DI/DO/SCK | chưa nối ở v0.1 |
-
-LCD_RD kéo thẳng lên 3V3 vì PIXEL PRO chỉ cần ghi framebuffer ra màn. Như vậy tiết kiệm thêm 1 chân.
-
-### 8 phím – matrix 2x4
-
-| Matrix | ESP32-S2 Mini |
-|---|---|
-| ROW0 | D13 |
-| ROW1 | D14 |
-| COL0 | D33 |
-| COL1 | D34 |
-| COL2 | D35 |
-| COL3 | D36 |
-
-Thứ tự: ROW0 = K1 K2 K3 K4, ROW1 = K5 K6 K7 K8.
-
-Mỗi phím: COL -> SWITCH -> diode 1N4148 -> ROW. Đầu có vạch đen/cathode của diode quay về ROW.
-
-### Encoder EC11
-
-| EC11 | ESP32-S2 Mini |
-|---|---|
-| A | D37 |
-| B | D38 |
-| C / Common | GND |
-| SW | D39 |
-| chân còn lại của SW | GND |
-
-Xoay mặc định Volume - / Volume +. Nhấn chuyển Profile 1 -> 2 -> 3 -> 4 -> 5 -> 1.
-
-### RGB
-
-D40 dành riêng cho Data WS2812. Firmware v0.1 chưa bật driver RGB; chân được giữ để không phải đi lại dây về sau.
-
-### Chân còn trống
-
-D15, D16, D17, D18, D21 để dành cho touch / SD / cảm biến sau này.
-
-## USB / VIA / Lumi
-
-Firmware dùng USB HID với Keyboard, Consumer/Media và Raw HID 32 byte tương thích VIA/QMK. Raw HID dùng Usage Page 0xFF60 và Usage 0x61.
-
-Lumi protocol dùng cùng Raw HID với magic LQ, tương thích QmkRawHidLink trong Lumi Macropad app.
-
-VID dev: 0x303A. PID dev: 0x4009.
-
-VIA V2 definition nằm tại `via/pixel-pro-s2.json`. Trong VIA > Design, bật `Use V2 definitions (deprecated)` rồi Load Draft Definition. Nếu muốn dùng V3, tắt công tắc V2 và dùng `via/pixel-pro-s2-v3.json`.
-
-Firmware hỗ trợ 5 layer/profile, đọc/ghi keycode, bulk keymap buffer, encoder CW/CCW, reset dynamic keymap và jump bootloader. Keymap lưu NVS nên tắt nguồn không mất.
-
-## LumiPad app integration
-
-App Windows có source và release riêng tại [Lumipad-APP](https://github.com/mihqag148/Lumipad-APP).
-Repo này chỉ chứa firmware/hardware và VIA definition. JSON VIA được copy vào app khi đóng gói; không cần checkout repo app để build firmware.
-
-Mã QMK Raw HID tham khảo trong `qmk/lumi_raw_hid` được copy từ repo RYNOR ONE; đây là firmware-side adapter, không phải app desktop và không tham gia ESP-IDF build.
-
-
-HELLO: LUMIPAD|3|FW=0.1.0|CAPS=PROFILE,ACTION,PCMON,PANEL,MEM,SAVERSTATE
-
-v0.1 đã có kết nối Lumi Raw HID, Profile, PC Monitor cơ bản trên LCD, Now Playing text cơ bản, PANEL/MEM/BAT và restart/bootloader/sleep/wake.
-
-RGB/GIF upload đầy đủ sẽ thêm sau khi xác nhận đúng phần cứng LCD + USB + matrix.
-
-### USB trên Windows / VIA
-
-Firmware chạy bình thường là thiết bị HID composite (Keyboard + VIA Raw HID), vì vậy **không cần và không hiện COM**. COM chỉ xuất hiện khi ESP32-S2 vào ROM BOOT để bootstrap/flash. Để vào ROM BOOT: giữ BOOT, nhấn RESET một lần, thả RESET rồi thả BOOT.
-
-Từ v0.1.7, USB serial là `PIXELPRO-0107`. VIA Raw HID vẫn dùng VID/PID `303A:4009`, Usage Page `0xFF60`, Usage `0x61`, report 32 byte. Request VIA được trả lời trực tiếp ngay trong callback TinyUSB; Lumi/OTA vẫn xử lý qua task riêng. `via/pixel-pro-s2.json` là V2 definition (`lighting: none`), còn `via/pixel-pro-s2-v3.json` là V3 definition.
-
-## Build / nạp
-
-GitHub Actions build firmware hiện hành trong `firmware/idf` bằng ESP-IDF v5.5.1, target `esp32s2`. Push main, pull request và chạy thủ công đều kiểm tra build; pull request không phát hành release.
-
-Artifact `pixel-pro-v0.1.7` chứa firmware. `PIXEL_PRO_merged.bin` dùng bootstrap tại offset 0x0; `PIXEL_PRO_OTA.bin` và `firmware-manifest.json` dùng cập nhật trong app. `firmware/PixelPro_S2/PixelPro_S2.ino` là bản Arduino bring-up cũ, không phải target của workflow hiện hành.
-
-## Lưu ý
-
-Bản v0.1 ưu tiên bring-up phần cứng: màn, matrix, encoder, USB HID, VIA và Lumi handshake. Sau khi xác nhận màn đúng màu/chiều và 8 phím đúng thứ tự, mới bật touch/RGB/GIF để tránh debug nhiều phần cùng lúc.
+Build with the pinned config/west.yml manifest and build-zmk.yml workflow.
+The native ESP32-S2 USB adaptation is in drivers/usb_dc_pixel_s2.c; it derives
+from the Apache-2.0 Zephyr DesignWare driver at commit
+10ba6d0cb38bc3d258775d27982f707599320085. Hardware validation is pending.

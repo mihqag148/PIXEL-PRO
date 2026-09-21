@@ -1,0 +1,40 @@
+/dts-v1/;
+#include <espressif/esp32s2/esp32s2.dtsi>
+#include <espressif/partitions_0x1000_default.dtsi>
+/ {
+    model = "PIXEL PRO S2 Mini";
+    compatible = "pixel,pro-s2-mini";
+    chosen {
+        zephyr,sram = &sram1;
+        zephyr,flash = &flash0;
+        zephyr,code-partition = &slot0_partition;
+        zmk,kscan = &kscan0;
+    };
+    kscan0: kscan {
+        compatible = "zmk,kscan-gpio-direct";
+        wakeup-source;
+        input-gpios = <&gpio0 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 6 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 7 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 8 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+        debounce-press-ms = <5>;
+        debounce-release-ms = <5>;
+    };
+    soc {
+        zephyr_udc0: usb@60080000 {
+            compatible = "pixel,esp32s2-usb";
+            reg = <0x60080000 0x40000>;
+            interrupts = <USB_INTR_SOURCE IRQ_DEFAULT_PRIORITY 0>;
+            interrupt-parent = <&intc>;
+            status = "okay";
+        };
+    };
+};
+&flash0 { reg = <0x0 DT_SIZE_M(4)>; };
+&gpio0 { status = "okay"; };
+&gpio1 { status = "okay"; };
+&trng0 { status = "okay"; };

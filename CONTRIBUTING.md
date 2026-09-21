@@ -20,7 +20,7 @@ Nếu có thay đổi local chưa lưu, xử lý chúng trước khi chuyển nh
 ## Pull request và kiểm duyệt
 
 1. Mở PR từ nhánh làm việc vào `main`, ghi vấn đề, kết quả và cách kiểm tra.
-2. CI build **Firmware ESP-IDF PIXEL PRO** trên mọi PR, kể cả PR chỉ sửa tài liệu. Job `PR checks` chỉ thành công khi toàn bộ job build thành công; lỗi, hủy hoặc bỏ qua build đều không đạt.
+2. CI build **Firmware ZMK/Zephyr PIXEL PRO** trên mọi PR, kể cả PR chỉ sửa tài liệu. Job `PR checks` chỉ thành công khi toàn bộ job build thành công; lỗi, hủy hoặc bỏ qua build đều không đạt.
 3. Xem lại toàn bộ diff. Khi có người cùng làm, nhờ họ review. Người tạo PR không thể tự gửi GitHub Approve cho chính PR của mình.
 4. Chủ repo duyệt PR cụ thể trước khi merge. Với trợ lý, chủ repo có thể duyệt bằng tin nhắn nêu rõ PR; build xanh không tự thay thế phê duyệt này.
 5. Nếu main có commit mới, cập nhật nhánh bằng merge main (không force-push), chờ CI mới rồi review lại phần thay đổi.

@@ -1,0 +1,8 @@
+description: PIXEL ESP32-S2 native full-speed DWC2 controller
+compatible: "pixel,esp32s2-usb"
+include: base.yaml
+properties:
+  reg:
+    required: true
+  interrupts:
+    required: true
