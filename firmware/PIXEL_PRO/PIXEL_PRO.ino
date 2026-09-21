@@ -15,7 +15,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.7";
+static constexpr char FW_VERSION[] = "1.3.8";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -180,8 +180,8 @@ static bool gifAtEnd = false;
 static uint16_t gifCanvasWidth = 0;
 static uint16_t gifCanvasHeight = 0;
 static uint32_t gifNextFrameAt = 0;
-static GifScaleMode gifScaleMode = GIF_SCALE_FILL;
-static GifScaleMode gifUploadScaleMode = GIF_SCALE_FILL;
+static GifScaleMode gifScaleMode = GIF_SCALE_CENTER;
+static GifScaleMode gifUploadScaleMode = GIF_SCALE_CENTER;
 static float gifScaleX = 1.0f;
 static float gifScaleY = 1.0f;
 static float gifOffsetX = 0.0f;
@@ -1269,6 +1269,9 @@ static bool finishGifUpload() {
   preferences.putUChar(
       "gscale",
       static_cast<uint8_t>(gifScaleMode));
+  preferences.putUChar(
+      "gscalev",
+      2);
 
   return true;
 }
@@ -1293,14 +1296,35 @@ static void loadPersistedGif() {
   }
 
   saverFormat = SAVER_GIF;
+  uint8_t scaleVersion =
+      preferences.getUChar(
+          "gscalev",
+          0);
+
   uint8_t storedScale =
       preferences.getUChar(
           "gscale",
-          GIF_SCALE_FILL);
+          GIF_SCALE_CENTER);
 
   if (storedScale > GIF_SCALE_SPAN) {
-    storedScale = GIF_SCALE_FILL;
+    storedScale = GIF_SCALE_CENTER;
   }
+
+  // v1.3.5-v1.3.7 could persist Fill/Fit as the implicit default, which
+  // enlarges a small GIF. Migrate that old default once. After v2 is marked,
+  // an explicitly selected Fill/Fit mode is preserved normally.
+  if (scaleVersion < 2 &&
+      (storedScale == GIF_SCALE_FILL ||
+       storedScale == GIF_SCALE_FIT)) {
+    storedScale = GIF_SCALE_CENTER;
+    preferences.putUChar(
+        "gscale",
+        storedScale);
+  }
+
+  preferences.putUChar(
+      "gscalev",
+      2);
 
   gifScaleMode =
       static_cast<GifScaleMode>(
@@ -2597,8 +2621,12 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0137);
+  USB.firmwareVersion(0x0138);
 
+  // Normal Lumi Macropad CDC traffic must never be interpreted as a request
+  // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
+  // BOOT/esptool path instead.
+  USBSerial.enableReboot(false);
   USBSerial.begin();
   Keyboard.begin();
   ConsumerControl.begin();
@@ -2607,7 +2635,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.7");
+  cdcPrintln("BOOT|PIXELPRO|1.3.8");
 }
 
 void loop() {
