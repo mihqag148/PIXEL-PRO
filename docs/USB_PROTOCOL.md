@@ -147,8 +147,10 @@ OK|SAVER|READY
 
 The uploaded LZW-compressed GIF payload is persisted in LittleFS. AnimatedGIF decodes it
 on-device and outputs RGB565 to the ILI9486. Scaling/cropping is performed while
-rendering, so storage remains the original GIF file rather than raw resized frames.
-Frame timing is kept, with a 17 ms minimum interval so playback is capped at 60 FPS.
+rendering. Storage remains a compressed GIF payload rather than raw framebuffer
+frames. Firmware playback keeps a 17 ms minimum interval (up to 60 FPS); Lumi
+Macropad may merge source frames faster than 25 FPS when it creates an optimized
+storage payload.
 
 ### Static image / legacy compatibility
 
