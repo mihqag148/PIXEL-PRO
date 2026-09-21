@@ -503,6 +503,46 @@ static String serializeRgbProfile(
   return out;
 }
 
+static bool parseRgbProfileCsv(
+    const String &csv,
+    uint8_t colors[KEY_COUNT][3]) {
+  int start = 0;
+
+  for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+    int comma =
+        csv.indexOf(
+            ',',
+            start);
+
+    bool last =
+        key ==
+        KEY_COUNT - 1;
+
+    if ((!last && comma < 0) ||
+        (last && comma >= 0)) {
+      return false;
+    }
+
+    String token =
+        last
+            ? csv.substring(start)
+            : csv.substring(start, comma);
+
+    if (!parseRgbHex(
+            token,
+            colors[key][0],
+            colors[key][1],
+            colors[key][2])) {
+      return false;
+    }
+
+    start =
+        comma + 1;
+  }
+
+  return true;
+}
+
 static uint8_t currentLayer() {
   if (momentaryLayer >= 0 && momentaryLayer < LAYER_COUNT) {
     return static_cast<uint8_t>(momentaryLayer);
@@ -2530,6 +2570,127 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("SAVJPGBEGIN|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+    int third =
+        command.indexOf(
+            '|',
+            second + 1);
+
+    if (first < 0 ||
+        second < 0 ||
+        third < 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVJPGBEGIN");
+      return;
+    }
+
+    uint32_t byteCount = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            JPEG_UPLOAD_LIMIT_BYTES,
+            byteCount) ||
+        !parseUnsigned(
+            command.substring(
+                second + 1,
+                third),
+            TFT_WIDTH,
+            width) ||
+        !parseUnsigned(
+            command.substring(
+                third + 1),
+            TFT_HEIGHT,
+            height) ||
+        width == 0 ||
+        height == 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVJPGBEGIN");
+      return;
+    }
+
+    if (!beginJpegUpload(
+            byteCount,
+            width,
+            height)) {
+      cdcPrintln(
+          "ERR|SAVJPGBEGIN_ALLOC");
+      return;
+    }
+
+    cdcPrintln(
+        "OK|SAVJPGBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVJPGDATA|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    if (first < 0 ||
+        second < 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVJPGDATA");
+      return;
+    }
+
+    uint32_t offset = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            jpegUploadExpectedBytes,
+            offset) ||
+        !writeJpegUploadChunk(
+            offset,
+            command.substring(
+                second + 1))) {
+      cdcPrintln(
+          "ERR|SAVJPGDATA");
+      return;
+    }
+
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|SAVJPGDATA|%lu",
+        static_cast<unsigned long>(
+            saverBytesReceived));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "SAVJPGEND") {
+    if (!finishJpegUpload()) {
+      cdcPrintln(
+          "ERR|SAVJPGEND");
+      return;
+    }
+
+    lastUserActivityAt =
+        millis();
+
+    cdcPrintln(
+        "OK|SAVER|READY");
+    return;
+  }
+
   if (upper.startsWith("SAVGIFBEGIN|")) {
     int first = command.indexOf('|');
     int second = command.indexOf('|', first + 1);
@@ -2562,7 +2723,7 @@ static void handleCommand(String command) {
 
     if (!parseUnsignedLong(
             command.substring(first + 1, second),
-            16UL * 1024UL * 1024UL,
+            GIF_UPLOAD_LIMIT_BYTES,
             byteCount) ||
         !parseUnsigned(
             command.substring(second + 1, third),
@@ -3002,6 +3163,284 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("GET_RGB_PROFILE|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_PROFILE");
+      return;
+    }
+
+    cdcPrintln(
+        serializeRgbProfile(
+            static_cast<uint8_t>(
+                profile)));
+    return;
+  }
+
+  if (upper.startsWith("RGB_KEY|")) {
+    int p1 =
+        command.indexOf('|');
+    int p2 =
+        command.indexOf('|', p1 + 1);
+    int p3 =
+        command.indexOf('|', p2 + 1);
+    int p4 =
+        command.indexOf('|', p3 + 1);
+    int p5 =
+        command.indexOf('|', p4 + 1);
+
+    uint16_t profile = 0;
+    uint16_t key = 0;
+    uint16_t r = 0;
+    uint16_t g = 0;
+    uint16_t b = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        p4 < 0 ||
+        p5 < 0 ||
+        !parseUnsigned(
+            command.substring(
+                p1 + 1,
+                p2),
+            PROFILE_COUNT - 1,
+            profile) ||
+        !parseUnsigned(
+            command.substring(
+                p2 + 1,
+                p3),
+            KEY_COUNT - 1,
+            key) ||
+        !parseUnsigned(
+            command.substring(
+                p3 + 1,
+                p4),
+            255,
+            r) ||
+        !parseUnsigned(
+            command.substring(
+                p4 + 1,
+                p5),
+            255,
+            g) ||
+        !parseUnsigned(
+            command.substring(
+                p5 + 1),
+            255,
+            b)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_KEY");
+      return;
+    }
+
+    rgbProfiles[profile][key][0] =
+        static_cast<uint8_t>(r);
+    rgbProfiles[profile][key][1] =
+        static_cast<uint8_t>(g);
+    rgbProfiles[profile][key][2] =
+        static_cast<uint8_t>(b);
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_KEY");
+    return;
+  }
+
+  if (upper.startsWith("RGB_ALL|")) {
+    int p1 =
+        command.indexOf('|');
+    int p2 =
+        command.indexOf('|', p1 + 1);
+    int p3 =
+        command.indexOf('|', p2 + 1);
+    int p4 =
+        command.indexOf('|', p3 + 1);
+
+    uint16_t profile = 0;
+    uint16_t r = 0;
+    uint16_t g = 0;
+    uint16_t b = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        p4 < 0 ||
+        !parseUnsigned(
+            command.substring(
+                p1 + 1,
+                p2),
+            PROFILE_COUNT - 1,
+            profile) ||
+        !parseUnsigned(
+            command.substring(
+                p2 + 1,
+                p3),
+            255,
+            r) ||
+        !parseUnsigned(
+            command.substring(
+                p3 + 1,
+                p4),
+            255,
+            g) ||
+        !parseUnsigned(
+            command.substring(
+                p4 + 1),
+            255,
+            b)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_ALL");
+      return;
+    }
+
+    for (uint8_t key = 0;
+         key < KEY_COUNT;
+         ++key) {
+      rgbProfiles[profile][key][0] =
+          static_cast<uint8_t>(r);
+      rgbProfiles[profile][key][1] =
+          static_cast<uint8_t>(g);
+      rgbProfiles[profile][key][2] =
+          static_cast<uint8_t>(b);
+    }
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_ALL");
+    return;
+  }
+
+  if (upper.startsWith("RGB_PROFILE_SET|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    uint16_t profile = 0;
+
+    if (first < 0 ||
+        second < 0 ||
+        !parseUnsigned(
+            command.substring(
+                first + 1,
+                second),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_PROFILE");
+      return;
+    }
+
+    uint8_t colors[KEY_COUNT][3] = {};
+
+    if (!parseRgbProfileCsv(
+            command.substring(
+                second + 1),
+            colors)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_PROFILE");
+      return;
+    }
+
+    memcpy(
+        rgbProfiles[profile],
+        colors,
+        sizeof(colors));
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_PROFILE");
+    return;
+  }
+
+  if (upper.startsWith("RGB_ENABLE|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t enabled = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            1,
+            enabled)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_ENABLE");
+      return;
+    }
+
+    rgbEnabled =
+        enabled != 0;
+
+    saveRgbProfiles();
+    applyRgbProfile();
+
+    cdcPrintln(
+        "OK|RGB_ENABLE");
+    return;
+  }
+
+  if (upper.startsWith("RGB_BRIGHTNESS|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t brightness = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            100,
+            brightness)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_BRIGHTNESS");
+      return;
+    }
+
+    rgbBrightnessPercent =
+        static_cast<uint8_t>(
+            brightness);
+
+    saveRgbProfiles();
+    applyRgbProfile();
+
+    cdcPrintln(
+        "OK|RGB_BRIGHTNESS");
+    return;
+  }
+
   if (upper == "GET_PROFILE") {
     char out[48];
     snprintf(
@@ -3043,6 +3482,7 @@ static void handleCommand(String command) {
     momentaryLayer = -1;
     toggledLayerMask = 0;
     sendMappedReports();
+    applyRgbProfile();
 
     char out[40];
     snprintf(
