@@ -1598,7 +1598,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -1773,6 +1773,95 @@ static void handleCommand(String command) {
     } else {
       cdcPrintln("SAVERSTATE|EMPTY");
     }
+    return;
+  }
+
+  if (upper.startsWith("SAVGIFBEGIN|")) {
+    int first = command.indexOf('|');
+    int second = command.indexOf('|', first + 1);
+    int third = command.indexOf('|', second + 1);
+
+    if (first < 0 ||
+        second < 0 ||
+        third < 0) {
+      cdcPrintln("ERR|BAD_SAVGIFBEGIN");
+      return;
+    }
+
+    uint32_t byteCount = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(first + 1, second),
+            16UL * 1024UL * 1024UL,
+            byteCount) ||
+        !parseUnsigned(
+            command.substring(second + 1, third),
+            GIF_LANDSCAPE_WIDTH,
+            width) ||
+        !parseUnsigned(
+            command.substring(third + 1),
+            GIF_NATIVE_HEIGHT,
+            height) ||
+        !gifDimensionsSupported(
+            width,
+            height) ||
+        !beginGifUpload(
+            byteCount,
+            width,
+            height)) {
+      cdcPrintln("ERR|SAVGIFBEGIN");
+      return;
+    }
+
+    cdcPrintln("OK|SAVGIFBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVGIFDATA|")) {
+    int first = command.indexOf('|');
+    int second = command.indexOf('|', first + 1);
+
+    if (first < 0 ||
+        second < 0) {
+      cdcPrintln("ERR|BAD_SAVGIFDATA");
+      return;
+    }
+
+    uint32_t offset = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(first + 1, second),
+            gifUploadExpectedBytes,
+            offset) ||
+        !writeGifUploadChunk(
+            offset,
+            command.substring(second + 1))) {
+      cdcPrintln("ERR|SAVGIFDATA");
+      return;
+    }
+
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|SAVGIFDATA|%lu",
+        static_cast<unsigned long>(
+            saverBytesReceived));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "SAVGIFEND") {
+    if (!finishGifUpload()) {
+      cdcPrintln("ERR|SAVGIFEND");
+      return;
+    }
+
+    lastUserActivityAt = millis();
+    cdcPrintln("OK|SAVER|READY");
     return;
   }
 
@@ -2194,7 +2283,7 @@ static void pollCdc() {
       continue;
     }
 
-    if (cdcLine.length() < 512) {
+    if (cdcLine.length() < 2048) {
       cdcLine += ch;
     } else {
       cdcLine = "";
@@ -2299,6 +2388,12 @@ void setup() {
   loadMacros();
   initKeys();
   initDisplay();
+
+  littleFsReady = LittleFS.begin(true);
+  if (littleFsReady) {
+    loadPersistedGif();
+  }
+
   lastUserActivityAt = millis();
 
   uint64_t mac = ESP.getEfuseMac();
@@ -2314,7 +2409,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0133);
+  USB.firmwareVersion(0x0134);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -2324,7 +2419,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.3");
+  cdcPrintln("BOOT|PIXELPRO|1.3.4");
 }
 
 void loop() {
