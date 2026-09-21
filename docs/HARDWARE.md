@@ -55,8 +55,19 @@ The firmware uses Arduino_GFX with the ILI9486 driver and an 8-bit parallel bus.
 The panel is rotated to 480×320 landscape. ILI9486 frame-rate control is set to the
 controller step nearest 60 Hz, while PIXEL PRO caps rendered media at 60 FPS.
 
-Animated screensavers are stored in PSRAM at 240×160 RGB332 and expanded by an exact
-2× nearest-neighbour scale to 480×320. Static images use full 480×320 RGB565.
+PIXEL PRO GIF screensavers are no longer expanded from a reduced raw-frame format.
+The Windows app sends the original LZW-compressed GIF file and firmware stores that
+file in LittleFS, then decodes it on-device with AnimatedGIF.
+
+Supported GIF canvas sizes are:
+
+- 480×320 landscape, displayed directly.
+- 320×480 native panel orientation, rotated to the 480×320 landscape screen without
+  resizing or 2× upscaling.
+
+Frame timing is respected but clamped to a maximum playback rate of 60 FPS
+(minimum 17 ms per frame). Static images remain full 480×320 RGB565. Actual
+full-screen GIF FPS depends on decode complexity and the 8-bit i8080 bus throughput.
 
 Additional reserved PIXEL PRO pins:
 
