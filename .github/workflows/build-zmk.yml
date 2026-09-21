@@ -50,8 +50,8 @@ jobs:
       - name: Package flashable image
         run: |
           mkdir -p dist
-          cp build/zephyr/zephyr.bin dist/PIXEL_PRO_ZMK.bin
-          cp build/zephyr/zephyr.elf dist/
+          cp build/zephyr/zmk.bin dist/PIXEL_PRO_ZMK.bin
+          cp build/zephyr/zmk.elf dist/
           cp build/zephyr/.config dist/build.config
           cp build/zephyr/zephyr.dts dist/
           cp pixel-pro/docs/FLASH.md dist/
