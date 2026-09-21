@@ -141,8 +141,8 @@ static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
-// Effects match the original Lumi RGB UI: 0 rainbow, 1 purple ping-pong,
-// 2 orange blink, 3 static per-key colors.
+// PIXEL effects: 0 rainbow, 1 purple ping-pong, 2 orange blink,
+ // 3 static, 4 fade, 5 chase, 6 breathe, 7 color shift, 8 rain, 9 wave.
 static uint8_t rgbEffects[PROFILE_COUNT] = {};
 static bool rgbEnabled = true;
 static uint8_t rgbBrightnessPercent = 25;
@@ -449,7 +449,7 @@ static void loadRgbProfiles() {
         sizeof(rgbEffects));
 
     for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
-      if (rgbEffects[profile] > 3) {
+      if (rgbEffects[profile] > 9) {
         rgbEffects[profile] = 3;
       }
     }
@@ -516,6 +516,47 @@ static void renderRgbStatic() {
   rgbStrip.show();
 }
 
+static uint8_t triangle8(
+    uint16_t value) {
+  uint8_t phase =
+      static_cast<uint8_t>(
+          value & 0xFFU);
+
+  return phase < 128
+      ? static_cast<uint8_t>(
+            phase * 2U)
+      : static_cast<uint8_t>(
+            (255U - phase) *
+            2U);
+}
+
+static uint32_t scaledProfileColor(
+    uint8_t key,
+    uint8_t scale) {
+  uint16_t r =
+      static_cast<uint16_t>(
+          rgbProfiles[activeProfile][key][0]) *
+      scale /
+      255U;
+
+  uint16_t g =
+      static_cast<uint16_t>(
+          rgbProfiles[activeProfile][key][1]) *
+      scale /
+      255U;
+
+  uint16_t b =
+      static_cast<uint16_t>(
+          rgbProfiles[activeProfile][key][2]) *
+      scale /
+      255U;
+
+  return rgbStrip.Color(
+      static_cast<uint8_t>(r),
+      static_cast<uint8_t>(g),
+      static_cast<uint8_t>(b));
+}
+
 static void pollRgbEffect(bool force = false) {
   uint8_t effect =
       rgbEffects[activeProfile];
@@ -546,12 +587,14 @@ static void pollRgbEffect(bool force = false) {
   applyRgbBrightness();
 
   if (effect == 0) {
-    // Rainbow across logical K1..K8 while respecting the physical LED map.
+    // Rainbow: spatial rainbow flowing through logical K1..K8.
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
       uint16_t hue =
           static_cast<uint16_t>(
               rgbAnimationStep * 512U +
-              key * (65535U / KEY_COUNT));
+              key *
+                  (65535U /
+                   KEY_COUNT));
 
       rgbStrip.setPixelColor(
           KEY_TO_LED[key],
@@ -561,12 +604,11 @@ static void pollRgbEffect(bool force = false) {
               255));
     }
   } else if (effect == 1) {
-    // Purple point travels K1→K8→K1.
-    rgbStrip.clear();
-
+    // Purple Ping-Pong.
     uint8_t phase =
         static_cast<uint8_t>(
-            rgbAnimationStep % 14U);
+            rgbAnimationStep %
+            14U);
 
     uint8_t position =
         phase < 8
@@ -575,26 +617,225 @@ static void pollRgbEffect(bool force = false) {
                   14U - phase);
 
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t distance =
+          key > position
+              ? key - position
+              : position - key;
+
+      uint8_t level =
+          distance == 0
+              ? 255
+              : distance == 1
+                  ? 72
+                  : 12;
+
       rgbStrip.setPixelColor(
           KEY_TO_LED[key],
-          key == position
-              ? rgbStrip.Color(190, 40, 255)
-              : rgbStrip.Color(8, 0, 14));
+          rgbStrip.Color(
+              static_cast<uint8_t>(
+                  190U *
+                  level /
+                  255U),
+              static_cast<uint8_t>(
+                  40U *
+                  level /
+                  255U),
+              static_cast<uint8_t>(
+                  255U *
+                  level /
+                  255U)));
     }
-  } else {
-    // Original orange blink preset.
+  } else if (effect == 2) {
+    // Orange Blink.
     bool on =
-        (rgbAnimationStep & 1U) == 0;
+        (rgbAnimationStep &
+         1U) == 0;
 
     uint32_t color =
         on
-            ? rgbStrip.Color(255, 90, 0)
-            : rgbStrip.Color(0, 0, 0);
+            ? rgbStrip.Color(
+                  255,
+                  90,
+                  0)
+            : rgbStrip.Color(
+                  0,
+                  0,
+                  0);
 
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
       rgbStrip.setPixelColor(
           KEY_TO_LED[key],
           color);
+    }
+  } else if (effect == 4) {
+    // Fade: crossfade each saved key color into the next key color.
+    uint8_t mix =
+        static_cast<uint8_t>(
+            rgbAnimationStep &
+            0xFFU);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t next =
+          static_cast<uint8_t>(
+              (key + 1U) %
+              KEY_COUNT);
+
+      uint16_t inv =
+          255U - mix;
+
+      uint8_t r =
+          static_cast<uint8_t>(
+              (rgbProfiles[activeProfile][key][0] *
+                   inv +
+               rgbProfiles[activeProfile][next][0] *
+                   mix) /
+              255U);
+
+      uint8_t g =
+          static_cast<uint8_t>(
+              (rgbProfiles[activeProfile][key][1] *
+                   inv +
+               rgbProfiles[activeProfile][next][1] *
+                   mix) /
+              255U);
+
+      uint8_t b =
+          static_cast<uint8_t>(
+              (rgbProfiles[activeProfile][key][2] *
+                   inv +
+               rgbProfiles[activeProfile][next][2] *
+                   mix) /
+              255U);
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.Color(
+              r,
+              g,
+              b));
+    }
+  } else if (effect == 5) {
+    // Chase: selected per-key colors chase around K1..K8 with a short tail.
+    uint8_t head =
+        static_cast<uint8_t>(
+            rgbAnimationStep %
+            KEY_COUNT);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t distance =
+          static_cast<uint8_t>(
+              (head +
+               KEY_COUNT -
+               key) %
+              KEY_COUNT);
+
+      uint8_t level =
+          distance == 0
+              ? 255
+              : distance == 1
+                  ? 110
+                  : distance == 2
+                      ? 42
+                      : 6;
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          scaledProfileColor(
+              key,
+              level));
+    }
+  } else if (effect == 6) {
+    // Breathe: all saved per-key colors breathe together.
+    uint8_t level =
+        static_cast<uint8_t>(
+            24U +
+            (static_cast<uint16_t>(
+                 triangle8(
+                     rgbAnimationStep *
+                     3U)) *
+             231U /
+             255U));
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          scaledProfileColor(
+              key,
+              level));
+    }
+  } else if (effect == 7) {
+    // Color Shift: one hue slowly shifts across all keys.
+    uint16_t hue =
+        static_cast<uint16_t>(
+            rgbAnimationStep *
+            420U);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.ColorHSV(
+              hue,
+              255,
+              255));
+    }
+  } else if (effect == 8) {
+    // Rain: deterministic blue/cyan drops with fading trails.
+    uint8_t drop =
+        static_cast<uint8_t>(
+            (rgbAnimationStep *
+                 5U +
+             (rgbAnimationStep >>
+              2U) *
+                 3U) %
+            KEY_COUNT);
+
+    uint8_t second =
+        static_cast<uint8_t>(
+            (drop + 3U) %
+            KEY_COUNT);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t level =
+          key == drop
+              ? 255
+              : key == second
+                  ? 150
+                  : static_cast<uint8_t>(
+                        12U +
+                        ((key * 17U +
+                          rgbAnimationStep * 11U) %
+                         24U));
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.Color(
+              0,
+              static_cast<uint8_t>(
+                  level *
+                  3U /
+                  5U),
+              level));
+    }
+  } else {
+    // Wave: brightness wave travels through the saved per-key colors.
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t level =
+          static_cast<uint8_t>(
+              18U +
+              (static_cast<uint16_t>(
+                   triangle8(
+                       rgbAnimationStep *
+                           4U +
+                       key *
+                           28U)) *
+               237U /
+               255U));
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          scaledProfileColor(
+              key,
+              level));
     }
   }
 
@@ -4652,7 +4893,7 @@ static void handleCommand(String command) {
         !parseUnsigned(
             command.substring(
                 second + 1),
-            3,
+            9,
             effect)) {
       cdcPrintln(
           "ERR|BAD_RGB_EFFECT");
