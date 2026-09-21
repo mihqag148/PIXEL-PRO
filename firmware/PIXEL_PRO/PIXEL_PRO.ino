@@ -11,7 +11,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.0";
+static constexpr char FW_VERSION[] = "1.3.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -472,11 +472,39 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,MEM|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
   return String(out);
+}
+
+static void sendMemoryInfo() {
+  const uint32_t flashTotal = ESP.getFlashChipSize();
+  const uint32_t flashUsed = ESP.getSketchSize();
+
+  const uint32_t sramTotal = ESP.getHeapSize();
+  const uint32_t sramFree = ESP.getFreeHeap();
+  const uint32_t sramUsed =
+      sramTotal > sramFree ? sramTotal - sramFree : 0;
+
+  const uint32_t psramTotal = ESP.getPsramSize();
+  const uint32_t psramFree = ESP.getFreePsram();
+  const uint32_t psramUsed =
+      psramTotal > psramFree ? psramTotal - psramFree : 0;
+
+  char out[160];
+  snprintf(
+      out,
+      sizeof(out),
+      "MEM|%lu|%lu|%lu|%lu|%lu|%lu",
+      static_cast<unsigned long>(flashUsed),
+      static_cast<unsigned long>(flashTotal),
+      static_cast<unsigned long>(sramUsed),
+      static_cast<unsigned long>(sramTotal),
+      static_cast<unsigned long>(psramUsed),
+      static_cast<unsigned long>(psramTotal));
+  cdcPrintln(out);
 }
 
 static void sendKeyState() {
@@ -598,6 +626,11 @@ static void handleCommand(String command) {
         static_cast<unsigned>(baseLayer),
         static_cast<unsigned>(toggledLayerMask));
     cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "MEM" || upper == "GET_MEMORY") {
+    sendMemoryInfo();
     return;
   }
 
