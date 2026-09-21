@@ -220,6 +220,8 @@ static float gifOffsetX = 0.0f;
 static float gifOffsetY = 0.0f;
 
 static void stopSaver();
+static void clearSaverBuffer();
+static void closeJpegUploadFile();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -1302,9 +1304,12 @@ static bool beginGifUpload(
   stopSaver();
   closeGifDecoder();
   closeGifUploadFile();
+  closeJpegUploadFile();
 
   LittleFS.remove(GIF_TMP_PATH);
   LittleFS.remove(GIF_PATH);
+  LittleFS.remove(JPEG_TMP_PATH);
+  LittleFS.remove(JPEG_PATH);
 
   size_t total =
       LittleFS.totalBytes();
@@ -1518,13 +1523,404 @@ static void loadPersistedGif() {
   saverActive = false;
 }
 
+static void closeJpegUploadFile() {
+  if (jpegUploadFile) {
+    jpegUploadFile.close();
+  }
+}
+
+static int jpegDraw(JPEGDRAW *draw) {
+  if (draw == nullptr ||
+      draw->pPixels == nullptr ||
+      !displayReady) {
+    return 0;
+  }
+
+  int x = draw->x;
+  int y = draw->y;
+  int width = draw->iWidth;
+  int height = draw->iHeight;
+
+  if (x < 0 ||
+      y < 0 ||
+      x + width > TFT_WIDTH ||
+      y + height > TFT_HEIGHT) {
+    return 0;
+  }
+
+  tft->draw16bitRGBBitmap(
+      x,
+      y,
+      draw->pPixels,
+      width,
+      height);
+
+  return 1;
+}
+
+static bool inspectJpeg(
+    const char *path,
+    uint16_t &width,
+    uint16_t &height,
+    size_t &fileSize) {
+  if (!littleFsReady) {
+    return false;
+  }
+
+  File file =
+      LittleFS.open(
+          path,
+          "r");
+
+  if (!file) {
+    return false;
+  }
+
+  fileSize =
+      file.size();
+
+  JPEGDEC decoder;
+
+  if (!decoder.open(
+          file,
+          jpegDraw)) {
+    file.close();
+    return false;
+  }
+
+  int decodedWidth =
+      decoder.getWidth();
+
+  int decodedHeight =
+      decoder.getHeight();
+
+  decoder.close();
+  file.close();
+
+  if (decodedWidth < 1 ||
+      decodedHeight < 1 ||
+      decodedWidth > TFT_WIDTH ||
+      decodedHeight > TFT_HEIGHT) {
+    return false;
+  }
+
+  width =
+      static_cast<uint16_t>(
+          decodedWidth);
+
+  height =
+      static_cast<uint16_t>(
+          decodedHeight);
+
+  return true;
+}
+
+static bool renderJpeg() {
+  if (!littleFsReady ||
+      !LittleFS.exists(JPEG_PATH) ||
+      !displayReady) {
+    return false;
+  }
+
+  jpegPlaybackFile =
+      LittleFS.open(
+          JPEG_PATH,
+          "r");
+
+  if (!jpegPlaybackFile) {
+    return false;
+  }
+
+  if (!jpegDecoder.open(
+          jpegPlaybackFile,
+          jpegDraw)) {
+    jpegPlaybackFile.close();
+    return false;
+  }
+
+  int width =
+      jpegDecoder.getWidth();
+
+  int height =
+      jpegDecoder.getHeight();
+
+  if (width < 1 ||
+      height < 1 ||
+      width > TFT_WIDTH ||
+      height > TFT_HEIGHT) {
+    jpegDecoder.close();
+    jpegPlaybackFile.close();
+    return false;
+  }
+
+  int offsetX =
+      (TFT_WIDTH - width) / 2;
+
+  int offsetY =
+      (TFT_HEIGHT - height) / 2;
+
+  tft->fillScreen(
+      RGB565_BLACK);
+
+  int result =
+      jpegDecoder.decode(
+          offsetX,
+          offsetY,
+          0);
+
+  jpegDecoder.close();
+  jpegPlaybackFile.close();
+
+  return result != 0;
+}
+
+static bool beginJpegUpload(
+    uint32_t expectedBytes,
+    uint16_t width,
+    uint16_t height) {
+  if (!littleFsReady ||
+      expectedBytes < 4 ||
+      expectedBytes > JPEG_UPLOAD_LIMIT_BYTES ||
+      width < 1 ||
+      height < 1 ||
+      width > TFT_WIDTH ||
+      height > TFT_HEIGHT) {
+    return false;
+  }
+
+  clearSaverBuffer();
+
+  size_t total =
+      LittleFS.totalBytes();
+
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 4096 > freeBytes) {
+    return false;
+  }
+
+  jpegUploadFile =
+      LittleFS.open(
+          JPEG_TMP_PATH,
+          "w");
+
+  if (!jpegUploadFile) {
+    return false;
+  }
+
+  jpegUploadExpectedBytes =
+      expectedBytes;
+  jpegUploadWidth =
+      width;
+  jpegUploadHeight =
+      height;
+
+  saverBytesReceived = 0;
+  saverDataBytes =
+      expectedBytes;
+  saverWidth =
+      width;
+  saverHeight =
+      height;
+  saverFormat =
+      SAVER_JPEG;
+  saverUploading = true;
+  saverReady = false;
+  saverActive = false;
+
+  return true;
+}
+
+static bool writeJpegUploadChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverFormat != SAVER_JPEG ||
+      !jpegUploadFile ||
+      offset != saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[1100] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      saverBytesReceived +
+              decodedLength >
+          jpegUploadExpectedBytes) {
+    return false;
+  }
+
+  size_t written =
+      jpegUploadFile.write(
+          decoded,
+          decodedLength);
+
+  if (written != decodedLength) {
+    return false;
+  }
+
+  saverBytesReceived +=
+      decodedLength;
+
+  return true;
+}
+
+static bool finishJpegUpload() {
+  if (!saverUploading ||
+      saverFormat != SAVER_JPEG ||
+      saverBytesReceived !=
+          jpegUploadExpectedBytes) {
+    closeJpegUploadFile();
+    return false;
+  }
+
+  jpegUploadFile.flush();
+  closeJpegUploadFile();
+
+  uint16_t actualWidth = 0;
+  uint16_t actualHeight = 0;
+  size_t actualSize = 0;
+
+  if (!inspectJpeg(
+          JPEG_TMP_PATH,
+          actualWidth,
+          actualHeight,
+          actualSize) ||
+      actualSize !=
+          jpegUploadExpectedBytes ||
+      actualWidth !=
+          jpegUploadWidth ||
+      actualHeight !=
+          jpegUploadHeight) {
+    LittleFS.remove(
+        JPEG_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  LittleFS.remove(
+      JPEG_PATH);
+
+  if (!LittleFS.rename(
+          JPEG_TMP_PATH,
+          JPEG_PATH)) {
+    LittleFS.remove(
+        JPEG_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  LittleFS.remove(
+      GIF_PATH);
+  LittleFS.remove(
+      GIF_TMP_PATH);
+
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+  saverFormat =
+      SAVER_JPEG;
+  saverWidth =
+      actualWidth;
+  saverHeight =
+      actualHeight;
+  saverDataBytes =
+      actualSize;
+  saverBytesReceived =
+      actualSize;
+
+  preferences.putUShort(
+      "jpgw",
+      actualWidth);
+  preferences.putUShort(
+      "jpgh",
+      actualHeight);
+
+  return true;
+}
+
+static bool loadPersistedJpeg() {
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          JPEG_PATH)) {
+    return false;
+  }
+
+  uint16_t width = 0;
+  uint16_t height = 0;
+  size_t fileSize = 0;
+
+  if (!inspectJpeg(
+          JPEG_PATH,
+          width,
+          height,
+          fileSize)) {
+    LittleFS.remove(
+        JPEG_PATH);
+    return false;
+  }
+
+  saverFormat =
+      SAVER_JPEG;
+  saverWidth =
+      width;
+  saverHeight =
+      height;
+  saverDataBytes =
+      fileSize;
+  saverBytesReceived =
+      fileSize;
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+
+  return true;
+}
+
+static void loadPersistedMedia() {
+  saverReady = false;
+
+  if (loadPersistedJpeg()) {
+    return;
+  }
+
+  loadPersistedGif();
+}
+
 static void clearSaverBuffer() {
   closeGifDecoder();
   closeGifUploadFile();
+  closeJpegUploadFile();
+
+  if (jpegPlaybackFile) {
+    jpegPlaybackFile.close();
+  }
 
   if (littleFsReady) {
     LittleFS.remove(GIF_TMP_PATH);
     LittleFS.remove(GIF_PATH);
+    LittleFS.remove(JPEG_TMP_PATH);
+    LittleFS.remove(JPEG_PATH);
   }
 
   if (saverData != nullptr) {
@@ -1548,6 +1944,10 @@ static void clearSaverBuffer() {
   gifUploadExpectedBytes = 0;
   gifUploadWidth = 0;
   gifUploadHeight = 0;
+
+  jpegUploadExpectedBytes = 0;
+  jpegUploadWidth = 0;
+  jpegUploadHeight = 0;
 
   memset(saverDurations, 0, sizeof(saverDurations));
 }
@@ -1667,6 +2067,19 @@ static void startSaverNow() {
     return;
   }
 
+  if (saverFormat == SAVER_JPEG) {
+    saverActive = true;
+    saverFrameIndex = 0;
+    saverFrameStartedAt = millis();
+
+    if (!renderJpeg()) {
+      saverReady = false;
+      stopSaver();
+    }
+
+    return;
+  }
+
   if (saverData == nullptr) {
     return;
   }
@@ -1720,7 +2133,8 @@ static void pollSaver() {
     return;
   }
 
-  if (saverFrameCount <= 1 ||
+  if (saverFormat == SAVER_JPEG ||
+      saverFrameCount <= 1 ||
       saverFormat == SAVER_RGB565) {
     return;
   }
