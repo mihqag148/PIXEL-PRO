@@ -56,12 +56,11 @@ static void send_response(uint8_t sequence, const char *text) {
 static void process_command(uint8_t sequence, const char *command) {
     if (strcmp(command, "HELLO") == 0) {
         /*
-         * Keep bring-up HELLO within one 25-byte Lumi payload. The TinyUSB
-         * callback path can safely send one immediate reply; larger feature
-         * replies will be restored after the Raw HID path is confirmed on
-         * physical hardware.
+         * Keep bring-up HELLO within one 25-byte Lumi payload. Raw HID
+         * requests are drained by QMK's main task in v0.2.2, so no response is
+         * submitted re-entrantly from TinyUSB's OUT callback.
          */
-        send_response(sequence, "LUMIPAD|3|FW=0.2.1");
+        send_response(sequence, "LUMIPAD|3|FW=0.2.2");
         return;
     }
 
