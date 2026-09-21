@@ -935,13 +935,14 @@ static bool openGifDecoder() {
     return false;
   }
 
-  if (!gifDecoder.allocFrameBuf(gifAlloc)) {
+  if (gifDecoder.allocFrameBuf(gifAlloc) !=
+      GIF_SUCCESS) {
     closeGifDecoder();
     return false;
   }
 
-  if (!gifDecoder.setDrawType(
-          GIF_DRAW_COOKED)) {
+  if (gifDecoder.setDrawType(
+          GIF_DRAW_COOKED) != GIF_SUCCESS) {
     closeGifDecoder();
     return false;
   }
