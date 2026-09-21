@@ -38,6 +38,14 @@ static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
+
+// Legacy raw-frame constants are kept only so older app builds can still
+// upload their previous 240x160 RGB332 format. New app builds upload the
+// original full-resolution GIF file instead.
+static constexpr uint16_t GIF_WIDTH = 240;
+static constexpr uint16_t GIF_HEIGHT = 160;
+static constexpr uint8_t GIF_MAX_FRAMES = 32;
+
 static constexpr char GIF_PATH[] = "/screensaver.gif";
 static constexpr char GIF_TMP_PATH[] = "/screensaver.tmp";
 
@@ -164,6 +172,8 @@ static bool gifPortraitSource = false;
 static uint16_t gifCanvasWidth = 0;
 static uint16_t gifCanvasHeight = 0;
 static uint32_t gifNextFrameAt = 0;
+
+static void stopSaver();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -1198,6 +1208,14 @@ static void loadPersistedGif() {
 }
 
 static void clearSaverBuffer() {
+  closeGifDecoder();
+  closeGifUploadFile();
+
+  if (littleFsReady) {
+    LittleFS.remove(GIF_TMP_PATH);
+    LittleFS.remove(GIF_PATH);
+  }
+
   if (saverData != nullptr) {
     free(saverData);
     saverData = nullptr;
@@ -1215,6 +1233,10 @@ static void clearSaverBuffer() {
   saverActive = false;
   saverFrameIndex = 0;
   saverFrameStartedAt = 0;
+
+  gifUploadExpectedBytes = 0;
+  gifUploadWidth = 0;
+  gifUploadHeight = 0;
 
   memset(saverDurations, 0, sizeof(saverDurations));
 }
@@ -1313,7 +1335,28 @@ static void renderSaverFrame(uint8_t index) {
 }
 
 static void startSaverNow() {
-  if (!saverReady || saverData == nullptr || !displayReady) {
+  if (!saverReady || !displayReady) {
+    return;
+  }
+
+  if (saverFormat == SAVER_GIF) {
+    if (!openGifDecoder()) {
+      saverReady = false;
+      return;
+    }
+
+    saverActive = true;
+    saverFrameIndex = 0;
+    saverFrameStartedAt = millis();
+
+    if (!decodeNextGifFrame()) {
+      stopSaver();
+    }
+
+    return;
+  }
+
+  if (saverData == nullptr) {
     return;
   }
 
@@ -1324,15 +1367,15 @@ static void startSaverNow() {
 }
 
 static void stopSaver() {
-  if (!saverActive) {
-    return;
-  }
+  bool wasActive = saverActive;
 
   saverActive = false;
   saverFrameIndex = 0;
   saverFrameStartedAt = 0;
 
-  if (displayReady) {
+  closeGifDecoder();
+
+  if (wasActive && displayReady) {
     tft->fillScreen(RGB565_BLACK);
   }
 }
@@ -1351,8 +1394,22 @@ static void pollSaver() {
     return;
   }
 
-  if (!saverReady ||
-      saverFrameCount <= 1 ||
+  if (!saverReady) {
+    return;
+  }
+
+  if (saverFormat == SAVER_GIF) {
+    if (static_cast<int32_t>(
+            now - gifNextFrameAt) >= 0) {
+      if (!decodeNextGifFrame()) {
+        stopSaver();
+      }
+    }
+
+    return;
+  }
+
+  if (saverFrameCount <= 1 ||
       saverFormat == SAVER_RGB565) {
     return;
   }
