@@ -15,7 +15,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.6";
+static constexpr char FW_VERSION[] = "1.3.7";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -177,13 +177,11 @@ static AnimatedGIF gifDecoder;
 static File gifPlaybackFile;
 static bool gifDecoderOpen = false;
 static bool gifAtEnd = false;
-static bool gifPortraitSource = false;
 static uint16_t gifCanvasWidth = 0;
 static uint16_t gifCanvasHeight = 0;
 static uint32_t gifNextFrameAt = 0;
 static GifScaleMode gifScaleMode = GIF_SCALE_FILL;
 static GifScaleMode gifUploadScaleMode = GIF_SCALE_FILL;
-static bool gifRotate90 = false;
 static float gifScaleX = 1.0f;
 static float gifScaleY = 1.0f;
 static float gifOffsetX = 0.0f;
@@ -761,19 +759,11 @@ static GifScaleMode parseGifScaleMode(String value) {
 }
 
 static void configureGifTransform() {
-  gifRotate90 =
-      gifCanvasWidth == GIF_NATIVE_WIDTH &&
-      gifCanvasHeight == GIF_NATIVE_HEIGHT;
-
   float sourceW =
-      gifRotate90
-          ? static_cast<float>(gifCanvasHeight)
-          : static_cast<float>(gifCanvasWidth);
+      static_cast<float>(gifCanvasWidth);
 
   float sourceH =
-      gifRotate90
-          ? static_cast<float>(gifCanvasWidth)
-          : static_cast<float>(gifCanvasHeight);
+      static_cast<float>(gifCanvasHeight);
 
   float fit =
       min(
@@ -799,7 +789,9 @@ static void configureGifTransform() {
       break;
 
     case GIF_SCALE_CENTER:
-      gifScaleX = gifScaleY = 1.0f;
+      // Original-size mode: never upscale small GIFs. Only shrink if the
+      // source is larger than the 480x320 panel, preserving aspect ratio.
+      gifScaleX = gifScaleY = min(1.0f, fit);
       break;
 
     case GIF_SCALE_SPAN:
@@ -858,16 +850,8 @@ static void gifDraw(GIFDRAW *draw) {
       continue;
     }
 
-    float rx =
-        gifRotate90
-            ? static_cast<float>(
-                  gifCanvasHeight - 1 - sy)
-            : static_cast<float>(sx);
-
-    float ry =
-        gifRotate90
-            ? static_cast<float>(sx)
-            : static_cast<float>(sy);
+    float rx = static_cast<float>(sx);
+    float ry = static_cast<float>(sy);
 
     int dx0 =
         static_cast<int>(
@@ -940,7 +924,6 @@ static void closeGifDecoder() {
 
   gifDecoderOpen = false;
   gifAtEnd = false;
-  gifPortraitSource = false;
   gifCanvasWidth = 0;
   gifCanvasHeight = 0;
   gifNextFrameAt = 0;
@@ -1053,10 +1036,6 @@ static bool openGifDecoder() {
     closeGifDecoder();
     return false;
   }
-
-  gifPortraitSource =
-      gifCanvasWidth == GIF_NATIVE_WIDTH &&
-      gifCanvasHeight == GIF_NATIVE_HEIGHT;
 
   configureGifTransform();
 
@@ -2618,7 +2597,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0136);
+  USB.firmwareVersion(0x0137);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -2628,7 +2607,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.6");
+  cdcPrintln("BOOT|PIXELPRO|1.3.7");
 }
 
 void loop() {
