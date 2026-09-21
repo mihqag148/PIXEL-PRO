@@ -1,20 +1,20 @@
-# Flash PIXEL PRO ZMK 0.3.1
+# Flash PIXEL PRO native USB firmware
 
-Target: LOLIN/WEMOS ESP32-S2 Mini, 4 MB flash, new wiring in HARDWARE.md.
-The Zephyr ESP_SIMPLE_BOOT image includes boot initialization and is
-written at 0x1000 on ESP32-S2. Do not flash it at 0 or use an OTA updater.
+Artifact: PIXEL_PRO_merged.bin
 
-1. Install the official esptool package: pip install esptool
-2. Hold BOOT (GPIO0), tap RESET, then release BOOT.
-3. Identify the newly appeared ROM USB COM port.
-4. Run: python -m esptool --chip esp32s2 --port COMx write_flash 0x1000 PIXEL_PRO_ZMK.bin
-5. Tap RESET. The device should enumerate as PIXEL PRO ZMK.
+1. Hold BOOT, tap RESET, release BOOT to enter ESP32-S2 ROM download mode.
+2. Find the ROM COM port.
+3. Run:
 
-The application HID interface is not a flashing port. Repeat BOOT/RESET
-to recover even if the application USB driver does not enumerate.
-Do not burn eFuses, enable secure boot, or alter ROM download settings.
+   python -m esptool --chip esp32s2 --port COMx write_flash 0x0 PIXEL_PRO_merged.bin
 
-Acceptance on hardware: type A–H without LumiPad, hold multiple keys,
-then open LumiPad Diagnostics and check matching DOWN/UP events,
-navigation (if wired), unplug/replug and reboot. Compilation alone is
-not evidence that these hardware checks passed.
+4. Tap RESET once.
+
+Expected Windows behavior after boot:
+
+- Keyboard HID appears and GPIO1..GPIO8 type A..H.
+- A USB CDC COM port appears for LumiPad.
+- A firmware-update MSC drive may appear.
+
+For the fastest hardware test, short GPIO1 to GND briefly while Notepad is focused.
+The host should type the letter A.
