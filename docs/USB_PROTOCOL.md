@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.3.5 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
+Firmware 1.3.6 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.3.5|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.6|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -158,6 +158,20 @@ SAVDATA|<frame index>|<byte offset>|<base64>
 SAVEND
 
 The RGB332 path remains only for compatibility with older app builds.
+
+Storage query:
+
+SAVERINFO
+
+Response:
+
+SAVERINFO|TOTAL=<bytes>|USED=<bytes>|FREE=<bytes>|FLASH=<bytes>
+
+When a GIF is larger than the available LittleFS media area, SAVGIFBEGIN now returns:
+
+ERR|NO_SPACE|NEED=<bytes>|FREE=<bytes>|TOTAL=<bytes>
+
+This lets Lumi Macropad distinguish a storage-capacity problem from a firmware mismatch.
 
 Other commands:
 
