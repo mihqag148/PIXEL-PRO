@@ -2,10 +2,10 @@
 
 #define VENDOR_ID       0x303A
 #define PRODUCT_ID      0x4009
-#define DEVICE_VER      0x0201
+#define DEVICE_VER      0x0202
 #define MANUFACTURER    Lumi3D
 #define PRODUCT         PIXEL_PRO_QMK
-#define SERIAL_NUMBER   PIXELPRO_QMK_0201
+#define SERIAL_NUMBER   PIXELPRO_QMK_0202
 
 /*
  * Two physical matrix rows (K1..K8) plus one virtual row for the EC11

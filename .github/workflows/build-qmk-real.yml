@@ -6,6 +6,7 @@ on:
       - main
       - feature/real-qmk-esp32s2
       - fix/qmk-rawhid-v021
+      - fix/qmk-rawhid-v022
     paths:
       - "firmware/qmk/**"
       - "firmware/qmk-idf/**"
@@ -19,8 +20,8 @@ permissions:
   contents: read
 
 env:
-  FW_VERSION: "0.2.1"
-  FW_TAG: "v0.2.1"
+  FW_VERSION: "0.2.2"
+  FW_TAG: "v0.2.2"
 
 jobs:
   qmk-real-build:
@@ -73,7 +74,7 @@ jobs:
       - name: Upload QMK firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pixel-pro-qmk-v0.2.1
+          name: pixel-pro-qmk-v0.2.2
           path: dist/qmk/*
           if-no-files-found: error
 
@@ -99,7 +100,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: pixel-pro-qmk-v0.2.1
+          name: pixel-pro-qmk-v0.2.2
           path: dist/qmk
 
       - name: Publish PIXEL PRO QMK release
@@ -116,7 +117,7 @@ jobs:
           gh release create "$FW_TAG" \
             --target "$GITHUB_SHA" \
             --title "PIXEL PRO QMK $FW_VERSION" \
-            --notes "PIXEL PRO real QMK firmware with corrected ESP32-S2 Raw HID endpoint direction, VIA dynamic keymap, matrix and encoder support. LumiPad can install PIXEL_PRO_QMK_merged.bin automatically through ESP32-S2 ROM BOOT." \
+            --notes "PIXEL PRO QMK bring-up firmware with queued Raw HID processing, transient EEPROM, sleep disabled, corrected ESP32-S2 Raw HID endpoints, VIA dynamic keymap, matrix and encoder support." \
             --latest \
             dist/qmk/PIXEL_PRO_QMK_merged.bin \
             dist/qmk/PIXEL_PRO_QMK_app.bin \
