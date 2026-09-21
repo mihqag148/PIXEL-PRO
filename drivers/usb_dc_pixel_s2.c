@@ -619,7 +619,7 @@ static int usb_dw_init(void)
 	uint8_t ep;
 	int ret;
 
-	base->gusbcfg |= USB_DWC2_GUSBCFG_PHYSEL;
+	base->gusbcfg |= USB_DWC2_GUSBCFG_PHYSEL_USB11;
 	ret = usb_dw_reset();
 	if (ret) {
 		return ret;
