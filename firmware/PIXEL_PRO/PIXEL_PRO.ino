@@ -789,7 +789,9 @@ static void configureGifTransform() {
       break;
 
     case GIF_SCALE_CENTER:
-      gifScaleX = gifScaleY = 1.0f;
+      // Original-size mode: never upscale small GIFs. Only shrink if the
+      // source is larger than the 480x320 panel, preserving aspect ratio.
+      gifScaleX = gifScaleY = min(1.0f, fit);
       break;
 
     case GIF_SCALE_SPAN:
