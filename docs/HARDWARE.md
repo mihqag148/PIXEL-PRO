@@ -74,3 +74,19 @@ Additional reserved PIXEL PRO pins:
 
 - D9..D11: three-way profile navigation switch.
 - D18: addressable RGB data.
+
+
+## PIXEL PRO per-key RGB
+
+WS2812/NeoPixel data is on **D18**. The logical key-to-physical-LED mapping is fixed to the product layout:
+
+- LED1 → K1
+- LED2 → K2
+- LED3 → K3
+- LED4 → K4
+- LED5 → K8
+- LED6 → K7
+- LED7 → K6
+- LED8 → K5
+
+RGB colors are stored independently for all 20 keymap profiles.

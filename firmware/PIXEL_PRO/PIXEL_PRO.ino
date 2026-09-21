@@ -3,6 +3,8 @@
 #include <Arduino_GFX_Library.h>
 #include <AnimatedGIF.h>
 #include <LittleFS.h>
+#include <JPEGDEC.h>
+#include <Adafruit_NeoPixel.h>
 #include <mbedtls/base64.h>
 #include "USB.h"
 #include "USBHID.h"
@@ -15,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.9";
+static constexpr char FW_VERSION[] = "1.4.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -38,6 +40,8 @@ static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
+static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 1024UL * 1024UL;
+static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -48,6 +52,8 @@ static constexpr uint8_t GIF_MAX_FRAMES = 32;
 
 static constexpr char GIF_PATH[] = "/screensaver.gif";
 static constexpr char GIF_TMP_PATH[] = "/screensaver.tmp";
+static constexpr char JPEG_PATH[] = "/screensaver.jpg";
+static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -62,6 +68,14 @@ static constexpr int8_t TFT_D4 = 37;
 static constexpr int8_t TFT_D5 = 38;
 static constexpr int8_t TFT_D6 = 39;
 static constexpr int8_t TFT_D7 = 40;
+
+static constexpr uint8_t RGB_PIN = 18;
+static constexpr uint8_t RGB_LED_COUNT = 8;
+static constexpr uint8_t RGB_STORAGE_VERSION = 1;
+// Physical LED order requested by PIXEL PRO layout:
+// LED1=K1, LED2=K2, LED3=K3, LED4=K4,
+// LED5=K8, LED6=K7, LED7=K6, LED8=K5.
+static constexpr uint8_t KEY_TO_LED[KEY_COUNT] = {0, 1, 2, 3, 7, 6, 5, 4};
 
 static constexpr uint8_t BIND_DISABLED = 0;
 static constexpr uint8_t BIND_KEYBOARD = 1;
@@ -123,6 +137,14 @@ static KeyBinding keymap[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
 static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
 
+static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
+static bool rgbEnabled = true;
+static uint8_t rgbBrightnessPercent = 25;
+static Adafruit_NeoPixel rgbStrip(
+    RGB_LED_COUNT,
+    RGB_PIN,
+    NEO_GRB + NEO_KHZ800);
+
 static uint8_t pressedMask = 0;
 static uint16_t activeConsumerCode = 0;
 static uint8_t activeProfile = 0;
@@ -136,6 +158,7 @@ enum SaverPixelFormat : uint8_t {
   SAVER_RGB332 = 1,
   SAVER_RGB565 = 2,
   SAVER_GIF = 3,
+  SAVER_JPEG = 4,
 };
 
 enum GifScaleMode : uint8_t {
@@ -173,6 +196,13 @@ static uint32_t gifUploadExpectedBytes = 0;
 static uint16_t gifUploadWidth = 0;
 static uint16_t gifUploadHeight = 0;
 
+static File jpegUploadFile;
+static uint32_t jpegUploadExpectedBytes = 0;
+static uint16_t jpegUploadWidth = 0;
+static uint16_t jpegUploadHeight = 0;
+static JPEGDEC jpegDecoder;
+static File jpegPlaybackFile;
+
 static AnimatedGIF gifDecoder;
 static File gifPlaybackFile;
 static bool gifDecoderOpen = false;
@@ -190,6 +220,8 @@ static float gifOffsetX = 0.0f;
 static float gifOffsetY = 0.0f;
 
 static void stopSaver();
+static void clearSaverBuffer();
+static void closeJpegUploadFile();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -321,6 +353,199 @@ static void saveMacro(uint8_t index) {
   char key[5];
   snprintf(key, sizeof(key), "m%u", index);
   preferences.putString(key, macros[index]);
+}
+
+static void setDefaultRgbProfiles() {
+  for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbProfiles[profile][key][0] =
+          static_cast<uint8_t>(255 - key * 16);
+      rgbProfiles[profile][key][1] =
+          static_cast<uint8_t>(96 + key * 18);
+      uint16_t blue =
+          static_cast<uint16_t>(profile) * 5U;
+      rgbProfiles[profile][key][2] =
+          static_cast<uint8_t>(
+              blue > 120U
+                  ? 120U
+                  : blue);
+    }
+  }
+}
+
+static void saveRgbProfiles() {
+  preferences.putUChar("rgbver", RGB_STORAGE_VERSION);
+  preferences.putBytes(
+      "rgbkeys",
+      rgbProfiles,
+      sizeof(rgbProfiles));
+  preferences.putBool("rgben", rgbEnabled);
+  preferences.putUChar(
+      "rgbbr",
+      rgbBrightnessPercent);
+}
+
+static void loadRgbProfiles() {
+  setDefaultRgbProfiles();
+
+  if (preferences.getUChar("rgbver", 0) == RGB_STORAGE_VERSION &&
+      preferences.getBytesLength("rgbkeys") == sizeof(rgbProfiles)) {
+    size_t read =
+        preferences.getBytes(
+            "rgbkeys",
+            rgbProfiles,
+            sizeof(rgbProfiles));
+
+    if (read != sizeof(rgbProfiles)) {
+      setDefaultRgbProfiles();
+    }
+  }
+
+  rgbEnabled =
+      preferences.getBool(
+          "rgben",
+          true);
+
+  rgbBrightnessPercent =
+      static_cast<uint8_t>(
+          constrain(
+              preferences.getUChar(
+                  "rgbbr",
+                  25),
+              0,
+              100));
+}
+
+static void applyRgbProfile() {
+  uint8_t brightness =
+      rgbEnabled
+          ? static_cast<uint8_t>(
+                map(
+                    rgbBrightnessPercent,
+                    0,
+                    100,
+                    0,
+                    255))
+          : 0;
+
+  rgbStrip.setBrightness(brightness);
+
+  for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+    uint8_t led =
+        KEY_TO_LED[key];
+
+    rgbStrip.setPixelColor(
+        led,
+        rgbProfiles[activeProfile][key][0],
+        rgbProfiles[activeProfile][key][1],
+        rgbProfiles[activeProfile][key][2]);
+  }
+
+  rgbStrip.show();
+}
+
+static bool parseRgbHex(
+    const String &token,
+    uint8_t &r,
+    uint8_t &g,
+    uint8_t &b) {
+  if (token.length() != 6) {
+    return false;
+  }
+
+  char buffer[7] = {};
+  token.toCharArray(
+      buffer,
+      sizeof(buffer));
+
+  char *end = nullptr;
+  unsigned long value =
+      strtoul(
+          buffer,
+          &end,
+          16);
+
+  if (end == buffer ||
+      *end != '\0' ||
+      value > 0xFFFFFFUL) {
+    return false;
+  }
+
+  r = static_cast<uint8_t>(
+      (value >> 16) & 0xFF);
+  g = static_cast<uint8_t>(
+      (value >> 8) & 0xFF);
+  b = static_cast<uint8_t>(
+      value & 0xFF);
+
+  return true;
+}
+
+static String serializeRgbProfile(
+    uint8_t profile) {
+  String out = "RGB_PROFILE|";
+  out += String(profile);
+  out += '|';
+
+  char color[7];
+
+  for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+    if (key) {
+      out += ',';
+    }
+
+    snprintf(
+        color,
+        sizeof(color),
+        "%02X%02X%02X",
+        rgbProfiles[profile][key][0],
+        rgbProfiles[profile][key][1],
+        rgbProfiles[profile][key][2]);
+
+    out += color;
+  }
+
+  return out;
+}
+
+static bool parseRgbProfileCsv(
+    const String &csv,
+    uint8_t colors[KEY_COUNT][3]) {
+  int start = 0;
+
+  for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+    int comma =
+        csv.indexOf(
+            ',',
+            start);
+
+    bool last =
+        key ==
+        KEY_COUNT - 1;
+
+    if ((!last && comma < 0) ||
+        (last && comma >= 0)) {
+      return false;
+    }
+
+    String token =
+        last
+            ? csv.substring(start)
+            : csv.substring(start, comma);
+
+    if (!parseRgbHex(
+            token,
+            colors[key][0],
+            colors[key][1],
+            colors[key][2])) {
+      return false;
+    }
+
+    start =
+        comma + 1;
+  }
+
+  return true;
 }
 
 static uint8_t currentLayer() {
@@ -1121,12 +1346,9 @@ static bool beginGifUpload(
     return false;
   }
 
-  stopSaver();
-  closeGifDecoder();
-  closeGifUploadFile();
-
-  LittleFS.remove(GIF_TMP_PATH);
-  LittleFS.remove(GIF_PATH);
+  // Drop any previous raw/GIF/JPEG media before allocating the new
+  // compressed upload. This also frees legacy PSRAM frame buffers.
+  clearSaverBuffer();
 
   size_t total =
       LittleFS.totalBytes();
@@ -1340,13 +1562,415 @@ static void loadPersistedGif() {
   saverActive = false;
 }
 
+static void closeJpegUploadFile() {
+  if (jpegUploadFile) {
+    jpegUploadFile.close();
+  }
+}
+
+static int jpegDraw(JPEGDRAW *draw) {
+  if (draw == nullptr ||
+      draw->pPixels == nullptr ||
+      !displayReady) {
+    return 0;
+  }
+
+  int x = draw->x;
+  int y = draw->y;
+  int sourceStride = draw->iWidth;
+  int width =
+      draw->iWidthUsed > 0
+          ? draw->iWidthUsed
+          : draw->iWidth;
+  int height = draw->iHeight;
+
+  if (x < 0 ||
+      y < 0 ||
+      x + width > TFT_WIDTH ||
+      y + height > TFT_HEIGHT ||
+      sourceStride < width) {
+    return 0;
+  }
+
+  // iWidthUsed can be smaller than the MCU row stride on odd image widths.
+  // Draw row-by-row so edge padding never writes outside the centered image.
+  for (int row = 0; row < height; ++row) {
+    tft->draw16bitRGBBitmap(
+        x,
+        y + row,
+        draw->pPixels +
+            static_cast<size_t>(row) *
+            sourceStride,
+        width,
+        1);
+  }
+
+  return 1;
+}
+
+static bool inspectJpeg(
+    const char *path,
+    uint16_t &width,
+    uint16_t &height,
+    size_t &fileSize) {
+  if (!littleFsReady) {
+    return false;
+  }
+
+  File file =
+      LittleFS.open(
+          path,
+          "r");
+
+  if (!file) {
+    return false;
+  }
+
+  fileSize =
+      file.size();
+
+  JPEGDEC decoder;
+
+  if (!decoder.open(
+          file,
+          jpegDraw)) {
+    file.close();
+    return false;
+  }
+
+  int decodedWidth =
+      decoder.getWidth();
+
+  int decodedHeight =
+      decoder.getHeight();
+
+  decoder.close();
+  file.close();
+
+  if (decodedWidth < 1 ||
+      decodedHeight < 1 ||
+      decodedWidth > TFT_WIDTH ||
+      decodedHeight > TFT_HEIGHT) {
+    return false;
+  }
+
+  width =
+      static_cast<uint16_t>(
+          decodedWidth);
+
+  height =
+      static_cast<uint16_t>(
+          decodedHeight);
+
+  return true;
+}
+
+static bool renderJpeg() {
+  if (!littleFsReady ||
+      !LittleFS.exists(JPEG_PATH) ||
+      !displayReady) {
+    return false;
+  }
+
+  jpegPlaybackFile =
+      LittleFS.open(
+          JPEG_PATH,
+          "r");
+
+  if (!jpegPlaybackFile) {
+    return false;
+  }
+
+  if (!jpegDecoder.open(
+          jpegPlaybackFile,
+          jpegDraw)) {
+    jpegPlaybackFile.close();
+    return false;
+  }
+
+  int width =
+      jpegDecoder.getWidth();
+
+  int height =
+      jpegDecoder.getHeight();
+
+  if (width < 1 ||
+      height < 1 ||
+      width > TFT_WIDTH ||
+      height > TFT_HEIGHT) {
+    jpegDecoder.close();
+    jpegPlaybackFile.close();
+    return false;
+  }
+
+  int offsetX =
+      (TFT_WIDTH - width) / 2;
+
+  int offsetY =
+      (TFT_HEIGHT - height) / 2;
+
+  tft->fillScreen(
+      RGB565_BLACK);
+
+  int result =
+      jpegDecoder.decode(
+          offsetX,
+          offsetY,
+          0);
+
+  jpegDecoder.close();
+  jpegPlaybackFile.close();
+
+  return result != 0;
+}
+
+static bool beginJpegUpload(
+    uint32_t expectedBytes,
+    uint16_t width,
+    uint16_t height) {
+  if (!littleFsReady ||
+      expectedBytes < 4 ||
+      expectedBytes > JPEG_UPLOAD_LIMIT_BYTES ||
+      width < 1 ||
+      height < 1 ||
+      width > TFT_WIDTH ||
+      height > TFT_HEIGHT) {
+    return false;
+  }
+
+  clearSaverBuffer();
+
+  size_t total =
+      LittleFS.totalBytes();
+
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 4096 > freeBytes) {
+    return false;
+  }
+
+  jpegUploadFile =
+      LittleFS.open(
+          JPEG_TMP_PATH,
+          "w");
+
+  if (!jpegUploadFile) {
+    return false;
+  }
+
+  jpegUploadExpectedBytes =
+      expectedBytes;
+  jpegUploadWidth =
+      width;
+  jpegUploadHeight =
+      height;
+
+  saverBytesReceived = 0;
+  saverDataBytes =
+      expectedBytes;
+  saverWidth =
+      width;
+  saverHeight =
+      height;
+  saverFormat =
+      SAVER_JPEG;
+  saverUploading = true;
+  saverReady = false;
+  saverActive = false;
+
+  return true;
+}
+
+static bool writeJpegUploadChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverFormat != SAVER_JPEG ||
+      !jpegUploadFile ||
+      offset != saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[1100] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      saverBytesReceived +
+              decodedLength >
+          jpegUploadExpectedBytes) {
+    return false;
+  }
+
+  size_t written =
+      jpegUploadFile.write(
+          decoded,
+          decodedLength);
+
+  if (written != decodedLength) {
+    return false;
+  }
+
+  saverBytesReceived +=
+      decodedLength;
+
+  return true;
+}
+
+static bool finishJpegUpload() {
+  if (!saverUploading ||
+      saverFormat != SAVER_JPEG ||
+      saverBytesReceived !=
+          jpegUploadExpectedBytes) {
+    closeJpegUploadFile();
+    return false;
+  }
+
+  jpegUploadFile.flush();
+  closeJpegUploadFile();
+
+  uint16_t actualWidth = 0;
+  uint16_t actualHeight = 0;
+  size_t actualSize = 0;
+
+  if (!inspectJpeg(
+          JPEG_TMP_PATH,
+          actualWidth,
+          actualHeight,
+          actualSize) ||
+      actualSize !=
+          jpegUploadExpectedBytes ||
+      actualWidth !=
+          jpegUploadWidth ||
+      actualHeight !=
+          jpegUploadHeight) {
+    LittleFS.remove(
+        JPEG_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  LittleFS.remove(
+      JPEG_PATH);
+
+  if (!LittleFS.rename(
+          JPEG_TMP_PATH,
+          JPEG_PATH)) {
+    LittleFS.remove(
+        JPEG_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  LittleFS.remove(
+      GIF_PATH);
+  LittleFS.remove(
+      GIF_TMP_PATH);
+
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+  saverFormat =
+      SAVER_JPEG;
+  saverWidth =
+      actualWidth;
+  saverHeight =
+      actualHeight;
+  saverDataBytes =
+      actualSize;
+  saverBytesReceived =
+      actualSize;
+
+  preferences.putUShort(
+      "jpgw",
+      actualWidth);
+  preferences.putUShort(
+      "jpgh",
+      actualHeight);
+
+  return true;
+}
+
+static bool loadPersistedJpeg() {
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          JPEG_PATH)) {
+    return false;
+  }
+
+  uint16_t width = 0;
+  uint16_t height = 0;
+  size_t fileSize = 0;
+
+  if (!inspectJpeg(
+          JPEG_PATH,
+          width,
+          height,
+          fileSize)) {
+    LittleFS.remove(
+        JPEG_PATH);
+    return false;
+  }
+
+  saverFormat =
+      SAVER_JPEG;
+  saverWidth =
+      width;
+  saverHeight =
+      height;
+  saverDataBytes =
+      fileSize;
+  saverBytesReceived =
+      fileSize;
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+
+  return true;
+}
+
+static void loadPersistedMedia() {
+  saverReady = false;
+
+  if (loadPersistedJpeg()) {
+    return;
+  }
+
+  loadPersistedGif();
+}
+
 static void clearSaverBuffer() {
   closeGifDecoder();
   closeGifUploadFile();
+  closeJpegUploadFile();
+
+  if (jpegPlaybackFile) {
+    jpegPlaybackFile.close();
+  }
 
   if (littleFsReady) {
     LittleFS.remove(GIF_TMP_PATH);
     LittleFS.remove(GIF_PATH);
+    LittleFS.remove(JPEG_TMP_PATH);
+    LittleFS.remove(JPEG_PATH);
   }
 
   if (saverData != nullptr) {
@@ -1370,6 +1994,10 @@ static void clearSaverBuffer() {
   gifUploadExpectedBytes = 0;
   gifUploadWidth = 0;
   gifUploadHeight = 0;
+
+  jpegUploadExpectedBytes = 0;
+  jpegUploadWidth = 0;
+  jpegUploadHeight = 0;
 
   memset(saverDurations, 0, sizeof(saverDurations));
 }
@@ -1489,6 +2117,19 @@ static void startSaverNow() {
     return;
   }
 
+  if (saverFormat == SAVER_JPEG) {
+    saverActive = true;
+    saverFrameIndex = 0;
+    saverFrameStartedAt = millis();
+
+    if (!renderJpeg()) {
+      saverReady = false;
+      stopSaver();
+    }
+
+    return;
+  }
+
   if (saverData == nullptr) {
     return;
   }
@@ -1542,7 +2183,8 @@ static void pollSaver() {
     return;
   }
 
-  if (saverFrameCount <= 1 ||
+  if (saverFormat == SAVER_JPEG ||
+      saverFrameCount <= 1 ||
       saverFormat == SAVER_RGB565) {
     return;
   }
@@ -1730,7 +2372,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -1938,6 +2580,127 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("SAVJPGBEGIN|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+    int third =
+        command.indexOf(
+            '|',
+            second + 1);
+
+    if (first < 0 ||
+        second < 0 ||
+        third < 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVJPGBEGIN");
+      return;
+    }
+
+    uint32_t byteCount = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            JPEG_UPLOAD_LIMIT_BYTES,
+            byteCount) ||
+        !parseUnsigned(
+            command.substring(
+                second + 1,
+                third),
+            TFT_WIDTH,
+            width) ||
+        !parseUnsigned(
+            command.substring(
+                third + 1),
+            TFT_HEIGHT,
+            height) ||
+        width == 0 ||
+        height == 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVJPGBEGIN");
+      return;
+    }
+
+    if (!beginJpegUpload(
+            byteCount,
+            width,
+            height)) {
+      cdcPrintln(
+          "ERR|SAVJPGBEGIN_ALLOC");
+      return;
+    }
+
+    cdcPrintln(
+        "OK|SAVJPGBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVJPGDATA|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    if (first < 0 ||
+        second < 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVJPGDATA");
+      return;
+    }
+
+    uint32_t offset = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            jpegUploadExpectedBytes,
+            offset) ||
+        !writeJpegUploadChunk(
+            offset,
+            command.substring(
+                second + 1))) {
+      cdcPrintln(
+          "ERR|SAVJPGDATA");
+      return;
+    }
+
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|SAVJPGDATA|%lu",
+        static_cast<unsigned long>(
+            saverBytesReceived));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "SAVJPGEND") {
+    if (!finishJpegUpload()) {
+      cdcPrintln(
+          "ERR|SAVJPGEND");
+      return;
+    }
+
+    lastUserActivityAt =
+        millis();
+
+    cdcPrintln(
+        "OK|SAVER|READY");
+    return;
+  }
+
   if (upper.startsWith("SAVGIFBEGIN|")) {
     int first = command.indexOf('|');
     int second = command.indexOf('|', first + 1);
@@ -1970,7 +2733,7 @@ static void handleCommand(String command) {
 
     if (!parseUnsignedLong(
             command.substring(first + 1, second),
-            16UL * 1024UL * 1024UL,
+            GIF_UPLOAD_LIMIT_BYTES,
             byteCount) ||
         !parseUnsigned(
             command.substring(second + 1, third),
@@ -2410,6 +3173,284 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("GET_RGB_PROFILE|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_PROFILE");
+      return;
+    }
+
+    cdcPrintln(
+        serializeRgbProfile(
+            static_cast<uint8_t>(
+                profile)));
+    return;
+  }
+
+  if (upper.startsWith("RGB_KEY|")) {
+    int p1 =
+        command.indexOf('|');
+    int p2 =
+        command.indexOf('|', p1 + 1);
+    int p3 =
+        command.indexOf('|', p2 + 1);
+    int p4 =
+        command.indexOf('|', p3 + 1);
+    int p5 =
+        command.indexOf('|', p4 + 1);
+
+    uint16_t profile = 0;
+    uint16_t key = 0;
+    uint16_t r = 0;
+    uint16_t g = 0;
+    uint16_t b = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        p4 < 0 ||
+        p5 < 0 ||
+        !parseUnsigned(
+            command.substring(
+                p1 + 1,
+                p2),
+            PROFILE_COUNT - 1,
+            profile) ||
+        !parseUnsigned(
+            command.substring(
+                p2 + 1,
+                p3),
+            KEY_COUNT - 1,
+            key) ||
+        !parseUnsigned(
+            command.substring(
+                p3 + 1,
+                p4),
+            255,
+            r) ||
+        !parseUnsigned(
+            command.substring(
+                p4 + 1,
+                p5),
+            255,
+            g) ||
+        !parseUnsigned(
+            command.substring(
+                p5 + 1),
+            255,
+            b)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_KEY");
+      return;
+    }
+
+    rgbProfiles[profile][key][0] =
+        static_cast<uint8_t>(r);
+    rgbProfiles[profile][key][1] =
+        static_cast<uint8_t>(g);
+    rgbProfiles[profile][key][2] =
+        static_cast<uint8_t>(b);
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_KEY");
+    return;
+  }
+
+  if (upper.startsWith("RGB_ALL|")) {
+    int p1 =
+        command.indexOf('|');
+    int p2 =
+        command.indexOf('|', p1 + 1);
+    int p3 =
+        command.indexOf('|', p2 + 1);
+    int p4 =
+        command.indexOf('|', p3 + 1);
+
+    uint16_t profile = 0;
+    uint16_t r = 0;
+    uint16_t g = 0;
+    uint16_t b = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        p4 < 0 ||
+        !parseUnsigned(
+            command.substring(
+                p1 + 1,
+                p2),
+            PROFILE_COUNT - 1,
+            profile) ||
+        !parseUnsigned(
+            command.substring(
+                p2 + 1,
+                p3),
+            255,
+            r) ||
+        !parseUnsigned(
+            command.substring(
+                p3 + 1,
+                p4),
+            255,
+            g) ||
+        !parseUnsigned(
+            command.substring(
+                p4 + 1),
+            255,
+            b)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_ALL");
+      return;
+    }
+
+    for (uint8_t key = 0;
+         key < KEY_COUNT;
+         ++key) {
+      rgbProfiles[profile][key][0] =
+          static_cast<uint8_t>(r);
+      rgbProfiles[profile][key][1] =
+          static_cast<uint8_t>(g);
+      rgbProfiles[profile][key][2] =
+          static_cast<uint8_t>(b);
+    }
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_ALL");
+    return;
+  }
+
+  if (upper.startsWith("RGB_PROFILE_SET|")) {
+    int first =
+        command.indexOf('|');
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    uint16_t profile = 0;
+
+    if (first < 0 ||
+        second < 0 ||
+        !parseUnsigned(
+            command.substring(
+                first + 1,
+                second),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_PROFILE");
+      return;
+    }
+
+    uint8_t colors[KEY_COUNT][3] = {};
+
+    if (!parseRgbProfileCsv(
+            command.substring(
+                second + 1),
+            colors)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_PROFILE");
+      return;
+    }
+
+    memcpy(
+        rgbProfiles[profile],
+        colors,
+        sizeof(colors));
+
+    saveRgbProfiles();
+
+    if (profile ==
+        activeProfile) {
+      applyRgbProfile();
+    }
+
+    cdcPrintln(
+        "OK|RGB_PROFILE");
+    return;
+  }
+
+  if (upper.startsWith("RGB_ENABLE|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t enabled = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            1,
+            enabled)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_ENABLE");
+      return;
+    }
+
+    rgbEnabled =
+        enabled != 0;
+
+    saveRgbProfiles();
+    applyRgbProfile();
+
+    cdcPrintln(
+        "OK|RGB_ENABLE");
+    return;
+  }
+
+  if (upper.startsWith("RGB_BRIGHTNESS|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t brightness = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            100,
+            brightness)) {
+      cdcPrintln(
+          "ERR|BAD_RGB_BRIGHTNESS");
+      return;
+    }
+
+    rgbBrightnessPercent =
+        static_cast<uint8_t>(
+            brightness);
+
+    saveRgbProfiles();
+    applyRgbProfile();
+
+    cdcPrintln(
+        "OK|RGB_BRIGHTNESS");
+    return;
+  }
+
   if (upper == "GET_PROFILE") {
     char out[48];
     snprintf(
@@ -2451,6 +3492,7 @@ static void handleCommand(String command) {
     momentaryLayer = -1;
     toggledLayerMask = 0;
     sendMappedReports();
+    applyRgbProfile();
 
     char out[40];
     snprintf(
@@ -2612,12 +3654,18 @@ void setup() {
   preferences.begin("pixelpro", false);
   loadKeymap();
   loadMacros();
+  loadRgbProfiles();
+
+  rgbStrip.begin();
+  rgbStrip.clear();
+  applyRgbProfile();
+
   initKeys();
   initDisplay();
 
   littleFsReady = LittleFS.begin(true);
   if (littleFsReady) {
-    loadPersistedGif();
+    loadPersistedMedia();
   }
 
   lastUserActivityAt = millis();
@@ -2635,7 +3683,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0139);
+  USB.firmwareVersion(0x0140);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -2649,7 +3697,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.9");
+  cdcPrintln("BOOT|PIXELPRO|1.4.0");
 }
 
 void loop() {
