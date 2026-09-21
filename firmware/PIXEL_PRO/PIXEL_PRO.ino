@@ -2,9 +2,9 @@
 #include <Preferences.h>
 #include <Arduino_GFX_Library.h>
 #include <AnimatedGIF.h>
+#include <LittleFS.h>
 #include <JPEGDEC.h>
 #include <Adafruit_NeoPixel.h>
-#include <LittleFS.h>
 #include <mbedtls/base64.h>
 #include "USB.h"
 #include "USBHID.h"
