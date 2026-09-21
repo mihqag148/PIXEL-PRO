@@ -15,7 +15,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.8";
+static constexpr char FW_VERSION[] = "1.3.9";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -182,6 +182,8 @@ static uint16_t gifCanvasHeight = 0;
 static uint32_t gifNextFrameAt = 0;
 static GifScaleMode gifScaleMode = GIF_SCALE_CENTER;
 static GifScaleMode gifUploadScaleMode = GIF_SCALE_CENTER;
+static bool bootloaderArmed = false;
+static uint32_t bootloaderArmUntil = 0;
 static float gifScaleX = 1.0f;
 static float gifScaleY = 1.0f;
 static float gifOffsetX = 0.0f;
@@ -1728,7 +1730,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -2466,6 +2468,18 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "ARM_BOOTLOADER") {
+    // Normal CDC sessions have the Arduino-ESP32 DTR/RTS reboot hook disabled.
+    // Only this explicit firmware-update command arms it, and only briefly.
+    bootloaderArmed = true;
+    bootloaderArmUntil =
+        millis() + 5000UL;
+    USBSerial.enableReboot(true);
+    cdcPrintln("OK|BOOTLOADER_ARMED");
+    USBSerial.flush();
+    return;
+  }
+
   if (upper == "REBOOT") {
     cdcPrintln("OK|REBOOT");
     USBSerial.flush();
@@ -2621,7 +2635,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0138);
+  USB.firmwareVersion(0x0139);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -2635,12 +2649,20 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.8");
+  cdcPrintln("BOOT|PIXELPRO|1.3.9");
 }
 
 void loop() {
   pollKeys();
   pollCdc();
   pollSaver();
+
+  if (bootloaderArmed &&
+      static_cast<int32_t>(
+          millis() - bootloaderArmUntil) >= 0) {
+    USBSerial.enableReboot(false);
+    bootloaderArmed = false;
+  }
+
   delay(1);
 }
