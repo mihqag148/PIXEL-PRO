@@ -1,81 +1,111 @@
 # PIXEL PRO USB CDC protocol v1
 
-Transport: native USB CDC ACM. The nominal baud value is 115200; USB CDC does not depend on a physical UART baud clock.
+Transport: native USB CDC ACM. Nominal baud: 115200.
 
-Firmware 1.1.0 exposes HID keyboard + consumer control + CDC and adds persistent keymap storage.
-
-## Host commands
-
-Commands are ASCII, one command per line, terminated by LF.
-
-- HELLO
-- GET_INFO
-- GET_KEYS
-- GET_KEYMAP
-- SET_KEYMAP|<8 comma-separated bindings>
-- RESET_KEYMAP
-- PING
-- REBOOT
+Firmware 1.2.0 exposes HID keyboard + consumer control + CDC with a VIA-style configuration model.
 
 ## HELLO
 
 HELLO / GET_INFO returns:
 
-PIXELPRO|1|FW=1.1.0|MCU=ESP32S2|KEYS=8|CAPS=HID,CDC,KEYMAP|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.2.0|MCU=ESP32S2|KEYS=8|LAYERS=4|MACROS=8|CAPS=HID,CDC,KEYMAP,LAYERS,MACRO|VID=303A|PID=80C2
 
-## Keymap format
+## Keymap
 
-GET_KEYMAP returns exactly eight bindings:
+There are four persistent layers, each with eight physical keys.
 
-KEYMAP|K:4:0,K:5:0,K:6:0,K:7:0,K:8:0,K:9:0,K:10:0,K:11:0
+Read a layer:
 
-Binding types:
+GET_KEYMAP|0
+
+Response:
+
+KEYMAP|0|K:4:0,K:5:0,K:6:0,K:7:0,K:8:0,K:9:0,K:10:0,K:11:0
+
+Write a complete layer:
+
+SET_KEYMAP|0|K:4:0,K:5:0,K:6:0,K:7:0,K:8:0,K:9:0,K:10:0,K:11:0
+
+Success:
+
+OK|KEYMAP|0
+
+Binding formats:
 
 - K:<keyboard usage>:<modifier mask>
 - C:<consumer usage>:0
-- D:0:0
+- L:<layer>:<action>
+- M:<macro slot>:0
+- T:0:0 = transparent
+- D:0:0 = disabled
 
-Keyboard usages are USB HID keyboard-page usage IDs. Modifier mask bits are:
+Modifier mask:
 
-- bit 0 / 1 = Left Ctrl
-- bit 1 / 2 = Left Shift
-- bit 2 / 4 = Left Alt
-- bit 3 / 8 = Left GUI / Windows
+- 1 = Left Ctrl
+- 2 = Left Shift
+- 4 = Left Alt
+- 8 = Left GUI / Windows
 
-Example Ctrl+C:
+Layer actions:
 
-K:6:1
+- 1 = MO(layer), momentary while held
+- 2 = TG(layer), toggle layer
+- 3 = TO(layer), switch base layer
 
-Example Play/Pause consumer control:
+Examples:
 
-C:205:0
+- Ctrl+C: K:6:1
+- standalone Ctrl: K:0:1
+- Play/Pause: C:205:0
+- MO(1): L:1:1
+- Macro 0: M:0:0
 
-SET_KEYMAP stores the complete eight-key map in NVS and returns:
+RESET_KEYMAP restores Layer 0 to A-H and Layers 1-3 to Transparent.
 
-OK|KEYMAP
+## Macros
 
-RESET_KEYMAP restores K1=A through K8=H, stores it in NVS, and returns:
+Eight persistent ASCII macro slots are available. Each stores up to 80 printable ASCII characters.
 
-OK|KEYMAP_RESET
+Read:
 
-## Key state
+GET_MACRO|0
+
+Response uses hex-encoded ASCII:
+
+MACRO|0|48656C6C6F
+
+Write:
+
+SET_MACRO|0|48656C6C6F
+
+Success:
+
+OK|MACRO|0
+
+## Matrix test
+
+Physical transitions are asynchronous:
+
+KEY|1|DOWN|L=0
+KEY|1|UP|L=0
 
 GET_KEYS returns:
 
-KEYS|00
+KEYS|00|L=0
 
-Physical key transitions are asynchronous:
+GET_LAYER returns:
 
-KEY|1|DOWN
-KEY|1|UP
-...
-KEY|8|DOWN
-KEY|8|UP
+LAYER|ACTIVE=0|BASE=0|TOGGLE=0
 
-PING returns:
+## Other commands
 
-PONG|PIXELPRO
+- HELLO
+- GET_INFO
+- GET_KEYS
+- GET_LAYER
+- PING
+- REBOOT
 
-Unknown commands return ERR|UNKNOWN_COMMAND.
+PING returns PONG|PIXELPRO.
 
-The build intentionally uses a generic ESP32-S2 target with USB CDC On Boot disabled. CDC and HID descriptors are registered before the single USB.begin().
+The build uses the generic ESP32-S2 target with USB CDC On Boot disabled. CDC and HID descriptors are registered before USB.begin().
