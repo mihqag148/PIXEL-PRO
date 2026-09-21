@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <Arduino_GFX_Library.h>
+#include <mbedtls/base64.h>
 #include "USB.h"
 #include "USBHID.h"
 #include "USBHIDKeyboard.h"
@@ -11,7 +13,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.2";
+static constexpr char FW_VERSION[] = "1.3.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -21,6 +23,32 @@ static constexpr uint8_t MACRO_COUNT = 20;
 static constexpr uint8_t ACTION_COUNT = 32;
 static constexpr uint8_t MACRO_MAX_LEN = 80;
 static constexpr uint32_t DEBOUNCE_MS = 8;
+
+// PIXEL PRO display: 3.5" ILI9486, 480x320 landscape, i8080 8-bit.
+// The physical shield follows the common UNO/Mega2560 8-bit shield signal
+// layout; HARDWARE.md maps those shield pins to these ESP32-S2 pins.
+static constexpr uint16_t TFT_WIDTH = 480;
+static constexpr uint16_t TFT_HEIGHT = 320;
+static constexpr uint16_t GIF_WIDTH = 240;
+static constexpr uint16_t GIF_HEIGHT = 160;
+static constexpr uint8_t GIF_MAX_FRAMES = 32;
+static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
+static constexpr uint8_t GIF_MAX_FPS = 60;
+static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
+
+static constexpr int8_t TFT_RD = 12;
+static constexpr int8_t TFT_WR = 13;
+static constexpr int8_t TFT_DC = 14;
+static constexpr int8_t TFT_CS = 16;
+static constexpr int8_t TFT_RST = 17;
+static constexpr int8_t TFT_D0 = 33;
+static constexpr int8_t TFT_D1 = 34;
+static constexpr int8_t TFT_D2 = 35;
+static constexpr int8_t TFT_D3 = 36;
+static constexpr int8_t TFT_D4 = 37;
+static constexpr int8_t TFT_D5 = 38;
+static constexpr int8_t TFT_D6 = 39;
+static constexpr int8_t TFT_D7 = 40;
 
 static constexpr uint8_t BIND_DISABLED = 0;
 static constexpr uint8_t BIND_KEYBOARD = 1;
@@ -55,6 +83,28 @@ USBHIDKeyboard Keyboard;
 USBHIDConsumerControl ConsumerControl;
 Preferences preferences;
 
+Arduino_DataBus *tftBus =
+    new Arduino_ESP32PAR8(
+        TFT_DC,
+        TFT_CS,
+        TFT_WR,
+        TFT_RD,
+        TFT_D0,
+        TFT_D1,
+        TFT_D2,
+        TFT_D3,
+        TFT_D4,
+        TFT_D5,
+        TFT_D6,
+        TFT_D7);
+
+Arduino_GFX *tft =
+    new Arduino_ILI9486(
+        tftBus,
+        TFT_RST,
+        1,
+        false);
+
 static KeyState keyState[KEY_COUNT] = {};
 static KeyBinding keymap[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
 static KeyBinding activeBindings[KEY_COUNT] = {};
@@ -67,6 +117,32 @@ static uint8_t baseLayer = 0;
 static int8_t momentaryLayer = -1;
 static uint8_t toggledLayerMask = 0;
 static String cdcLine;
+
+enum SaverPixelFormat : uint8_t {
+  SAVER_NONE = 0,
+  SAVER_RGB332 = 1,
+  SAVER_RGB565 = 2,
+};
+
+static bool displayReady = false;
+static uint16_t *renderBuffer = nullptr;
+
+static uint8_t *saverData = nullptr;
+static size_t saverDataBytes = 0;
+static size_t saverFrameBytes = 0;
+static size_t saverBytesReceived = 0;
+static uint8_t saverFrameCount = 0;
+static uint16_t saverWidth = 0;
+static uint16_t saverHeight = 0;
+static SaverPixelFormat saverFormat = SAVER_NONE;
+static uint16_t saverDurations[GIF_MAX_FRAMES] = {};
+static bool saverUploading = false;
+static bool saverReady = false;
+static bool saverActive = false;
+static uint8_t saverFrameIndex = 0;
+static uint32_t saverFrameStartedAt = 0;
+static uint32_t lastUserActivityAt = 0;
+static uint32_t saverDelayMs = 60000;
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
