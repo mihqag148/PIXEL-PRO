@@ -900,10 +900,16 @@ static void gifDraw(GIFDRAW *draw) {
       continue;
     }
 
-    dx0 = max(0, dx0);
-    dy0 = max(0, dy0);
-    dx1 = min<int>(TFT_WIDTH - 1, dx1);
-    dy1 = min<int>(TFT_HEIGHT - 1, dy1);
+    dx0 = dx0 < 0 ? 0 : dx0;
+    dy0 = dy0 < 0 ? 0 : dy0;
+    dx1 =
+        dx1 >= TFT_WIDTH
+            ? TFT_WIDTH - 1
+            : dx1;
+    dy1 =
+        dy1 >= TFT_HEIGHT
+            ? TFT_HEIGHT - 1
+            : dy1;
 
     uint16_t color = pixels[x];
 
@@ -1308,13 +1314,18 @@ static void loadPersistedGif() {
   }
 
   saverFormat = SAVER_GIF;
+  uint8_t storedScale =
+      preferences.getUChar(
+          "gscale",
+          GIF_SCALE_FILL);
+
+  if (storedScale > GIF_SCALE_SPAN) {
+    storedScale = GIF_SCALE_FILL;
+  }
+
   gifScaleMode =
       static_cast<GifScaleMode>(
-          min<uint8_t>(
-              preferences.getUChar(
-                  "gscale",
-                  GIF_SCALE_FILL),
-              GIF_SCALE_SPAN));
+          storedScale);
   saverWidth = width;
   saverHeight = height;
   saverDataBytes = fileSize;
@@ -1896,6 +1907,7 @@ static void handleCommand(String command) {
     int first = command.indexOf('|');
     int second = command.indexOf('|', first + 1);
     int third = command.indexOf('|', second + 1);
+    int fourth = command.indexOf('|', third + 1);
 
     if (first < 0 ||
         second < 0 ||
@@ -1908,17 +1920,30 @@ static void handleCommand(String command) {
     uint16_t width = 0;
     uint16_t height = 0;
 
+    String heightPart =
+        fourth >= 0
+            ? command.substring(third + 1, fourth)
+            : command.substring(third + 1);
+
+    String scalePart =
+        fourth >= 0
+            ? command.substring(fourth + 1)
+            : String("FILL");
+
+    GifScaleMode scaleMode =
+        parseGifScaleMode(scalePart);
+
     if (!parseUnsignedLong(
             command.substring(first + 1, second),
             16UL * 1024UL * 1024UL,
             byteCount) ||
         !parseUnsigned(
             command.substring(second + 1, third),
-            GIF_LANDSCAPE_WIDTH,
+            1024,
             width) ||
         !parseUnsigned(
-            command.substring(third + 1),
-            GIF_NATIVE_HEIGHT,
+            heightPart,
+            1024,
             height) ||
         !gifDimensionsSupported(
             width,
@@ -1926,7 +1951,8 @@ static void handleCommand(String command) {
         !beginGifUpload(
             byteCount,
             width,
-            height)) {
+            height,
+            scaleMode)) {
       cdcPrintln("ERR|SAVGIFBEGIN");
       return;
     }
