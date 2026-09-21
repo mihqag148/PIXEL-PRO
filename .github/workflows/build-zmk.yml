@@ -56,12 +56,12 @@ jobs:
           cp build/zephyr/zephyr.dts dist/
           cp pixel-pro/docs/FLASH.md dist/
           west manifest --freeze > dist/west-lock.yml
-          printf 'PIXEL PRO ZMK 0.3.0\nCommit: %s\nRun: %s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/BUILD-INFO.txt
+          printf 'PIXEL PRO ZMK 0.3.1\nCommit: %s\nRun: %s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/BUILD-INFO.txt
           cd dist
           sha256sum PIXEL_PRO_ZMK.bin > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: PIXEL-PRO-ZMK-0.3.0
+          name: PIXEL-PRO-ZMK-0.3.1
           path: dist/
           if-no-files-found: error
       - name: Save failure diagnostics
