@@ -53,9 +53,9 @@ jobs:
           arduino-cli lib update-index
           arduino-cli lib install "GFX Library for Arduino@1.6.8"
 
-      - name: Install AnimatedGIF 2.2.3
+      - name: Install AnimatedGIF 2.2.0
         run: |
-          arduino-cli lib install "AnimatedGIF@2.2.3"
+          arduino-cli lib install "AnimatedGIF@2.2.0"
 
       - name: Compile ESP32-S2 native USB firmware
         run: |
