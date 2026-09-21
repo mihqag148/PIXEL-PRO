@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Arduino_GFX_Library.h>
+#include <AnimatedGIF.h>
+#include <LittleFS.h>
 #include <mbedtls/base64.h>
 #include "USB.h"
 #include "USBHID.h"
@@ -13,7 +15,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.3";
+static constexpr char FW_VERSION[] = "1.3.4";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -29,12 +31,15 @@ static constexpr uint32_t DEBOUNCE_MS = 8;
 // layout; HARDWARE.md maps those shield pins to these ESP32-S2 pins.
 static constexpr uint16_t TFT_WIDTH = 480;
 static constexpr uint16_t TFT_HEIGHT = 320;
-static constexpr uint16_t GIF_WIDTH = 240;
-static constexpr uint16_t GIF_HEIGHT = 160;
-static constexpr uint8_t GIF_MAX_FRAMES = 32;
+static constexpr uint16_t GIF_LANDSCAPE_WIDTH = 480;
+static constexpr uint16_t GIF_LANDSCAPE_HEIGHT = 320;
+static constexpr uint16_t GIF_NATIVE_WIDTH = 320;
+static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
+static constexpr char GIF_PATH[] = "/screensaver.gif";
+static constexpr char GIF_TMP_PATH[] = "/screensaver.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -122,6 +127,7 @@ enum SaverPixelFormat : uint8_t {
   SAVER_NONE = 0,
   SAVER_RGB332 = 1,
   SAVER_RGB565 = 2,
+  SAVER_GIF = 3,
 };
 
 static bool displayReady = false;
@@ -143,6 +149,21 @@ static uint8_t saverFrameIndex = 0;
 static uint32_t saverFrameStartedAt = 0;
 static uint32_t lastUserActivityAt = 0;
 static uint32_t saverDelayMs = 60000;
+
+static bool littleFsReady = false;
+static File gifUploadFile;
+static uint32_t gifUploadExpectedBytes = 0;
+static uint16_t gifUploadWidth = 0;
+static uint16_t gifUploadHeight = 0;
+
+static AnimatedGIF gifDecoder;
+static File gifPlaybackFile;
+static bool gifDecoderOpen = false;
+static bool gifAtEnd = false;
+static bool gifPortraitSource = false;
+static uint16_t gifCanvasWidth = 0;
+static uint16_t gifCanvasHeight = 0;
+static uint32_t gifNextFrameAt = 0;
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
