@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Arduino_GFX_Library.h>
+#include <AnimatedGIF.h>
+#include <LittleFS.h>
 #include <mbedtls/base64.h>
 #include "USB.h"
 #include "USBHID.h"
@@ -13,7 +15,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.3";
+static constexpr char FW_VERSION[] = "1.3.4";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -29,12 +31,23 @@ static constexpr uint32_t DEBOUNCE_MS = 8;
 // layout; HARDWARE.md maps those shield pins to these ESP32-S2 pins.
 static constexpr uint16_t TFT_WIDTH = 480;
 static constexpr uint16_t TFT_HEIGHT = 320;
-static constexpr uint16_t GIF_WIDTH = 240;
-static constexpr uint16_t GIF_HEIGHT = 160;
-static constexpr uint8_t GIF_MAX_FRAMES = 32;
+static constexpr uint16_t GIF_LANDSCAPE_WIDTH = 480;
+static constexpr uint16_t GIF_LANDSCAPE_HEIGHT = 320;
+static constexpr uint16_t GIF_NATIVE_WIDTH = 320;
+static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
+
+// Legacy raw-frame constants are kept only so older app builds can still
+// upload their previous 240x160 RGB332 format. New app builds upload the
+// original full-resolution GIF file instead.
+static constexpr uint16_t GIF_WIDTH = 240;
+static constexpr uint16_t GIF_HEIGHT = 160;
+static constexpr uint8_t GIF_MAX_FRAMES = 32;
+
+static constexpr char GIF_PATH[] = "/screensaver.gif";
+static constexpr char GIF_TMP_PATH[] = "/screensaver.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -122,6 +135,7 @@ enum SaverPixelFormat : uint8_t {
   SAVER_NONE = 0,
   SAVER_RGB332 = 1,
   SAVER_RGB565 = 2,
+  SAVER_GIF = 3,
 };
 
 static bool displayReady = false;
@@ -143,6 +157,23 @@ static uint8_t saverFrameIndex = 0;
 static uint32_t saverFrameStartedAt = 0;
 static uint32_t lastUserActivityAt = 0;
 static uint32_t saverDelayMs = 60000;
+
+static bool littleFsReady = false;
+static File gifUploadFile;
+static uint32_t gifUploadExpectedBytes = 0;
+static uint16_t gifUploadWidth = 0;
+static uint16_t gifUploadHeight = 0;
+
+static AnimatedGIF gifDecoder;
+static File gifPlaybackFile;
+static bool gifDecoderOpen = false;
+static bool gifAtEnd = false;
+static bool gifPortraitSource = false;
+static uint16_t gifCanvasWidth = 0;
+static uint16_t gifCanvasHeight = 0;
+static uint32_t gifNextFrameAt = 0;
+
+static void stopSaver();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -594,7 +625,598 @@ static bool hexDecode(const String &hex, String &out) {
 }
 
 
+
+static void *gifAlloc(uint32_t size) {
+  void *ptr = nullptr;
+
+  if (ESP.getPsramSize() > 0) {
+    ptr = ps_malloc(size);
+  }
+
+  if (ptr == nullptr) {
+    ptr = malloc(size);
+  }
+
+  return ptr;
+}
+
+static void gifFree(void *ptr) {
+  if (ptr != nullptr) {
+    free(ptr);
+  }
+}
+
+static void *gifOpenFile(
+    const char *filename,
+    int32_t *fileSize) {
+  (void)filename;
+
+  gifPlaybackFile = LittleFS.open(GIF_PATH, "r");
+
+  if (!gifPlaybackFile) {
+    return nullptr;
+  }
+
+  *fileSize =
+      static_cast<int32_t>(gifPlaybackFile.size());
+
+  return &gifPlaybackFile;
+}
+
+static void gifCloseFile(void *handle) {
+  File *file = static_cast<File *>(handle);
+
+  if (file != nullptr) {
+    file->close();
+  }
+}
+
+static int32_t gifReadFile(
+    GIFFILE *file,
+    uint8_t *buffer,
+    int32_t length) {
+  if (file == nullptr ||
+      file->fHandle == nullptr ||
+      buffer == nullptr ||
+      length <= 0) {
+    return 0;
+  }
+
+  File *source =
+      static_cast<File *>(file->fHandle);
+
+  int32_t remaining =
+      file->iSize - file->iPos;
+
+  if (remaining <= 0) {
+    return 0;
+  }
+
+  int32_t toRead =
+      length < remaining ? length : remaining;
+
+  int32_t read =
+      static_cast<int32_t>(
+          source->read(
+              buffer,
+              static_cast<size_t>(toRead)));
+
+  file->iPos =
+      static_cast<int32_t>(
+          source->position());
+
+  return read;
+}
+
+static int32_t gifSeekFile(
+    GIFFILE *file,
+    int32_t position) {
+  if (file == nullptr ||
+      file->fHandle == nullptr ||
+      position < 0) {
+    return -1;
+  }
+
+  File *source =
+      static_cast<File *>(file->fHandle);
+
+  if (!source->seek(
+          static_cast<uint32_t>(position))) {
+    return -1;
+  }
+
+  file->iPos =
+      static_cast<int32_t>(
+          source->position());
+
+  return file->iPos;
+}
+
+static void gifDraw(GIFDRAW *draw) {
+  if (draw == nullptr ||
+      renderBuffer == nullptr ||
+      draw->pPixels == nullptr) {
+    return;
+  }
+
+  const uint16_t *pixels =
+      reinterpret_cast<const uint16_t *>(
+          draw->pPixels);
+
+  int sourceY =
+      draw->iY + draw->y;
+
+  int sourceX =
+      draw->iX;
+
+  int width = draw->iWidth;
+
+  if (!gifPortraitSource) {
+    if (sourceY < 0 ||
+        sourceY >= TFT_HEIGHT ||
+        sourceX >= TFT_WIDTH) {
+      return;
+    }
+
+    int clippedX =
+        sourceX < 0 ? 0 : sourceX;
+
+    int sourceSkip =
+        clippedX - sourceX;
+
+    int copyWidth =
+        width - sourceSkip;
+
+    if (clippedX + copyWidth > TFT_WIDTH) {
+      copyWidth =
+          TFT_WIDTH - clippedX;
+    }
+
+    if (copyWidth <= 0) {
+      return;
+    }
+
+    memcpy(
+        renderBuffer +
+            static_cast<size_t>(sourceY) *
+                TFT_WIDTH +
+            clippedX,
+        pixels + sourceSkip,
+        static_cast<size_t>(copyWidth) *
+            sizeof(uint16_t));
+
+    return;
+  }
+
+  for (int x = 0; x < width; ++x) {
+    int sx = sourceX + x;
+    int sy = sourceY;
+
+    if (sx < 0 ||
+        sx >= GIF_NATIVE_WIDTH ||
+        sy < 0 ||
+        sy >= GIF_NATIVE_HEIGHT) {
+      continue;
+    }
+
+    int dx =
+        TFT_WIDTH - 1 - sy;
+
+    int dy = sx;
+
+    if (dx < 0 ||
+        dx >= TFT_WIDTH ||
+        dy < 0 ||
+        dy >= TFT_HEIGHT) {
+      continue;
+    }
+
+    renderBuffer[
+        static_cast<size_t>(dy) *
+            TFT_WIDTH +
+        dx] = pixels[x];
+  }
+}
+
+static void closeGifDecoder() {
+  if (gifDecoder.getFrameBuf() != nullptr) {
+    gifDecoder.freeFrameBuf(gifFree);
+  }
+
+  if (gifDecoderOpen) {
+    gifDecoder.close();
+  }
+
+  if (gifPlaybackFile) {
+    gifPlaybackFile.close();
+  }
+
+  gifDecoderOpen = false;
+  gifAtEnd = false;
+  gifPortraitSource = false;
+  gifCanvasWidth = 0;
+  gifCanvasHeight = 0;
+  gifNextFrameAt = 0;
+}
+
+static bool gifDimensionsSupported(
+    uint16_t width,
+    uint16_t height) {
+  return
+      (width == GIF_LANDSCAPE_WIDTH &&
+       height == GIF_LANDSCAPE_HEIGHT) ||
+      (width == GIF_NATIVE_WIDTH &&
+       height == GIF_NATIVE_HEIGHT);
+}
+
+static bool readGifHeader(
+    const char *path,
+    uint16_t &width,
+    uint16_t &height,
+    size_t &fileSize) {
+  if (!littleFsReady) {
+    return false;
+  }
+
+  File file = LittleFS.open(path, "r");
+
+  if (!file) {
+    return false;
+  }
+
+  fileSize = file.size();
+
+  uint8_t header[10] = {};
+
+  size_t read =
+      file.read(
+          header,
+          sizeof(header));
+
+  file.close();
+
+  if (read != sizeof(header) ||
+      header[0] != 'G' ||
+      header[1] != 'I' ||
+      header[2] != 'F') {
+    return false;
+  }
+
+  width =
+      static_cast<uint16_t>(
+          header[6] |
+          (header[7] << 8));
+
+  height =
+      static_cast<uint16_t>(
+          header[8] |
+          (header[9] << 8));
+
+  return gifDimensionsSupported(
+      width,
+      height);
+}
+
+static bool openGifDecoder() {
+  closeGifDecoder();
+
+  if (!littleFsReady ||
+      !LittleFS.exists(GIF_PATH) ||
+      renderBuffer == nullptr) {
+    return false;
+  }
+
+  gifDecoder.begin(
+      GIF_PALETTE_RGB565_LE);
+
+  if (!gifDecoder.open(
+          GIF_PATH,
+          gifOpenFile,
+          gifCloseFile,
+          gifReadFile,
+          gifSeekFile,
+          gifDraw)) {
+    closeGifDecoder();
+    return false;
+  }
+
+  gifCanvasWidth =
+      static_cast<uint16_t>(
+          gifDecoder.getCanvasWidth());
+
+  gifCanvasHeight =
+      static_cast<uint16_t>(
+          gifDecoder.getCanvasHeight());
+
+  if (!gifDimensionsSupported(
+          gifCanvasWidth,
+          gifCanvasHeight)) {
+    closeGifDecoder();
+    return false;
+  }
+
+  if (gifDecoder.allocFrameBuf(gifAlloc) !=
+      GIF_SUCCESS) {
+    closeGifDecoder();
+    return false;
+  }
+
+  if (gifDecoder.setDrawType(
+          GIF_DRAW_COOKED) != GIF_SUCCESS) {
+    closeGifDecoder();
+    return false;
+  }
+
+  gifPortraitSource =
+      gifCanvasWidth == GIF_NATIVE_WIDTH &&
+      gifCanvasHeight == GIF_NATIVE_HEIGHT;
+
+  memset(
+      renderBuffer,
+      0,
+      static_cast<size_t>(TFT_WIDTH) *
+          TFT_HEIGHT *
+          sizeof(uint16_t));
+
+  gifDecoderOpen = true;
+  gifAtEnd = false;
+  gifNextFrameAt = 0;
+
+  return true;
+}
+
+static bool decodeNextGifFrame() {
+  if (!gifDecoderOpen ||
+      renderBuffer == nullptr ||
+      !displayReady) {
+    return false;
+  }
+
+  if (gifAtEnd) {
+    gifDecoder.reset();
+    gifAtEnd = false;
+
+    memset(
+        renderBuffer,
+        0,
+        static_cast<size_t>(TFT_WIDTH) *
+            TFT_HEIGHT *
+            sizeof(uint16_t));
+  }
+
+  int delayMs = 0;
+
+  int hasMore =
+      gifDecoder.playFrame(
+          false,
+          &delayMs,
+          nullptr);
+
+  tft->draw16bitRGBBitmap(
+      0,
+      0,
+      renderBuffer,
+      TFT_WIDTH,
+      TFT_HEIGHT);
+
+  gifAtEnd = hasMore == 0;
+
+  uint32_t holdMs =
+      delayMs < GIF_MIN_FRAME_MS
+          ? GIF_MIN_FRAME_MS
+          : static_cast<uint32_t>(delayMs);
+
+  gifNextFrameAt =
+      millis() + holdMs;
+
+  return true;
+}
+
+static void closeGifUploadFile() {
+  if (gifUploadFile) {
+    gifUploadFile.close();
+  }
+}
+
+static bool beginGifUpload(
+    uint32_t expectedBytes,
+    uint16_t width,
+    uint16_t height) {
+  if (!littleFsReady ||
+      expectedBytes < 10 ||
+      !gifDimensionsSupported(
+          width,
+          height)) {
+    return false;
+  }
+
+  stopSaver();
+  closeGifDecoder();
+  closeGifUploadFile();
+
+  LittleFS.remove(GIF_TMP_PATH);
+  LittleFS.remove(GIF_PATH);
+
+  size_t total =
+      LittleFS.totalBytes();
+
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 4096 > freeBytes) {
+    return false;
+  }
+
+  gifUploadFile =
+      LittleFS.open(
+          GIF_TMP_PATH,
+          "w");
+
+  if (!gifUploadFile) {
+    return false;
+  }
+
+  gifUploadExpectedBytes =
+      expectedBytes;
+
+  gifUploadWidth = width;
+  gifUploadHeight = height;
+
+  saverBytesReceived = 0;
+  saverDataBytes = expectedBytes;
+  saverWidth = width;
+  saverHeight = height;
+  saverFormat = SAVER_GIF;
+  saverUploading = true;
+  saverReady = false;
+  saverActive = false;
+
+  return true;
+}
+
+static bool writeGifUploadChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverFormat != SAVER_GIF ||
+      !gifUploadFile ||
+      offset != saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[1100] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      saverBytesReceived +
+              decodedLength >
+          gifUploadExpectedBytes) {
+    return false;
+  }
+
+  size_t written =
+      gifUploadFile.write(
+          decoded,
+          decodedLength);
+
+  if (written != decodedLength) {
+    return false;
+  }
+
+  saverBytesReceived +=
+      decodedLength;
+
+  return true;
+}
+
+static bool finishGifUpload() {
+  if (!saverUploading ||
+      saverFormat != SAVER_GIF ||
+      saverBytesReceived !=
+          gifUploadExpectedBytes) {
+    closeGifUploadFile();
+    return false;
+  }
+
+  gifUploadFile.flush();
+  closeGifUploadFile();
+
+  uint16_t actualWidth = 0;
+  uint16_t actualHeight = 0;
+  size_t actualSize = 0;
+
+  if (!readGifHeader(
+          GIF_TMP_PATH,
+          actualWidth,
+          actualHeight,
+          actualSize) ||
+      actualSize !=
+          gifUploadExpectedBytes ||
+      actualWidth != gifUploadWidth ||
+      actualHeight != gifUploadHeight) {
+    LittleFS.remove(GIF_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  LittleFS.remove(GIF_PATH);
+
+  if (!LittleFS.rename(
+          GIF_TMP_PATH,
+          GIF_PATH)) {
+    LittleFS.remove(GIF_TMP_PATH);
+    saverUploading = false;
+    saverReady = false;
+    return false;
+  }
+
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+  saverFormat = SAVER_GIF;
+  saverWidth = actualWidth;
+  saverHeight = actualHeight;
+  saverDataBytes = actualSize;
+  saverBytesReceived = actualSize;
+
+  return true;
+}
+
+static void loadPersistedGif() {
+  if (!littleFsReady ||
+      !LittleFS.exists(GIF_PATH)) {
+    return;
+  }
+
+  uint16_t width = 0;
+  uint16_t height = 0;
+  size_t fileSize = 0;
+
+  if (!readGifHeader(
+          GIF_PATH,
+          width,
+          height,
+          fileSize)) {
+    LittleFS.remove(GIF_PATH);
+    return;
+  }
+
+  saverFormat = SAVER_GIF;
+  saverWidth = width;
+  saverHeight = height;
+  saverDataBytes = fileSize;
+  saverBytesReceived = fileSize;
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+}
+
 static void clearSaverBuffer() {
+  closeGifDecoder();
+  closeGifUploadFile();
+
+  if (littleFsReady) {
+    LittleFS.remove(GIF_TMP_PATH);
+    LittleFS.remove(GIF_PATH);
+  }
+
   if (saverData != nullptr) {
     free(saverData);
     saverData = nullptr;
@@ -612,6 +1234,10 @@ static void clearSaverBuffer() {
   saverActive = false;
   saverFrameIndex = 0;
   saverFrameStartedAt = 0;
+
+  gifUploadExpectedBytes = 0;
+  gifUploadWidth = 0;
+  gifUploadHeight = 0;
 
   memset(saverDurations, 0, sizeof(saverDurations));
 }
@@ -710,7 +1336,28 @@ static void renderSaverFrame(uint8_t index) {
 }
 
 static void startSaverNow() {
-  if (!saverReady || saverData == nullptr || !displayReady) {
+  if (!saverReady || !displayReady) {
+    return;
+  }
+
+  if (saverFormat == SAVER_GIF) {
+    if (!openGifDecoder()) {
+      saverReady = false;
+      return;
+    }
+
+    saverActive = true;
+    saverFrameIndex = 0;
+    saverFrameStartedAt = millis();
+
+    if (!decodeNextGifFrame()) {
+      stopSaver();
+    }
+
+    return;
+  }
+
+  if (saverData == nullptr) {
     return;
   }
 
@@ -721,15 +1368,15 @@ static void startSaverNow() {
 }
 
 static void stopSaver() {
-  if (!saverActive) {
-    return;
-  }
+  bool wasActive = saverActive;
 
   saverActive = false;
   saverFrameIndex = 0;
   saverFrameStartedAt = 0;
 
-  if (displayReady) {
+  closeGifDecoder();
+
+  if (wasActive && displayReady) {
     tft->fillScreen(RGB565_BLACK);
   }
 }
@@ -748,8 +1395,22 @@ static void pollSaver() {
     return;
   }
 
-  if (!saverReady ||
-      saverFrameCount <= 1 ||
+  if (!saverReady) {
+    return;
+  }
+
+  if (saverFormat == SAVER_GIF) {
+    if (static_cast<int32_t>(
+            now - gifNextFrameAt) >= 0) {
+      if (!decodeNextGifFrame()) {
+        stopSaver();
+      }
+    }
+
+    return;
+  }
+
+  if (saverFrameCount <= 1 ||
       saverFormat == SAVER_RGB565) {
     return;
   }
@@ -937,7 +1598,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -1112,6 +1773,95 @@ static void handleCommand(String command) {
     } else {
       cdcPrintln("SAVERSTATE|EMPTY");
     }
+    return;
+  }
+
+  if (upper.startsWith("SAVGIFBEGIN|")) {
+    int first = command.indexOf('|');
+    int second = command.indexOf('|', first + 1);
+    int third = command.indexOf('|', second + 1);
+
+    if (first < 0 ||
+        second < 0 ||
+        third < 0) {
+      cdcPrintln("ERR|BAD_SAVGIFBEGIN");
+      return;
+    }
+
+    uint32_t byteCount = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(first + 1, second),
+            16UL * 1024UL * 1024UL,
+            byteCount) ||
+        !parseUnsigned(
+            command.substring(second + 1, third),
+            GIF_LANDSCAPE_WIDTH,
+            width) ||
+        !parseUnsigned(
+            command.substring(third + 1),
+            GIF_NATIVE_HEIGHT,
+            height) ||
+        !gifDimensionsSupported(
+            width,
+            height) ||
+        !beginGifUpload(
+            byteCount,
+            width,
+            height)) {
+      cdcPrintln("ERR|SAVGIFBEGIN");
+      return;
+    }
+
+    cdcPrintln("OK|SAVGIFBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVGIFDATA|")) {
+    int first = command.indexOf('|');
+    int second = command.indexOf('|', first + 1);
+
+    if (first < 0 ||
+        second < 0) {
+      cdcPrintln("ERR|BAD_SAVGIFDATA");
+      return;
+    }
+
+    uint32_t offset = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(first + 1, second),
+            gifUploadExpectedBytes,
+            offset) ||
+        !writeGifUploadChunk(
+            offset,
+            command.substring(second + 1))) {
+      cdcPrintln("ERR|SAVGIFDATA");
+      return;
+    }
+
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|SAVGIFDATA|%lu",
+        static_cast<unsigned long>(
+            saverBytesReceived));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "SAVGIFEND") {
+    if (!finishGifUpload()) {
+      cdcPrintln("ERR|SAVGIFEND");
+      return;
+    }
+
+    lastUserActivityAt = millis();
+    cdcPrintln("OK|SAVER|READY");
     return;
   }
 
@@ -1533,7 +2283,7 @@ static void pollCdc() {
       continue;
     }
 
-    if (cdcLine.length() < 512) {
+    if (cdcLine.length() < 2048) {
       cdcLine += ch;
     } else {
       cdcLine = "";
@@ -1638,6 +2388,12 @@ void setup() {
   loadMacros();
   initKeys();
   initDisplay();
+
+  littleFsReady = LittleFS.begin(true);
+  if (littleFsReady) {
+    loadPersistedGif();
+  }
+
   lastUserActivityAt = millis();
 
   uint64_t mac = ESP.getEfuseMac();
@@ -1653,7 +2409,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0133);
+  USB.firmwareVersion(0x0134);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -1663,7 +2419,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.3");
+  cdcPrintln("BOOT|PIXELPRO|1.3.4");
 }
 
 void loop() {

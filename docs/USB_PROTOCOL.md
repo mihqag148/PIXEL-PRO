@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.3.3 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry and Lumi Action bindings, and adds the PIXEL PRO ILI9486 480×320 i8080 display/media path.
+Firmware 1.3.4 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display, and changes PIXEL PRO GIF playback to direct on-device decoding of the original compressed GIF file.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.3.3|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.4|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -107,41 +107,61 @@ i8080 parallel), and maximum media FPS.
 
 ## Screensaver media
 
-PIXEL PRO accepts static 480×320 RGB565 images and animated 240×160 RGB332 frames.
-Animated frames are expanded exactly 2× on the ILI9486 to fill the 480×320 3:2 panel.
-The host caps animation timing at 60 FPS and stores at most 32 frames.
+### Direct full-resolution GIF
 
-Begin an upload:
+PIXEL PRO accepts the original compressed GIF file. The app does not convert GIFs
+to raw RGB332 frame arrays and does not resize them to 240×160.
 
-SAVBEGIN|<frames>|<width>|<height>|<RGB565 or RGB332>|<duration-ms CSV>
+Supported GIF logical canvas sizes:
 
-Then send sequential Base64 chunks:
+- 480×320 landscape
+- 320×480 native portrait; firmware rotates this to landscape without resizing
 
-SAVDATA|<frame index>|<byte offset>|<base64>
+Start a GIF upload:
 
-Firmware acknowledges each completed frame:
+SAVGIFBEGIN|<file bytes>|<width>|<height>
 
-OK|SAVFRAME|<frame index>
+Success:
+
+OK|SAVGIFBEGIN
+
+Send sequential Base64 chunks:
+
+SAVGIFDATA|<byte offset>|<base64>
+
+Each chunk is acknowledged with the next expected byte offset:
+
+OK|SAVGIFDATA|<next offset>
 
 Finish:
 
-SAVEND
+SAVGIFEND
 
-Successful completion:
+Success:
 
 OK|SAVER|READY
+
+The original LZW-compressed GIF is persisted in LittleFS. AnimatedGIF decodes it
+on-device and outputs RGB565 to the ILI9486. Frame timing is kept, with a 17 ms
+minimum interval so playback is capped at 60 FPS.
+
+### Static image / legacy compatibility
+
+Static images use the existing full-resolution 480×320 RGB565 transport:
+
+SAVBEGIN|<frames>|<width>|<height>|<RGB565 or RGB332>|<duration-ms CSV>
+SAVDATA|<frame index>|<byte offset>|<base64>
+SAVEND
+
+The RGB332 path remains only for compatibility with older app builds.
 
 Other commands:
 
 - SAVERSTATE -> SAVERSTATE|EMPTY / UPLOADING / READY
 - SAVSHOW -> immediately show uploaded media
-- SAVCLEAR -> clear uploaded media from PSRAM
+- SAVCLEAR -> clear uploaded media and the persisted GIF
 - SAVSOURCE|MEDIA -> select uploaded media
 - SAVDELAY|<seconds> -> inactivity delay, 0 disables auto screensaver
-
-Uploaded PIXEL PRO media lives in PSRAM, so the Windows app may restore it after a
-device reset. Static RGB565 is full resolution; GIF frames use the PSRAM-friendly
-240×160 RGB332 format.
 
 ## Memory telemetry
 
