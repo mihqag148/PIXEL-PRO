@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.4.1";
+static constexpr char FW_VERSION[] = "1.5.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -42,6 +42,7 @@ static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
 static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
+static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -54,6 +55,8 @@ static constexpr char GIF_PATH[] = "/screensaver.gif";
 static constexpr char GIF_TMP_PATH[] = "/screensaver.tmp";
 static constexpr char JPEG_PATH[] = "/screensaver.jpg";
 static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
+static constexpr char PACKED_PATH[] = "/screensaver.pxq";
+static constexpr char PACKED_TMP_PATH[] = "/screensaver_pxq.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -138,8 +141,8 @@ static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
-// Effects match the original Lumi RGB UI: 0 rainbow, 1 purple ping-pong,
-// 2 orange blink, 3 static per-key colors.
+// PIXEL effects: 0 rainbow, 1 purple ping-pong, 2 orange blink,
+ // 3 static, 4 fade, 5 chase, 6 breathe, 7 color shift, 8 rain, 9 wave.
 static uint8_t rgbEffects[PROFILE_COUNT] = {};
 static bool rgbEnabled = true;
 static uint8_t rgbBrightnessPercent = 25;
@@ -165,6 +168,7 @@ enum SaverPixelFormat : uint8_t {
   SAVER_RGB565 = 2,
   SAVER_GIF = 3,
   SAVER_JPEG = 4,
+  SAVER_PACKED = 5,
 };
 
 enum GifScaleMode : uint8_t {
@@ -209,6 +213,22 @@ static uint16_t jpegUploadHeight = 0;
 static JPEGDEC jpegDecoder;
 static File jpegPlaybackFile;
 
+static File packedUploadFile;
+static File packedPlaybackFile;
+static uint32_t packedUploadExpectedBytes = 0;
+static uint16_t packedStorageWidth = 0;
+static uint16_t packedStorageHeight = 0;
+static uint16_t packedFrameCount = 0;
+static uint16_t packedFps = 0;
+static uint16_t packedFrameIndex = 0;
+static uint16_t packedPaletteCount = 0;
+static uint8_t packedColorMode = 0;
+static uint32_t packedDurationMs = 0;
+static uint32_t packedFramesOffset = 0;
+static uint32_t packedNextFrameAt = 0;
+static uint16_t packedPalette565[256] = {};
+static uint16_t packedLineBuffer[TFT_WIDTH] = {};
+
 static AnimatedGIF gifDecoder;
 static File gifPlaybackFile;
 static bool gifDecoderOpen = false;
@@ -228,6 +248,7 @@ static float gifOffsetY = 0.0f;
 static void stopSaver();
 static void clearSaverBuffer();
 static void closeJpegUploadFile();
+static void closePackedFiles();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -428,7 +449,7 @@ static void loadRgbProfiles() {
         sizeof(rgbEffects));
 
     for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
-      if (rgbEffects[profile] > 3) {
+      if (rgbEffects[profile] > 9) {
         rgbEffects[profile] = 3;
       }
     }
@@ -495,6 +516,47 @@ static void renderRgbStatic() {
   rgbStrip.show();
 }
 
+static uint8_t triangle8(
+    uint16_t value) {
+  uint8_t phase =
+      static_cast<uint8_t>(
+          value & 0xFFU);
+
+  return phase < 128
+      ? static_cast<uint8_t>(
+            phase * 2U)
+      : static_cast<uint8_t>(
+            (255U - phase) *
+            2U);
+}
+
+static uint32_t scaledProfileColor(
+    uint8_t key,
+    uint8_t scale) {
+  uint16_t r =
+      static_cast<uint16_t>(
+          rgbProfiles[activeProfile][key][0]) *
+      scale /
+      255U;
+
+  uint16_t g =
+      static_cast<uint16_t>(
+          rgbProfiles[activeProfile][key][1]) *
+      scale /
+      255U;
+
+  uint16_t b =
+      static_cast<uint16_t>(
+          rgbProfiles[activeProfile][key][2]) *
+      scale /
+      255U;
+
+  return rgbStrip.Color(
+      static_cast<uint8_t>(r),
+      static_cast<uint8_t>(g),
+      static_cast<uint8_t>(b));
+}
+
 static void pollRgbEffect(bool force = false) {
   uint8_t effect =
       rgbEffects[activeProfile];
@@ -525,12 +587,14 @@ static void pollRgbEffect(bool force = false) {
   applyRgbBrightness();
 
   if (effect == 0) {
-    // Rainbow across logical K1..K8 while respecting the physical LED map.
+    // Rainbow: spatial rainbow flowing through logical K1..K8.
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
       uint16_t hue =
           static_cast<uint16_t>(
               rgbAnimationStep * 512U +
-              key * (65535U / KEY_COUNT));
+              key *
+                  (65535U /
+                   KEY_COUNT));
 
       rgbStrip.setPixelColor(
           KEY_TO_LED[key],
@@ -540,12 +604,11 @@ static void pollRgbEffect(bool force = false) {
               255));
     }
   } else if (effect == 1) {
-    // Purple point travels K1→K8→K1.
-    rgbStrip.clear();
-
+    // Purple Ping-Pong.
     uint8_t phase =
         static_cast<uint8_t>(
-            rgbAnimationStep % 14U);
+            rgbAnimationStep %
+            14U);
 
     uint8_t position =
         phase < 8
@@ -554,26 +617,225 @@ static void pollRgbEffect(bool force = false) {
                   14U - phase);
 
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t distance =
+          key > position
+              ? key - position
+              : position - key;
+
+      uint8_t level =
+          distance == 0
+              ? 255
+              : distance == 1
+                  ? 72
+                  : 12;
+
       rgbStrip.setPixelColor(
           KEY_TO_LED[key],
-          key == position
-              ? rgbStrip.Color(190, 40, 255)
-              : rgbStrip.Color(8, 0, 14));
+          rgbStrip.Color(
+              static_cast<uint8_t>(
+                  190U *
+                  level /
+                  255U),
+              static_cast<uint8_t>(
+                  40U *
+                  level /
+                  255U),
+              static_cast<uint8_t>(
+                  255U *
+                  level /
+                  255U)));
     }
-  } else {
-    // Original orange blink preset.
+  } else if (effect == 2) {
+    // Orange Blink.
     bool on =
-        (rgbAnimationStep & 1U) == 0;
+        (rgbAnimationStep &
+         1U) == 0;
 
     uint32_t color =
         on
-            ? rgbStrip.Color(255, 90, 0)
-            : rgbStrip.Color(0, 0, 0);
+            ? rgbStrip.Color(
+                  255,
+                  90,
+                  0)
+            : rgbStrip.Color(
+                  0,
+                  0,
+                  0);
 
     for (uint8_t key = 0; key < KEY_COUNT; ++key) {
       rgbStrip.setPixelColor(
           KEY_TO_LED[key],
           color);
+    }
+  } else if (effect == 4) {
+    // Fade: crossfade each saved key color into the next key color.
+    uint8_t mix =
+        static_cast<uint8_t>(
+            rgbAnimationStep &
+            0xFFU);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t next =
+          static_cast<uint8_t>(
+              (key + 1U) %
+              KEY_COUNT);
+
+      uint16_t inv =
+          255U - mix;
+
+      uint8_t r =
+          static_cast<uint8_t>(
+              (rgbProfiles[activeProfile][key][0] *
+                   inv +
+               rgbProfiles[activeProfile][next][0] *
+                   mix) /
+              255U);
+
+      uint8_t g =
+          static_cast<uint8_t>(
+              (rgbProfiles[activeProfile][key][1] *
+                   inv +
+               rgbProfiles[activeProfile][next][1] *
+                   mix) /
+              255U);
+
+      uint8_t b =
+          static_cast<uint8_t>(
+              (rgbProfiles[activeProfile][key][2] *
+                   inv +
+               rgbProfiles[activeProfile][next][2] *
+                   mix) /
+              255U);
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.Color(
+              r,
+              g,
+              b));
+    }
+  } else if (effect == 5) {
+    // Chase: selected per-key colors chase around K1..K8 with a short tail.
+    uint8_t head =
+        static_cast<uint8_t>(
+            rgbAnimationStep %
+            KEY_COUNT);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t distance =
+          static_cast<uint8_t>(
+              (head +
+               KEY_COUNT -
+               key) %
+              KEY_COUNT);
+
+      uint8_t level =
+          distance == 0
+              ? 255
+              : distance == 1
+                  ? 110
+                  : distance == 2
+                      ? 42
+                      : 6;
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          scaledProfileColor(
+              key,
+              level));
+    }
+  } else if (effect == 6) {
+    // Breathe: all saved per-key colors breathe together.
+    uint8_t level =
+        static_cast<uint8_t>(
+            24U +
+            (static_cast<uint16_t>(
+                 triangle8(
+                     rgbAnimationStep *
+                     3U)) *
+             231U /
+             255U));
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          scaledProfileColor(
+              key,
+              level));
+    }
+  } else if (effect == 7) {
+    // Color Shift: one hue slowly shifts across all keys.
+    uint16_t hue =
+        static_cast<uint16_t>(
+            rgbAnimationStep *
+            420U);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.ColorHSV(
+              hue,
+              255,
+              255));
+    }
+  } else if (effect == 8) {
+    // Rain: deterministic blue/cyan drops with fading trails.
+    uint8_t drop =
+        static_cast<uint8_t>(
+            (rgbAnimationStep *
+                 5U +
+             (rgbAnimationStep >>
+              2U) *
+                 3U) %
+            KEY_COUNT);
+
+    uint8_t second =
+        static_cast<uint8_t>(
+            (drop + 3U) %
+            KEY_COUNT);
+
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t level =
+          key == drop
+              ? 255
+              : key == second
+                  ? 150
+                  : static_cast<uint8_t>(
+                        12U +
+                        ((key * 17U +
+                          rgbAnimationStep * 11U) %
+                         24U));
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          rgbStrip.Color(
+              0,
+              static_cast<uint8_t>(
+                  level *
+                  3U /
+                  5U),
+              level));
+    }
+  } else {
+    // Wave: brightness wave travels through the saved per-key colors.
+    for (uint8_t key = 0; key < KEY_COUNT; ++key) {
+      uint8_t level =
+          static_cast<uint8_t>(
+              18U +
+              (static_cast<uint16_t>(
+                   triangle8(
+                       rgbAnimationStep *
+                           4U +
+                       key *
+                           28U)) *
+               237U /
+               255U));
+
+      rgbStrip.setPixelColor(
+          KEY_TO_LED[key],
+          scaledProfileColor(
+              key,
+              level));
     }
   }
 
@@ -1628,6 +1890,11 @@ static bool finishGifUpload() {
     return false;
   }
 
+  LittleFS.remove(
+      PACKED_PATH);
+  LittleFS.remove(
+      PACKED_TMP_PATH);
+
   saverUploading = false;
   saverReady = true;
   saverActive = false;
@@ -1686,6 +1953,938 @@ static void loadPersistedGif() {
   saverUploading = false;
   saverReady = true;
   saverActive = false;
+}
+
+static void closePackedFiles() {
+  if (packedUploadFile) {
+    packedUploadFile.close();
+  }
+
+  if (packedPlaybackFile) {
+    packedPlaybackFile.close();
+  }
+}
+
+static bool readPackedU16(
+    File &file,
+    uint16_t &value) {
+  uint8_t bytes[2] = {};
+
+  if (file.read(
+          bytes,
+          sizeof(bytes)) !=
+      sizeof(bytes)) {
+    return false;
+  }
+
+  value =
+      static_cast<uint16_t>(
+          bytes[0]) |
+      (static_cast<uint16_t>(
+           bytes[1]) <<
+       8);
+
+  return true;
+}
+
+static bool readPackedU32(
+    File &file,
+    uint32_t &value) {
+  uint8_t bytes[4] = {};
+
+  if (file.read(
+          bytes,
+          sizeof(bytes)) !=
+      sizeof(bytes)) {
+    return false;
+  }
+
+  value =
+      static_cast<uint32_t>(
+          bytes[0]) |
+      (static_cast<uint32_t>(
+           bytes[1]) <<
+       8) |
+      (static_cast<uint32_t>(
+           bytes[2]) <<
+       16) |
+      (static_cast<uint32_t>(
+           bytes[3]) <<
+       24);
+
+  return true;
+}
+
+static uint16_t rgb888To565(
+    uint8_t r,
+    uint8_t g,
+    uint8_t b) {
+  return static_cast<uint16_t>(
+      ((r & 0xF8) << 8) |
+      ((g & 0xFC) << 3) |
+      (b >> 3));
+}
+
+static uint16_t expectedPackedPaletteCount(
+    uint8_t mode) {
+  switch (mode) {
+    case 2:
+      return 256;
+    case 3:
+      return 16;
+    case 4:
+      return 4;
+    case 5:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+static bool readPackedHeader(
+    File &file,
+    bool loadPalette) {
+  if (!file ||
+      !file.seek(0)) {
+    return false;
+  }
+
+  uint8_t magic[4] = {};
+
+  if (file.read(
+          magic,
+          sizeof(magic)) !=
+      sizeof(magic) ||
+      magic[0] != 'P' ||
+      magic[1] != 'X' ||
+      magic[2] != 'Q' ||
+      magic[3] != '1') {
+    return false;
+  }
+
+  int modeRead =
+      file.read();
+
+  int flagsRead =
+      file.read();
+
+  if (modeRead < 0 ||
+      flagsRead < 0) {
+    return false;
+  }
+
+  uint8_t mode =
+      static_cast<uint8_t>(
+          modeRead);
+
+  uint8_t flags =
+      static_cast<uint8_t>(
+          flagsRead);
+
+  uint16_t storageWidth = 0;
+  uint16_t storageHeight = 0;
+  uint16_t displayWidth = 0;
+  uint16_t displayHeight = 0;
+  uint16_t frameCount = 0;
+  uint16_t fps = 0;
+  uint32_t durationMs = 0;
+  uint16_t paletteCount = 0;
+  uint16_t reserved = 0;
+
+  if (!readPackedU16(
+          file,
+          storageWidth) ||
+      !readPackedU16(
+          file,
+          storageHeight) ||
+      !readPackedU16(
+          file,
+          displayWidth) ||
+      !readPackedU16(
+          file,
+          displayHeight) ||
+      !readPackedU16(
+          file,
+          frameCount) ||
+      !readPackedU16(
+          file,
+          fps) ||
+      !readPackedU32(
+          file,
+          durationMs) ||
+      !readPackedU16(
+          file,
+          paletteCount) ||
+      !readPackedU16(
+          file,
+          reserved)) {
+    return false;
+  }
+
+  (void)reserved;
+
+  bool supportedStorage =
+      (storageWidth == 480 &&
+       storageHeight == 320) ||
+      (storageWidth == 360 &&
+       storageHeight == 240) ||
+      (storageWidth == 240 &&
+       storageHeight == 160);
+
+  if (mode > 5 ||
+      (flags & 0x03) != 0x03 ||
+      !supportedStorage ||
+      displayWidth != TFT_WIDTH ||
+      displayHeight != TFT_HEIGHT ||
+      frameCount == 0 ||
+      fps == 0 ||
+      fps > 60 ||
+      durationMs == 0 ||
+      paletteCount !=
+          expectedPackedPaletteCount(
+              mode)) {
+    return false;
+  }
+
+  if (file.size() == 0 ||
+      file.size() >=
+          PACKED_UPLOAD_LIMIT_BYTES) {
+    return false;
+  }
+
+  memset(
+      packedPalette565,
+      0,
+      sizeof(packedPalette565));
+
+  for (uint16_t index = 0;
+       index < paletteCount;
+       ++index) {
+    int r = file.read();
+    int g = file.read();
+    int b = file.read();
+
+    if (r < 0 ||
+        g < 0 ||
+        b < 0) {
+      return false;
+    }
+
+    if (loadPalette) {
+      packedPalette565[index] =
+          rgb888To565(
+              static_cast<uint8_t>(r),
+              static_cast<uint8_t>(g),
+              static_cast<uint8_t>(b));
+    }
+  }
+
+  packedColorMode =
+      mode;
+
+  packedStorageWidth =
+      storageWidth;
+
+  packedStorageHeight =
+      storageHeight;
+
+  packedFrameCount =
+      frameCount;
+
+  packedFps =
+      fps;
+
+  packedDurationMs =
+      durationMs;
+
+  packedPaletteCount =
+      paletteCount;
+
+  packedFramesOffset =
+      static_cast<uint32_t>(
+          file.position());
+
+  return true;
+}
+
+static bool inspectPackedFile(
+    const char *path,
+    size_t &fileSize) {
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          path)) {
+    return false;
+  }
+
+  File file =
+      LittleFS.open(
+          path,
+          "r");
+
+  if (!file) {
+    return false;
+  }
+
+  fileSize =
+      file.size();
+
+  bool ok =
+      readPackedHeader(
+          file,
+          false);
+
+  file.close();
+
+  return ok;
+}
+
+static bool beginPackedUpload(
+    uint32_t expectedBytes) {
+  if (!littleFsReady ||
+      expectedBytes < 26 ||
+      expectedBytes >=
+          PACKED_UPLOAD_LIMIT_BYTES) {
+    return false;
+  }
+
+  clearSaverBuffer();
+
+  size_t total =
+      LittleFS.totalBytes();
+
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 4096 >
+      freeBytes) {
+    return false;
+  }
+
+  packedUploadFile =
+      LittleFS.open(
+          PACKED_TMP_PATH,
+          "w");
+
+  if (!packedUploadFile) {
+    return false;
+  }
+
+  packedUploadExpectedBytes =
+      expectedBytes;
+
+  saverBytesReceived =
+      0;
+
+  saverDataBytes =
+      expectedBytes;
+
+  saverFormat =
+      SAVER_PACKED;
+
+  saverUploading =
+      true;
+
+  saverReady =
+      false;
+
+  saverActive =
+      false;
+
+  return true;
+}
+
+static bool writePackedUploadChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverFormat != SAVER_PACKED ||
+      !packedUploadFile ||
+      offset !=
+          saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[1100] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      saverBytesReceived +
+              decodedLength >
+          packedUploadExpectedBytes) {
+    return false;
+  }
+
+  size_t written =
+      packedUploadFile.write(
+          decoded,
+          decodedLength);
+
+  if (written !=
+      decodedLength) {
+    return false;
+  }
+
+  saverBytesReceived +=
+      decodedLength;
+
+  return true;
+}
+
+static bool finishPackedUpload() {
+  if (!saverUploading ||
+      saverFormat != SAVER_PACKED ||
+      saverBytesReceived !=
+          packedUploadExpectedBytes) {
+    closePackedFiles();
+    return false;
+  }
+
+  packedUploadFile.flush();
+  packedUploadFile.close();
+
+  size_t actualSize = 0;
+
+  if (!inspectPackedFile(
+          PACKED_TMP_PATH,
+          actualSize) ||
+      actualSize !=
+          packedUploadExpectedBytes) {
+    LittleFS.remove(
+        PACKED_TMP_PATH);
+
+    saverUploading =
+        false;
+
+    saverReady =
+        false;
+
+    return false;
+  }
+
+  LittleFS.remove(
+      PACKED_PATH);
+
+  if (!LittleFS.rename(
+          PACKED_TMP_PATH,
+          PACKED_PATH)) {
+    LittleFS.remove(
+        PACKED_TMP_PATH);
+
+    saverUploading =
+        false;
+
+    saverReady =
+        false;
+
+    return false;
+  }
+
+  LittleFS.remove(
+      GIF_PATH);
+
+  LittleFS.remove(
+      GIF_TMP_PATH);
+
+  LittleFS.remove(
+      JPEG_PATH);
+
+  LittleFS.remove(
+      JPEG_TMP_PATH);
+
+  saverUploading =
+      false;
+
+  saverReady =
+      true;
+
+  saverActive =
+      false;
+
+  saverFormat =
+      SAVER_PACKED;
+
+  saverWidth =
+      packedStorageWidth;
+
+  saverHeight =
+      packedStorageHeight;
+
+  saverDataBytes =
+      actualSize;
+
+  saverBytesReceived =
+      actualSize;
+
+  return true;
+}
+
+static bool loadPersistedPacked() {
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          PACKED_PATH)) {
+    return false;
+  }
+
+  size_t fileSize = 0;
+
+  if (!inspectPackedFile(
+          PACKED_PATH,
+          fileSize)) {
+    LittleFS.remove(
+        PACKED_PATH);
+
+    return false;
+  }
+
+  saverFormat =
+      SAVER_PACKED;
+
+  saverWidth =
+      packedStorageWidth;
+
+  saverHeight =
+      packedStorageHeight;
+
+  saverDataBytes =
+      fileSize;
+
+  saverBytesReceived =
+      fileSize;
+
+  saverUploading =
+      false;
+
+  saverReady =
+      true;
+
+  saverActive =
+      false;
+
+  return true;
+}
+
+static bool readPackedSingleCode(
+    File &file,
+    uint8_t mode,
+    uint16_t &color) {
+  if (mode == 0) {
+    int r = file.read();
+    int g = file.read();
+    int b = file.read();
+
+    if (r < 0 ||
+        g < 0 ||
+        b < 0) {
+      return false;
+    }
+
+    color =
+        rgb888To565(
+            static_cast<uint8_t>(r),
+            static_cast<uint8_t>(g),
+            static_cast<uint8_t>(b));
+
+    return true;
+  }
+
+  if (mode == 1) {
+    return readPackedU16(
+        file,
+        color);
+  }
+
+  int index =
+      file.read();
+
+  if (index < 0 ||
+      static_cast<uint16_t>(
+          index) >=
+          packedPaletteCount) {
+    return false;
+  }
+
+  color =
+      packedPalette565[
+          static_cast<uint8_t>(
+              index)];
+
+  return true;
+}
+
+static void setPackedScaledPixel(
+    uint16_t sourceX,
+    uint16_t color) {
+  uint16_t dx0 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  uint16_t dx1 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX + 1U) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  if (dx1 <= dx0) {
+    dx1 =
+        static_cast<uint16_t>(
+            dx0 + 1U >
+                    TFT_WIDTH
+                ? TFT_WIDTH
+                : dx0 + 1U);
+  }
+
+  for (uint16_t x = dx0;
+       x < dx1 &&
+       x < TFT_WIDTH;
+       ++x) {
+    packedLineBuffer[x] =
+        color;
+  }
+}
+
+static bool decodePackedSpan(
+    File &file,
+    uint16_t sourceY,
+    uint16_t sourceX,
+    uint16_t sourceCount) {
+  if (sourceY >=
+          packedStorageHeight ||
+      sourceX >=
+          packedStorageWidth ||
+      sourceCount == 0 ||
+      static_cast<uint32_t>(
+          sourceX) +
+              sourceCount >
+          packedStorageWidth) {
+    return false;
+  }
+
+  uint16_t produced = 0;
+
+  while (produced <
+         sourceCount) {
+    int controlRead =
+        file.read();
+
+    if (controlRead < 0) {
+      return false;
+    }
+
+    uint8_t control =
+        static_cast<uint8_t>(
+            controlRead);
+
+    uint16_t packetCount =
+        static_cast<uint16_t>(
+            (control & 0x7F) +
+            1U);
+
+    if (produced +
+            packetCount >
+        sourceCount) {
+      return false;
+    }
+
+    bool repeat =
+        (control & 0x80) != 0;
+
+    if (repeat) {
+      uint16_t color = 0;
+
+      if (!readPackedSingleCode(
+              file,
+              packedColorMode,
+              color)) {
+        return false;
+      }
+
+      for (uint16_t i = 0;
+           i < packetCount;
+           ++i) {
+        setPackedScaledPixel(
+            static_cast<uint16_t>(
+                sourceX +
+                produced +
+                i),
+            color);
+      }
+
+      produced +=
+          packetCount;
+
+      continue;
+    }
+
+    if (packedColorMode <= 2) {
+      for (uint16_t i = 0;
+           i < packetCount;
+           ++i) {
+        uint16_t color = 0;
+
+        if (!readPackedSingleCode(
+                file,
+                packedColorMode,
+                color)) {
+          return false;
+        }
+
+        setPackedScaledPixel(
+            static_cast<uint16_t>(
+                sourceX +
+                produced +
+                i),
+            color);
+      }
+
+      produced +=
+          packetCount;
+
+      continue;
+    }
+
+    uint8_t bits =
+        packedColorMode == 3
+            ? 4
+            : packedColorMode == 4
+                ? 2
+                : 1;
+
+    size_t packedBytes =
+        (static_cast<size_t>(
+             packetCount) *
+             bits +
+         7U) /
+        8U;
+
+    uint8_t packed[64] = {};
+
+    if (packedBytes >
+            sizeof(packed) ||
+        file.read(
+            packed,
+            packedBytes) !=
+            packedBytes) {
+      return false;
+    }
+
+    uint8_t mask =
+        static_cast<uint8_t>(
+            (1U << bits) -
+            1U);
+
+    for (uint16_t i = 0;
+         i < packetCount;
+         ++i) {
+      uint16_t bitPosition =
+          static_cast<uint16_t>(
+              i *
+              bits);
+
+      uint16_t byteIndex =
+          bitPosition /
+          8U;
+
+      uint8_t shift =
+          static_cast<uint8_t>(
+              bitPosition %
+              8U);
+
+      uint8_t paletteIndex =
+          static_cast<uint8_t>(
+              (packed[byteIndex] >>
+               shift) &
+              mask);
+
+      if (paletteIndex >=
+          packedPaletteCount) {
+        return false;
+      }
+
+      setPackedScaledPixel(
+          static_cast<uint16_t>(
+              sourceX +
+              produced +
+              i),
+          packedPalette565[
+              paletteIndex]);
+    }
+
+    produced +=
+        packetCount;
+  }
+
+  uint16_t dx0 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  uint16_t dx1 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceX +
+               sourceCount) *
+           TFT_WIDTH) /
+          packedStorageWidth);
+
+  uint16_t dy0 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceY) *
+           TFT_HEIGHT) /
+          packedStorageHeight);
+
+  uint16_t dy1 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(
+               sourceY + 1U) *
+           TFT_HEIGHT) /
+          packedStorageHeight);
+
+  if (dx1 <= dx0 ||
+      dy1 <= dy0 ||
+      dx1 > TFT_WIDTH ||
+      dy1 > TFT_HEIGHT) {
+    return false;
+  }
+
+  for (uint16_t y = dy0;
+       y < dy1;
+       ++y) {
+    tft->draw16bitRGBBitmap(
+        dx0,
+        y,
+        packedLineBuffer +
+            dx0,
+        dx1 - dx0,
+        1);
+  }
+
+  return true;
+}
+
+static bool openPackedPlayback() {
+  closePackedFiles();
+
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          PACKED_PATH)) {
+    return false;
+  }
+
+  packedPlaybackFile =
+      LittleFS.open(
+          PACKED_PATH,
+          "r");
+
+  if (!packedPlaybackFile) {
+    return false;
+  }
+
+  if (!readPackedHeader(
+          packedPlaybackFile,
+          true)) {
+    packedPlaybackFile.close();
+    return false;
+  }
+
+  packedFrameIndex =
+      0;
+
+  packedNextFrameAt =
+      millis();
+
+  return true;
+}
+
+static bool decodeNextPackedFrame() {
+  if (!packedPlaybackFile ||
+      packedFrameCount == 0) {
+    return false;
+  }
+
+  if (packedFrameIndex >=
+      packedFrameCount) {
+    if (!packedPlaybackFile.seek(
+            packedFramesOffset)) {
+      return false;
+    }
+
+    packedFrameIndex =
+        0;
+
+    tft->fillScreen(
+        RGB565_BLACK);
+  }
+
+  uint16_t durationMs = 0;
+  uint16_t spanCount = 0;
+
+  if (!readPackedU16(
+          packedPlaybackFile,
+          durationMs) ||
+      !readPackedU16(
+          packedPlaybackFile,
+          spanCount)) {
+    return false;
+  }
+
+  for (uint16_t span = 0;
+       span < spanCount;
+       ++span) {
+    uint16_t y = 0;
+    uint16_t x = 0;
+    uint16_t count = 0;
+
+    if (!readPackedU16(
+            packedPlaybackFile,
+            y) ||
+        !readPackedU16(
+            packedPlaybackFile,
+            x) ||
+        !readPackedU16(
+            packedPlaybackFile,
+            count) ||
+        !decodePackedSpan(
+            packedPlaybackFile,
+            y,
+            x,
+            count)) {
+      return false;
+    }
+  }
+
+  packedFrameIndex++;
+
+  packedNextFrameAt =
+      millis() +
+      (durationMs == 0
+           ? 1U
+           : static_cast<uint32_t>(
+                 durationMs));
+
+  return true;
 }
 
 static void closeJpegUploadFile() {
@@ -2010,6 +3209,10 @@ static bool finishJpegUpload() {
       GIF_PATH);
   LittleFS.remove(
       GIF_TMP_PATH);
+  LittleFS.remove(
+      PACKED_PATH);
+  LittleFS.remove(
+      PACKED_TMP_PATH);
 
   saverUploading = false;
   saverReady = true;
@@ -2076,6 +3279,10 @@ static bool loadPersistedJpeg() {
 static void loadPersistedMedia() {
   saverReady = false;
 
+  if (loadPersistedPacked()) {
+    return;
+  }
+
   if (loadPersistedJpeg()) {
     return;
   }
@@ -2087,6 +3294,7 @@ static void clearSaverBuffer() {
   closeGifDecoder();
   closeGifUploadFile();
   closeJpegUploadFile();
+  closePackedFiles();
 
   if (jpegPlaybackFile) {
     jpegPlaybackFile.close();
@@ -2097,6 +3305,8 @@ static void clearSaverBuffer() {
     LittleFS.remove(GIF_PATH);
     LittleFS.remove(JPEG_TMP_PATH);
     LittleFS.remove(JPEG_PATH);
+    LittleFS.remove(PACKED_TMP_PATH);
+    LittleFS.remove(PACKED_PATH);
   }
 
   if (saverData != nullptr) {
@@ -2124,6 +3334,22 @@ static void clearSaverBuffer() {
   jpegUploadExpectedBytes = 0;
   jpegUploadWidth = 0;
   jpegUploadHeight = 0;
+
+  packedUploadExpectedBytes = 0;
+  packedStorageWidth = 0;
+  packedStorageHeight = 0;
+  packedFrameCount = 0;
+  packedFps = 0;
+  packedFrameIndex = 0;
+  packedPaletteCount = 0;
+  packedColorMode = 0;
+  packedDurationMs = 0;
+  packedFramesOffset = 0;
+  packedNextFrameAt = 0;
+  memset(
+      packedPalette565,
+      0,
+      sizeof(packedPalette565));
 
   memset(saverDurations, 0, sizeof(saverDurations));
 }
@@ -2226,6 +3452,25 @@ static void startSaverNow() {
     return;
   }
 
+  if (saverFormat == SAVER_PACKED) {
+    if (!openPackedPlayback()) {
+      saverReady = false;
+      return;
+    }
+
+    saverActive = true;
+    saverFrameStartedAt = millis();
+
+    tft->fillScreen(
+        RGB565_BLACK);
+
+    if (!decodeNextPackedFrame()) {
+      stopSaver();
+    }
+
+    return;
+  }
+
   if (saverFormat == SAVER_GIF) {
     if (!openGifDecoder()) {
       saverReady = false;
@@ -2275,6 +3520,10 @@ static void stopSaver() {
 
   closeGifDecoder();
 
+  if (packedPlaybackFile) {
+    packedPlaybackFile.close();
+  }
+
   if (wasActive && displayReady) {
     tft->fillScreen(RGB565_BLACK);
   }
@@ -2295,6 +3544,17 @@ static void pollSaver() {
   }
 
   if (!saverReady) {
+    return;
+  }
+
+  if (saverFormat == SAVER_PACKED) {
+    if (static_cast<int32_t>(
+            now - packedNextFrameAt) >= 0) {
+      if (!decodeNextPackedFrame()) {
+        stopSaver();
+      }
+    }
+
     return;
   }
 
@@ -2498,7 +3758,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -2703,6 +3963,97 @@ static void handleCommand(String command) {
     } else {
       cdcPrintln("SAVERSTATE|EMPTY");
     }
+    return;
+  }
+
+  if (upper.startsWith("SAVPXBEGIN|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint32_t byteCount = 0;
+
+    if (sep < 0 ||
+        !parseUnsignedLong(
+            command.substring(
+                sep + 1),
+            PACKED_UPLOAD_LIMIT_BYTES - 1U,
+            byteCount) ||
+        byteCount < 26) {
+      cdcPrintln(
+          "ERR|BAD_SAVPXBEGIN");
+      return;
+    }
+
+    if (!beginPackedUpload(
+            byteCount)) {
+      cdcPrintln(
+          "ERR|SAVPXBEGIN_ALLOC");
+      return;
+    }
+
+    cdcPrintln(
+        "OK|SAVPXBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVPXDATA|")) {
+    int first =
+        command.indexOf('|');
+
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    if (first < 0 ||
+        second < 0) {
+      cdcPrintln(
+          "ERR|BAD_SAVPXDATA");
+      return;
+    }
+
+    uint32_t offset = 0;
+
+    if (!parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            packedUploadExpectedBytes,
+            offset) ||
+        !writePackedUploadChunk(
+            offset,
+            command.substring(
+                second + 1))) {
+      cdcPrintln(
+          "ERR|SAVPXDATA");
+      return;
+    }
+
+    char out[40];
+
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|SAVPXDATA|%lu",
+        static_cast<unsigned long>(
+            saverBytesReceived));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "SAVPXEND") {
+    if (!finishPackedUpload()) {
+      cdcPrintln(
+          "ERR|SAVPXEND");
+      return;
+    }
+
+    lastUserActivityAt =
+        millis();
+
+    cdcPrintln(
+        "OK|SAVER|READY");
     return;
   }
 
@@ -3542,7 +4893,7 @@ static void handleCommand(String command) {
         !parseUnsigned(
             command.substring(
                 second + 1),
-            3,
+            9,
             effect)) {
       cdcPrintln(
           "ERR|BAD_RGB_EFFECT");
@@ -3884,7 +5235,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0141);
+  USB.firmwareVersion(0x0150);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -3898,7 +5249,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.4.1");
+  cdcPrintln("BOOT|PIXELPRO|1.5.0");
 }
 
 void loop() {
