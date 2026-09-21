@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <Arduino_GFX_Library.h>
+#include <mbedtls/base64.h>
 #include "USB.h"
 #include "USBHID.h"
 #include "USBHIDKeyboard.h"
@@ -11,7 +13,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.3.2";
+static constexpr char FW_VERSION[] = "1.3.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -21,6 +23,32 @@ static constexpr uint8_t MACRO_COUNT = 20;
 static constexpr uint8_t ACTION_COUNT = 32;
 static constexpr uint8_t MACRO_MAX_LEN = 80;
 static constexpr uint32_t DEBOUNCE_MS = 8;
+
+// PIXEL PRO display: 3.5" ILI9486, 480x320 landscape, i8080 8-bit.
+// The physical shield follows the common UNO/Mega2560 8-bit shield signal
+// layout; HARDWARE.md maps those shield pins to these ESP32-S2 pins.
+static constexpr uint16_t TFT_WIDTH = 480;
+static constexpr uint16_t TFT_HEIGHT = 320;
+static constexpr uint16_t GIF_WIDTH = 240;
+static constexpr uint16_t GIF_HEIGHT = 160;
+static constexpr uint8_t GIF_MAX_FRAMES = 32;
+static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
+static constexpr uint8_t GIF_MAX_FPS = 60;
+static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
+
+static constexpr int8_t TFT_RD = 12;
+static constexpr int8_t TFT_WR = 13;
+static constexpr int8_t TFT_DC = 14;
+static constexpr int8_t TFT_CS = 16;
+static constexpr int8_t TFT_RST = 17;
+static constexpr int8_t TFT_D0 = 33;
+static constexpr int8_t TFT_D1 = 34;
+static constexpr int8_t TFT_D2 = 35;
+static constexpr int8_t TFT_D3 = 36;
+static constexpr int8_t TFT_D4 = 37;
+static constexpr int8_t TFT_D5 = 38;
+static constexpr int8_t TFT_D6 = 39;
+static constexpr int8_t TFT_D7 = 40;
 
 static constexpr uint8_t BIND_DISABLED = 0;
 static constexpr uint8_t BIND_KEYBOARD = 1;
@@ -55,6 +83,28 @@ USBHIDKeyboard Keyboard;
 USBHIDConsumerControl ConsumerControl;
 Preferences preferences;
 
+Arduino_DataBus *tftBus =
+    new Arduino_ESP32PAR8(
+        TFT_DC,
+        TFT_CS,
+        TFT_WR,
+        TFT_RD,
+        TFT_D0,
+        TFT_D1,
+        TFT_D2,
+        TFT_D3,
+        TFT_D4,
+        TFT_D5,
+        TFT_D6,
+        TFT_D7);
+
+Arduino_GFX *tft =
+    new Arduino_ILI9486(
+        tftBus,
+        TFT_RST,
+        1,
+        false);
+
 static KeyState keyState[KEY_COUNT] = {};
 static KeyBinding keymap[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
 static KeyBinding activeBindings[KEY_COUNT] = {};
@@ -67,6 +117,32 @@ static uint8_t baseLayer = 0;
 static int8_t momentaryLayer = -1;
 static uint8_t toggledLayerMask = 0;
 static String cdcLine;
+
+enum SaverPixelFormat : uint8_t {
+  SAVER_NONE = 0,
+  SAVER_RGB332 = 1,
+  SAVER_RGB565 = 2,
+};
+
+static bool displayReady = false;
+static uint16_t *renderBuffer = nullptr;
+
+static uint8_t *saverData = nullptr;
+static size_t saverDataBytes = 0;
+static size_t saverFrameBytes = 0;
+static size_t saverBytesReceived = 0;
+static uint8_t saverFrameCount = 0;
+static uint16_t saverWidth = 0;
+static uint16_t saverHeight = 0;
+static SaverPixelFormat saverFormat = SAVER_NONE;
+static uint16_t saverDurations[GIF_MAX_FRAMES] = {};
+static bool saverUploading = false;
+static bool saverReady = false;
+static bool saverActive = false;
+static uint8_t saverFrameIndex = 0;
+static uint32_t saverFrameStartedAt = 0;
+static uint32_t lastUserActivityAt = 0;
+static uint32_t saverDelayMs = 60000;
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -326,6 +402,30 @@ static bool parseUnsigned(
   return true;
 }
 
+static bool parseUnsignedLong(
+    const String &text,
+    uint32_t maxValue,
+    uint32_t &value) {
+  if (text.length() == 0) {
+    return false;
+  }
+
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (!isDigit(text[i])) {
+      return false;
+    }
+  }
+
+  unsigned long parsed = strtoul(text.c_str(), nullptr, 10);
+
+  if (parsed > maxValue) {
+    return false;
+  }
+
+  value = static_cast<uint32_t>(parsed);
+  return true;
+}
+
 static bool parseBindingToken(String token, KeyBinding &binding) {
   token.trim();
   token.toUpperCase();
@@ -493,12 +593,351 @@ static bool hexDecode(const String &hex, String &out) {
   return true;
 }
 
+
+static void clearSaverBuffer() {
+  if (saverData != nullptr) {
+    free(saverData);
+    saverData = nullptr;
+  }
+
+  saverDataBytes = 0;
+  saverFrameBytes = 0;
+  saverBytesReceived = 0;
+  saverFrameCount = 0;
+  saverWidth = 0;
+  saverHeight = 0;
+  saverFormat = SAVER_NONE;
+  saverUploading = false;
+  saverReady = false;
+  saverActive = false;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = 0;
+
+  memset(saverDurations, 0, sizeof(saverDurations));
+}
+
+static void initDisplay() {
+  displayReady = tft->begin();
+
+  if (!displayReady) {
+    return;
+  }
+
+  tft->setRotation(1);
+
+  // ILI9486 FRMCTR1 has discrete frame-rate steps. FRS=0xA is the
+  // controller step nearest 60 Hz (~62 Hz). PIXEL PRO's renderer and
+  // host-media protocol are capped at 60 FPS.
+  tftBus->beginWrite();
+  tftBus->writeCommand(0xB1);
+  tftBus->write(0xA0);
+  tftBus->write(0x11);
+  tftBus->endWrite();
+
+  tft->fillScreen(RGB565_BLACK);
+
+  if (ESP.getPsramSize() > 0) {
+    renderBuffer = static_cast<uint16_t *>(
+        ps_malloc(static_cast<size_t>(TFT_WIDTH) * TFT_HEIGHT * 2));
+  }
+}
+
+static uint16_t rgb332To565(uint8_t value) {
+  uint8_t r3 = (value >> 5) & 0x07;
+  uint8_t g3 = (value >> 2) & 0x07;
+  uint8_t b2 = value & 0x03;
+
+  uint16_t r5 = static_cast<uint16_t>((r3 * 31 + 3) / 7);
+  uint16_t g6 = static_cast<uint16_t>((g3 * 63 + 3) / 7);
+  uint16_t b5 = static_cast<uint16_t>((b2 * 31 + 1) / 3);
+
+  return static_cast<uint16_t>((r5 << 11) | (g6 << 5) | b5);
+}
+
+static void renderSaverFrame(uint8_t index) {
+  if (!displayReady ||
+      !saverReady ||
+      saverData == nullptr ||
+      index >= saverFrameCount) {
+    return;
+  }
+
+  uint8_t *frame =
+      saverData + static_cast<size_t>(index) * saverFrameBytes;
+
+  if (saverFormat == SAVER_RGB565) {
+    tft->draw16bitRGBBitmap(
+        0,
+        0,
+        reinterpret_cast<uint16_t *>(frame),
+        TFT_WIDTH,
+        TFT_HEIGHT);
+    return;
+  }
+
+  if (saverFormat != SAVER_RGB332 ||
+      renderBuffer == nullptr) {
+    return;
+  }
+
+  for (uint16_t y = 0; y < GIF_HEIGHT; ++y) {
+    const uint8_t *src =
+        frame + static_cast<size_t>(y) * GIF_WIDTH;
+
+    uint16_t *row0 =
+        renderBuffer +
+        static_cast<size_t>(y * 2) * TFT_WIDTH;
+
+    uint16_t *row1 = row0 + TFT_WIDTH;
+
+    for (uint16_t x = 0; x < GIF_WIDTH; ++x) {
+      uint16_t color = rgb332To565(src[x]);
+      uint16_t dx = x * 2;
+
+      row0[dx] = color;
+      row0[dx + 1] = color;
+      row1[dx] = color;
+      row1[dx + 1] = color;
+    }
+  }
+
+  tft->draw16bitRGBBitmap(
+      0,
+      0,
+      renderBuffer,
+      TFT_WIDTH,
+      TFT_HEIGHT);
+}
+
+static void startSaverNow() {
+  if (!saverReady || saverData == nullptr || !displayReady) {
+    return;
+  }
+
+  saverActive = true;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = millis();
+  renderSaverFrame(0);
+}
+
+static void stopSaver() {
+  if (!saverActive) {
+    return;
+  }
+
+  saverActive = false;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = 0;
+
+  if (displayReady) {
+    tft->fillScreen(RGB565_BLACK);
+  }
+}
+
+static void pollSaver() {
+  uint32_t now = millis();
+
+  if (!saverActive) {
+    if (saverReady &&
+        saverDelayMs > 0 &&
+        pressedMask == 0 &&
+        static_cast<uint32_t>(now - lastUserActivityAt) >= saverDelayMs) {
+      startSaverNow();
+    }
+
+    return;
+  }
+
+  if (!saverReady ||
+      saverFrameCount <= 1 ||
+      saverFormat == SAVER_RGB565) {
+    return;
+  }
+
+  uint16_t duration =
+      saverDurations[saverFrameIndex] < GIF_MIN_FRAME_MS
+          ? GIF_MIN_FRAME_MS
+          : saverDurations[saverFrameIndex];
+
+  if (static_cast<uint32_t>(now - saverFrameStartedAt) < duration) {
+    return;
+  }
+
+  saverFrameIndex =
+      static_cast<uint8_t>((saverFrameIndex + 1) % saverFrameCount);
+
+  saverFrameStartedAt = now;
+  renderSaverFrame(saverFrameIndex);
+}
+
+static bool parseSaverDurations(
+    const String &csv,
+    uint8_t frameCount) {
+  int start = 0;
+
+  for (uint8_t i = 0; i < frameCount; ++i) {
+    int comma = csv.indexOf(',', start);
+    bool last = i == frameCount - 1;
+
+    if ((!last && comma < 0) ||
+        (last && comma >= 0)) {
+      return false;
+    }
+
+    String token =
+        last ? csv.substring(start) : csv.substring(start, comma);
+
+    uint16_t duration = 0;
+
+    if (!parseUnsigned(token, 5000, duration)) {
+      return false;
+    }
+
+    saverDurations[i] =
+        duration < GIF_MIN_FRAME_MS
+            ? GIF_MIN_FRAME_MS
+            : duration;
+
+    start = comma + 1;
+  }
+
+  return true;
+}
+
+static bool beginSaverUpload(
+    uint8_t frameCount,
+    uint16_t width,
+    uint16_t height,
+    SaverPixelFormat format,
+    const String &durationCsv) {
+  clearSaverBuffer();
+
+  bool staticImage =
+      format == SAVER_RGB565 &&
+      frameCount == 1 &&
+      width == TFT_WIDTH &&
+      height == TFT_HEIGHT;
+
+  bool animated =
+      format == SAVER_RGB332 &&
+      frameCount >= 1 &&
+      frameCount <= GIF_MAX_FRAMES &&
+      width == GIF_WIDTH &&
+      height == GIF_HEIGHT;
+
+  if (!staticImage && !animated) {
+    return false;
+  }
+
+  if (!parseSaverDurations(durationCsv, frameCount)) {
+    clearSaverBuffer();
+    return false;
+  }
+
+  saverFrameCount = frameCount;
+  saverWidth = width;
+  saverHeight = height;
+  saverFormat = format;
+
+  saverFrameBytes =
+      static_cast<size_t>(width) *
+      height *
+      (format == SAVER_RGB565 ? 2 : 1);
+
+  saverDataBytes =
+      saverFrameBytes * frameCount;
+
+  if (saverDataBytes == 0 ||
+      saverDataBytes > ESP.getFreePsram()) {
+    clearSaverBuffer();
+    return false;
+  }
+
+  saverData =
+      static_cast<uint8_t *>(ps_malloc(saverDataBytes));
+
+  if (saverData == nullptr) {
+    clearSaverBuffer();
+    return false;
+  }
+
+  memset(saverData, 0, saverDataBytes);
+  saverBytesReceived = 0;
+  saverUploading = true;
+  saverReady = false;
+  saverActive = false;
+
+  return true;
+}
+
+static bool writeSaverChunk(
+    uint8_t frameIndex,
+    size_t offset,
+    const String &encoded) {
+  if (!saverUploading ||
+      saverData == nullptr ||
+      frameIndex >= saverFrameCount ||
+      offset >= saverFrameBytes) {
+    return false;
+  }
+
+  size_t expectedOffset =
+      static_cast<size_t>(frameIndex) * saverFrameBytes +
+      offset;
+
+  if (expectedOffset != saverBytesReceived) {
+    return false;
+  }
+
+  uint8_t decoded[320] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<const unsigned char *>(encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      offset + decodedLength > saverFrameBytes ||
+      saverBytesReceived + decodedLength > saverDataBytes) {
+    return false;
+  }
+
+  memcpy(
+      saverData + saverBytesReceived,
+      decoded,
+      decodedLength);
+
+  saverBytesReceived += decodedLength;
+  return true;
+}
+
+static bool finishSaverUpload() {
+  if (!saverUploading ||
+      saverData == nullptr ||
+      saverBytesReceived != saverDataBytes) {
+    return false;
+  }
+
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = 0;
+
+  return true;
+}
+
 static String deviceHello() {
-  char out[210];
+  char out[320];
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -657,6 +1096,193 @@ static void handleCommand(String command) {
 
   if (upper == "MEM" || upper == "GET_MEMORY") {
     sendMemoryInfo();
+    return;
+  }
+
+  if (upper == "PANEL") {
+    cdcPrintln("PANEL|ILI9486|60|0|60");
+    return;
+  }
+
+  if (upper == "SAVERSTATE") {
+    if (saverUploading) {
+      cdcPrintln("SAVERSTATE|UPLOADING");
+    } else if (saverReady) {
+      cdcPrintln("SAVERSTATE|READY");
+    } else {
+      cdcPrintln("SAVERSTATE|EMPTY");
+    }
+    return;
+  }
+
+  if (upper == "SAVCLEAR") {
+    clearSaverBuffer();
+    lastUserActivityAt = millis();
+
+    if (displayReady) {
+      tft->fillScreen(RGB565_BLACK);
+    }
+
+    cdcPrintln("OK|SAVCLEAR");
+    return;
+  }
+
+  if (upper == "SAVSHOW") {
+    if (!saverReady) {
+      cdcPrintln("ERR|SAVER_EMPTY");
+      return;
+    }
+
+    startSaverNow();
+    cdcPrintln("OK|SAVSHOW");
+    return;
+  }
+
+  if (upper == "SAVSOURCE|MEDIA") {
+    cdcPrintln("OK|SAVSOURCE|MEDIA");
+    return;
+  }
+
+  if (upper.startsWith("SAVDELAY|")) {
+    int sep = command.indexOf('|');
+    uint32_t seconds = 0;
+
+    if (sep < 0 ||
+        !parseUnsignedLong(
+            command.substring(sep + 1),
+            86400,
+            seconds)) {
+      cdcPrintln("ERR|BAD_SAVDELAY");
+      return;
+    }
+
+    saverDelayMs =
+        seconds == 0
+            ? 0
+            : seconds * 1000UL;
+
+    lastUserActivityAt = millis();
+    cdcPrintln("OK|SAVDELAY");
+    return;
+  }
+
+  if (upper.startsWith("SAVBEGIN|")) {
+    int first = command.indexOf('|');
+    int second = command.indexOf('|', first + 1);
+    int third = command.indexOf('|', second + 1);
+    int fourth = command.indexOf('|', third + 1);
+    int fifth = command.indexOf('|', fourth + 1);
+
+    if (first < 0 || second < 0 || third < 0 ||
+        fourth < 0 || fifth < 0) {
+      cdcPrintln("ERR|BAD_SAVBEGIN");
+      return;
+    }
+
+    uint16_t frames = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+
+    if (!parseUnsigned(
+            command.substring(first + 1, second),
+            GIF_MAX_FRAMES,
+            frames) ||
+        frames == 0 ||
+        !parseUnsigned(
+            command.substring(second + 1, third),
+            TFT_WIDTH,
+            width) ||
+        !parseUnsigned(
+            command.substring(third + 1, fourth),
+            TFT_HEIGHT,
+            height)) {
+      cdcPrintln("ERR|BAD_SAVBEGIN");
+      return;
+    }
+
+    String formatText =
+        command.substring(fourth + 1, fifth);
+    formatText.toUpperCase();
+
+    SaverPixelFormat format =
+        formatText == "RGB565"
+            ? SAVER_RGB565
+            : formatText == "RGB332"
+                ? SAVER_RGB332
+                : SAVER_NONE;
+
+    if (format == SAVER_NONE ||
+        !beginSaverUpload(
+            static_cast<uint8_t>(frames),
+            width,
+            height,
+            format,
+            command.substring(fifth + 1))) {
+      cdcPrintln("ERR|SAVBEGIN_ALLOC");
+      return;
+    }
+
+    cdcPrintln("OK|SAVBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVDATA|")) {
+    int first = command.indexOf('|');
+    int second = command.indexOf('|', first + 1);
+    int third = command.indexOf('|', second + 1);
+
+    if (first < 0 || second < 0 || third < 0) {
+      cdcPrintln("ERR|BAD_SAVDATA");
+      return;
+    }
+
+    uint16_t frame = 0;
+    uint32_t offset = 0;
+
+    if (!parseUnsigned(
+            command.substring(first + 1, second),
+            GIF_MAX_FRAMES - 1,
+            frame) ||
+        !parseUnsignedLong(
+            command.substring(second + 1, third),
+            static_cast<uint32_t>(
+                TFT_WIDTH * TFT_HEIGHT * 2),
+            offset)) {
+      cdcPrintln("ERR|BAD_SAVDATA");
+      return;
+    }
+
+    if (!writeSaverChunk(
+            static_cast<uint8_t>(frame),
+            offset,
+            command.substring(third + 1))) {
+      cdcPrintln("ERR|SAVDATA_WRITE");
+      return;
+    }
+
+    if (saverFrameBytes > 0 &&
+        saverBytesReceived > 0 &&
+        (saverBytesReceived % saverFrameBytes) == 0) {
+      char out[32];
+      snprintf(
+          out,
+          sizeof(out),
+          "OK|SAVFRAME|%u",
+          static_cast<unsigned>(frame));
+      cdcPrintln(out);
+    }
+
+    return;
+  }
+
+  if (upper == "SAVEND") {
+    if (!finishSaverUpload()) {
+      cdcPrintln("ERR|SAVEND_INCOMPLETE");
+      return;
+    }
+
+    lastUserActivityAt = millis();
+    cdcPrintln("OK|SAVER|READY");
     return;
   }
 
@@ -918,6 +1544,9 @@ static void pollCdc() {
 
 static void emitKeyEvent(uint8_t index, bool pressed) {
   if (pressed) {
+    lastUserActivityAt = millis();
+    stopSaver();
+
     uint8_t layer = currentLayer();
     KeyBinding resolved = resolveBinding(layer, index);
     activeBindings[index] = resolved;
@@ -1008,6 +1637,8 @@ void setup() {
   loadKeymap();
   loadMacros();
   initKeys();
+  initDisplay();
+  lastUserActivityAt = millis();
 
   uint64_t mac = ESP.getEfuseMac();
   char serial[24];
@@ -1022,7 +1653,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0132);
+  USB.firmwareVersion(0x0133);
 
   USBSerial.begin();
   Keyboard.begin();
@@ -1032,11 +1663,12 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.3.2");
+  cdcPrintln("BOOT|PIXELPRO|1.3.3");
 }
 
 void loop() {
   pollKeys();
   pollCdc();
+  pollSaver();
   delay(1);
 }

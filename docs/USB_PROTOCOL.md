@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.3.2 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, and adds direct Lumi Action key bindings.
+Firmware 1.3.3 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry and Lumi Action bindings, and adds the PIXEL PRO ILI9486 480×320 i8080 display/media path.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.3.2|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.3.3|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -91,6 +91,57 @@ GET_KEYS returns:
 KEYS|<mask>|P=<profile>|L=<layer>
 
 GET_LAYER returns active profile/layer state.
+
+## Panel information
+
+Request:
+
+PANEL
+
+Response:
+
+PANEL|ILI9486|60|0|60
+
+Fields are panel name, PIXEL PRO refresh cap in Hz, legacy SPI-Hz field (0 for
+i8080 parallel), and maximum media FPS.
+
+## Screensaver media
+
+PIXEL PRO accepts static 480×320 RGB565 images and animated 240×160 RGB332 frames.
+Animated frames are expanded exactly 2× on the ILI9486 to fill the 480×320 3:2 panel.
+The host caps animation timing at 60 FPS and stores at most 32 frames.
+
+Begin an upload:
+
+SAVBEGIN|<frames>|<width>|<height>|<RGB565 or RGB332>|<duration-ms CSV>
+
+Then send sequential Base64 chunks:
+
+SAVDATA|<frame index>|<byte offset>|<base64>
+
+Firmware acknowledges each completed frame:
+
+OK|SAVFRAME|<frame index>
+
+Finish:
+
+SAVEND
+
+Successful completion:
+
+OK|SAVER|READY
+
+Other commands:
+
+- SAVERSTATE -> SAVERSTATE|EMPTY / UPLOADING / READY
+- SAVSHOW -> immediately show uploaded media
+- SAVCLEAR -> clear uploaded media from PSRAM
+- SAVSOURCE|MEDIA -> select uploaded media
+- SAVDELAY|<seconds> -> inactivity delay, 0 disables auto screensaver
+
+Uploaded PIXEL PRO media lives in PSRAM, so the Windows app may restore it after a
+device reset. Static RGB565 is full resolution; GIF frames use the PSRAM-friendly
+240×160 RGB332 format.
 
 ## Memory telemetry
 

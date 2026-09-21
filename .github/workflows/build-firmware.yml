@@ -35,7 +35,23 @@ jobs:
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@3.3.12
+          for attempt in 1 2 3; do
+            if arduino-cli core install esp32:esp32@3.3.12; then
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "ESP32 core install failed after 3 attempts."
+              exit 1
+            fi
+            echo "ESP32 package CDN failed; retrying attempt $((attempt + 1))/3..."
+            sleep 10
+            arduino-cli core update-index
+          done
+
+      - name: Install Arduino_GFX 1.6.8
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "GFX Library for Arduino@1.6.8"
 
       - name: Compile ESP32-S2 native USB firmware
         run: |

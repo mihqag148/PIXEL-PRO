@@ -23,16 +23,42 @@ external pull resistor or diode is required for this direct-key layout.
 ESP32-S2 native USB uses GPIO19 (D-) and GPIO20 (D+) through the board USB-C connector.
 Do not use GPIO19/GPIO20 for keys.
 
-## eezbotfun-style expansion reserved for later phases
+## PIXEL PRO display
 
-The public eezbotfun design has a 480x320 3.5-inch display, eight hot-swap keys,
-profile navigation and RGB. PIXEL PRO reserves:
+Panel: **ILI9486 3.5-inch, 480×320 landscape**.
 
-- GPIO9..11: three-way profile navigation switch.
-- GPIO18: addressable RGB data.
-- GPIO33..40: 8-bit TFT data bus.
-- GPIO12,13,14,16,17: TFT control lines.
+Interface: **i8080 / 8080-style 8-bit parallel**.
 
-These expansion pins are documented now but are intentionally not driven by the phase-1
-firmware. Exact TFT controller/control polarity must match the physical display before
-the display phase is enabled.
+The shield is the common UNO/Mega2560 8-bit TFT pinout. Its logical LCD bus maps to
+the ESP32-S2 Mini as follows:
+
+| LCD signal | UNO/Mega2560 shield pin | ESP32-S2 Mini |
+|---|---|---|
+| D0 | D8 | D33 |
+| D1 | D9 | D34 |
+| D2 | D2 | D35 |
+| D3 | D3 | D36 |
+| D4 | D4 | D37 |
+| D5 | D5 | D38 |
+| D6 | D6 | D39 |
+| D7 | D7 | D40 |
+| RD | A0 | D12 |
+| WR | A1 | D13 |
+| RS / DC | A2 | D14 |
+| CS | A3 | D16 |
+| RST | A4 | D17 |
+
+The shield's 5V/GND/backlight wiring remains on the shield power pins. The display
+logic is driven by the ESP32-S2 through the mappings above.
+
+The firmware uses Arduino_GFX with the ILI9486 driver and an 8-bit parallel bus.
+The panel is rotated to 480×320 landscape. ILI9486 frame-rate control is set to the
+controller step nearest 60 Hz, while PIXEL PRO caps rendered media at 60 FPS.
+
+Animated screensavers are stored in PSRAM at 240×160 RGB332 and expanded by an exact
+2× nearest-neighbour scale to 480×320. Static images use full 480×320 RGB565.
+
+Additional reserved PIXEL PRO pins:
+
+- D9..D11: three-way profile navigation switch.
+- D18: addressable RGB data.
