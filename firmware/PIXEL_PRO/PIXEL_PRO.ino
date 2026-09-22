@@ -1293,8 +1293,11 @@ static void closeMenuUpload() {
   menuUploadReceivedBytes = 0;
 }
 
-static bool beginMenuBackgroundUpload(uint32_t expectedBytes) {
+static bool beginMenuBackgroundUpload(
+    uint8_t profile,
+    uint32_t expectedBytes) {
   if (!littleFsReady ||
+      profile >= PROFILE_COUNT ||
       expectedBytes < 4 ||
       expectedBytes > MENU_BACKGROUND_LIMIT_BYTES) {
     return false;
@@ -1302,10 +1305,22 @@ static bool beginMenuBackgroundUpload(uint32_t expectedBytes) {
 
   closeMenuUpload();
 
-  // Replacing artwork must reclaim the previous asset first. This prevents
-  // an old menu image from blocking its replacement when LittleFS is full.
-  LittleFS.remove(MENU_BG_TMP_PATH);
-  LittleFS.remove(MENU_BG_PATH);
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuBackgroundPath(
+      profile,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
+  // Reclaim this profile's old background before checking free space.
+  LittleFS.remove(tempPath);
+  LittleFS.remove(finalPath);
 
   size_t total = LittleFS.totalBytes();
   size_t used = LittleFS.usedBytes();
@@ -1315,23 +1330,24 @@ static bool beginMenuBackgroundUpload(uint32_t expectedBytes) {
     return false;
   }
 
-  menuUploadFile = LittleFS.open(MENU_BG_TMP_PATH, "w");
+  menuUploadFile = LittleFS.open(tempPath, "w");
   if (!menuUploadFile) {
     return false;
   }
 
   menuUploadKind = 1;
+  menuUploadProfile = profile;
   menuUploadExpectedBytes = expectedBytes;
   menuUploadReceivedBytes = 0;
   return true;
 }
 
 static bool beginMenuIconUpload(
-    uint8_t page,
+    uint8_t profile,
     uint8_t slot,
     uint32_t expectedBytes) {
   if (!littleFsReady ||
-      page >= MENU_PAGE_COUNT ||
+      profile >= PROFILE_COUNT ||
       slot >= MENU_SLOT_COUNT ||
       expectedBytes != MENU_ICON_BYTES) {
     return false;
@@ -1341,8 +1357,18 @@ static bool beginMenuIconUpload(
 
   char finalPath[24] = {};
   char tempPath[24] = {};
-  menuIconPath(page, slot, false, finalPath, sizeof(finalPath));
-  menuIconPath(page, slot, true, tempPath, sizeof(tempPath));
+  menuIconPath(
+      profile,
+      slot,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuIconPath(
+      profile,
+      slot,
+      true,
+      tempPath,
+      sizeof(tempPath));
 
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
@@ -1361,7 +1387,7 @@ static bool beginMenuIconUpload(
   }
 
   menuUploadKind = 2;
-  menuUploadPage = page;
+  menuUploadProfile = profile;
   menuUploadSlot = slot;
   menuUploadExpectedBytes = expectedBytes;
   menuUploadReceivedBytes = 0;
@@ -1406,15 +1432,32 @@ static bool writeMenuAssetChunk(
 static bool finishMenuBackgroundUpload() {
   if (menuUploadKind != 1 ||
       !menuUploadFile ||
+      menuUploadProfile >= PROFILE_COUNT ||
       menuUploadReceivedBytes != menuUploadExpectedBytes) {
     closeMenuUpload();
     return false;
   }
 
+  uint8_t profile =
+      menuUploadProfile;
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuBackgroundPath(
+      profile,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
   menuUploadFile.flush();
   menuUploadFile.close();
 
-  File file = LittleFS.open(MENU_BG_TMP_PATH, "r");
+  File file = LittleFS.open(tempPath, "r");
   if (!file) {
     closeMenuUpload();
     return false;
@@ -1431,68 +1474,131 @@ static bool finishMenuBackgroundUpload() {
   file.close();
 
   if (!valid) {
-    LittleFS.remove(MENU_BG_TMP_PATH);
+    LittleFS.remove(tempPath);
     closeMenuUpload();
     return false;
   }
 
-  if (!LittleFS.rename(MENU_BG_TMP_PATH, MENU_BG_PATH)) {
-    LittleFS.remove(MENU_BG_TMP_PATH);
-    closeMenuUpload();
-    return false;
-  }
-
-  closeMenuUpload();
-  renderMainMenu();
-  return true;
-}
-
-static bool finishMenuIconUpload() {
-  if (menuUploadKind != 2 ||
-      !menuUploadFile ||
-      menuUploadReceivedBytes != MENU_ICON_BYTES) {
-    closeMenuUpload();
-    return false;
-  }
-
-  uint8_t page = menuUploadPage;
-  uint8_t slot = menuUploadSlot;
-
-  menuUploadFile.flush();
-  menuUploadFile.close();
-
-  char finalPath[24] = {};
-  char tempPath[24] = {};
-  menuIconPath(page, slot, false, finalPath, sizeof(finalPath));
-  menuIconPath(page, slot, true, tempPath, sizeof(tempPath));
-
-  File verify = LittleFS.open(tempPath, "r");
-  bool valid = verify && verify.size() == MENU_ICON_BYTES;
-  if (verify) {
-    verify.close();
-  }
-
-  if (!valid ||
-      !LittleFS.rename(tempPath, finalPath)) {
+  if (!LittleFS.rename(tempPath, finalPath)) {
     LittleFS.remove(tempPath);
     closeMenuUpload();
     return false;
   }
 
   closeMenuUpload();
-  renderMainMenu();
+
+  if (profile == activeProfile) {
+    renderMainMenu();
+  }
+
   return true;
 }
 
-static void clearMainMenuIcon(uint8_t page, uint8_t slot) {
+static bool finishMenuIconUpload() {
+  if (menuUploadKind != 2 ||
+      !menuUploadFile ||
+      menuUploadProfile >= PROFILE_COUNT ||
+      menuUploadReceivedBytes != MENU_ICON_BYTES) {
+    closeMenuUpload();
+    return false;
+  }
+
+  uint8_t profile =
+      menuUploadProfile;
+
+  uint8_t slot =
+      menuUploadSlot;
+
+  menuUploadFile.flush();
+  menuUploadFile.close();
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuIconPath(
+      profile,
+      slot,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuIconPath(
+      profile,
+      slot,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
+  File verify =
+      LittleFS.open(
+          tempPath,
+          "r");
+
+  bool valid =
+      verify &&
+      verify.size() == MENU_ICON_BYTES;
+
+  if (verify) {
+    verify.close();
+  }
+
+  if (!valid ||
+      !LittleFS.rename(
+          tempPath,
+          finalPath)) {
+    LittleFS.remove(tempPath);
+    closeMenuUpload();
+    return false;
+  }
+
+  closeMenuUpload();
+
+  if (profile == activeProfile) {
+    renderMainMenu();
+  }
+
+  return true;
+}
+
+static void clearMainMenuBackground(
+    uint8_t profile) {
   if (!littleFsReady ||
-      page >= MENU_PAGE_COUNT ||
+      profile >= PROFILE_COUNT) {
+    return;
+  }
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuBackgroundPath(
+      profile,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
+  LittleFS.remove(tempPath);
+  LittleFS.remove(finalPath);
+}
+
+static void clearMainMenuIcon(
+    uint8_t profile,
+    uint8_t slot) {
+  if (!littleFsReady ||
+      profile >= PROFILE_COUNT ||
       slot >= MENU_SLOT_COUNT) {
     return;
   }
 
   char path[24] = {};
-  menuIconPath(page, slot, false, path, sizeof(path));
+  menuIconPath(
+      profile,
+      slot,
+      false,
+      path,
+      sizeof(path));
+
   LittleFS.remove(path);
 }
 
