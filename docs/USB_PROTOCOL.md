@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.5.2 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
+Firmware 1.5.3 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.5.2|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.5.3|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -276,7 +276,7 @@ The 1 MiB value in Lumi Macropad is a soft optimization target, not a hard firmw
 
 ## PIXEL packed animation (PXQ) v1.5.0 / v1.5.1
 
-PXQ was introduced in firmware 1.5.0. Firmware 1.5.2 raises the packed-media ceiling to 2 MiB while keeping the decoder format backward compatible.
+PXQ was introduced in firmware 1.5.0. Firmware 1.5.3 raises the packed-media ceiling to 2 MiB while keeping the decoder format backward compatible.
 
 PIXEL PRO GIF media is converted on the PC into the PIXEL-specific `PXQ1` animation format. It follows the same compression ideas as QMK Quantum Painter without embedding QGF itself:
 
@@ -314,7 +314,7 @@ RGB colors and effect are stored per keymap profile. Effect speed remains global
 
 ## Flash media layout v1.5.2
 
-Firmware 1.5.2 uses a custom 4 MB flash partition table optimized for persistent media:
+Firmware 1.5.3 uses a custom 4 MB flash partition table optimized for persistent media:
 
 - 20 KiB NVS for Preferences/keymap settings
 - 1.5 MiB factory application partition
@@ -328,3 +328,8 @@ GIF/PXQ/JPEG payloads are persisted in flash LittleFS (for example `/screensaver
 ### PIXEL packed animation sizing v1.5.2
 
 The packed PXQ upload ceiling is 2 MiB. The 2.44 MiB LittleFS media partition leaves headroom for filesystem metadata and upload overhead. Lumi Macropad chooses candidates in this quality order: color depth first (RGB888 before RGB565), then higher FPS, then higher storage resolution (480×320 before 360×240 at the same FPS). RGB565 and 360×240 remain the hard quality floors for newly generated media.
+
+
+## PXQ minimum FPS v1.5.3
+
+Packed PXQ media is accepted only when its declared encoder FPS is between 15 and 60. This makes 15 FPS a firmware-enforced floor for PIXEL PRO packed animation, matching Lumi Macropad 1.20.21. If a source cannot fit the 2 MiB budget at RGB565 / 15 FPS / 360×240, the app must reject the conversion instead of creating a lower-FPS PXQ.
