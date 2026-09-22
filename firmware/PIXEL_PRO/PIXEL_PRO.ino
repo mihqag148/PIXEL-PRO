@@ -5072,7 +5072,7 @@ static void handleCommand(String command) {
     menuPcStatusValid = false;
 
     if (!saverActive) {
-      renderMainMenuStatusBar();
+      renderMainMenuOsDock();
     }
 
     return;
@@ -5158,7 +5158,7 @@ static void handleCommand(String command) {
     menuPcStatusValid = true;
 
     if (!saverActive) {
-      renderMainMenuStatusBar();
+      renderMainMenuOsDock();
     }
 
     return;
