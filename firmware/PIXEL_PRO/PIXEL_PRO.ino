@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.5.1";
+static constexpr char FW_VERSION[] = "1.5.2";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -42,7 +42,7 @@ static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
 static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
-static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 1100UL * 1024UL;
+static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -227,7 +227,8 @@ static uint32_t packedDurationMs = 0;
 static uint32_t packedFramesOffset = 0;
 static uint32_t packedNextFrameAt = 0;
 static uint16_t packedPalette565[256] = {};
-static uint16_t packedLineBuffer[TFT_WIDTH] = {};
+static uint16_t *packedLineBuffer = nullptr;
+static uint16_t packedLineFallback[TFT_WIDTH] = {};
 
 static AnimatedGIF gifDecoder;
 static File gifPlaybackFile;
@@ -3377,6 +3378,16 @@ static void initDisplay() {
   if (ESP.getPsramSize() > 0) {
     renderBuffer = static_cast<uint16_t *>(
         ps_malloc(static_cast<size_t>(TFT_WIDTH) * TFT_HEIGHT * 2));
+
+    packedLineBuffer = static_cast<uint16_t *>(
+        ps_malloc(static_cast<size_t>(TFT_WIDTH) * sizeof(uint16_t)));
+  }
+
+  // Persistent media stays in flash/LittleFS. PSRAM is used only as a
+  // transient decode/render buffer; fall back to internal SRAM if PSRAM
+  // allocation is unavailable.
+  if (packedLineBuffer == nullptr) {
+    packedLineBuffer = packedLineFallback;
   }
 }
 
@@ -5235,7 +5246,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0150);
+  USB.firmwareVersion(0x0152);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -5249,7 +5260,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.5.1");
+  cdcPrintln("BOOT|PIXELPRO|1.5.2");
 }
 
 void loop() {

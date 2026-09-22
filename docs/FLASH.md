@@ -20,3 +20,10 @@ Expected Windows behavior after the application boots:
 For the fastest HID test, short GPIO1 to GND briefly while Notepad is focused. The host should type the letter A.
 
 For CDC, send HELLO followed by LF. The response must start with PIXELPRO|1|.
+
+
+## Firmware 1.5.2 media partition
+
+The merged image installs a custom 4 MB partition table with a 1.5 MiB application area and a 2.44 MiB LittleFS media area. Reflashing 1.5.2 changes the partition map, so existing uploaded screensaver media should be considered disposable and may be reformatted on first boot.
+
+Persistent GIF/PXQ/JPEG files live in flash LittleFS. PSRAM is runtime buffering only.

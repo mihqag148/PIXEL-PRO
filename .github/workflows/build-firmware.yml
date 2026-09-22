@@ -70,6 +70,27 @@ jobs:
           mkdir -p build dist
           arduino-cli compile             --fqbn "esp32:esp32:esp32s2:PSRAM=enabled,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,FlashMode=dio"             --build-path build             --output-dir dist/raw             firmware/PIXEL_PRO
 
+      - name: Verify PIXEL PRO flash partition layout
+        run: |
+          python - <<'PY'
+          import glob, struct
+          paths = glob.glob("dist/raw/*.ino.partitions.bin")
+          assert paths, "partition binary not found"
+          data = open(paths[0], "rb").read()
+          entries = {}
+          for pos in range(0, len(data) - 31, 32):
+              chunk = data[pos:pos + 32]
+              magic = struct.unpack_from("<H", chunk, 0)[0]
+              if magic != 0x50AA:
+                  continue
+              offset, size = struct.unpack_from("<II", chunk, 4)
+              label = chunk[12:28].split(b"\0", 1)[0].decode("ascii", "ignore")
+              entries[label] = (offset, size)
+          print(entries)
+          assert entries.get("factory") == (0x10000, 0x180000), entries
+          assert entries.get("spiffs") == (0x190000, 0x270000), entries
+          PY
+
       - name: Package flash images
         run: |
           python -m pip install --quiet esptool
