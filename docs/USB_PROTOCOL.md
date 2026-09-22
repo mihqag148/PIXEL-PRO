@@ -328,3 +328,6 @@ GIF/PXQ/JPEG payloads are persisted in flash LittleFS (for example `/screensaver
 ### PIXEL packed animation sizing v1.5.2
 
 The packed PXQ upload ceiling is 2 MiB. The 2.44 MiB LittleFS media partition leaves headroom for filesystem metadata and upload overhead. Lumi Macropad chooses candidates in this quality order: color depth first (RGB888 before RGB565), then higher FPS, then higher storage resolution (480×320 before 360×240 at the same FPS). RGB565 and 360×240 remain the hard quality floors for newly generated media.
+
+
+The companion app never auto-reduces newly generated PIXEL PRO media below 15 FPS. If a 2 MiB payload cannot be achieved while preserving RGB565, 15 FPS, and 360×240, conversion fails instead of lowering the quality floor.
