@@ -447,3 +447,7 @@ High-quality icons:
 
 Background behavior remains per keymap profile with Blur, Opacity, and
 Fill/Fit/Stretch preparation in Lumi Macropad before the 480x320 JPEG upload.
+
+### v1.8.2 visual layout
+
+PIXEL PRO Main Menu uses two rows of four app/action icons with a small action-name label under each icon and a four-part bottom status strip (profile, date/time, CPU, GPU), matching the eezBotFun-style reference layout. Slot card outlines were removed so the wallpaper remains visible.
