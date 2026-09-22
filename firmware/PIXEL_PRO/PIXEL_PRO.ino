@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.2";
+static constexpr char FW_VERSION[] = "1.8.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -185,6 +185,15 @@ static uint8_t menuDay = 0;
 static uint8_t menuHour = 0;
 static uint8_t menuMinute = 0;
 static bool menuPcStatusValid = false;
+
+enum HostOsKind : uint8_t {
+  HOST_OS_WINDOWS = 0,
+  HOST_OS_MAC = 1,
+  HOST_OS_LINUX = 2,
+  HOST_OS_OTHER = 3,
+};
+
+static HostOsKind menuHostOs = HOST_OS_WINDOWS;
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
 // PIXEL effects: 0 rainbow, 1 purple ping-pong, 2 orange blink,
@@ -1285,6 +1294,180 @@ static bool renderMainMenuIcon(
   return result != 0;
 }
 
+static void drawWindowsSystemIcon(
+    int cx,
+    int cy) {
+  const uint16_t blue = 0x1C9F;
+  const uint16_t white = 0xFFFF;
+
+  tft->fillRoundRect(
+      cx - 17,
+      cy - 17,
+      34,
+      34,
+      7,
+      blue);
+
+  tft->fillRect(cx - 9, cy - 9, 7, 7, white);
+  tft->fillRect(cx + 2, cy - 9, 7, 7, white);
+  tft->fillRect(cx - 9, cy + 2, 7, 7, white);
+  tft->fillRect(cx + 2, cy + 2, 7, 7, white);
+}
+
+static void drawMacSystemIcon(
+    int cx,
+    int cy) {
+  const uint16_t blue = 0x2D9F;
+  const uint16_t white = 0xFFFF;
+  const uint16_t dark = 0x18C3;
+
+  tft->fillRoundRect(
+      cx - 17,
+      cy - 17,
+      34,
+      34,
+      7,
+      blue);
+
+  tft->drawLine(cx, cy - 12, cx, cy + 12, white);
+  tft->fillCircle(cx - 6, cy - 3, 2, white);
+  tft->fillCircle(cx + 6, cy - 3, 2, dark);
+  tft->drawLine(cx - 7, cy + 7, cx - 2, cy + 9, white);
+  tft->drawLine(cx - 2, cy + 9, cx + 6, cy + 6, white);
+}
+
+static void drawLinuxSystemIcon(
+    int cx,
+    int cy) {
+  const uint16_t orange = 0xFD20;
+  const uint16_t dark = 0x18C3;
+  const uint16_t white = 0xFFFF;
+
+  tft->fillRoundRect(
+      cx - 17,
+      cy - 17,
+      34,
+      34,
+      7,
+      orange);
+
+  tft->fillCircle(cx, cy, 10, dark);
+  tft->fillCircle(cx - 4, cy - 3, 2, white);
+  tft->fillCircle(cx + 4, cy - 3, 2, white);
+  tft->drawLine(cx - 5, cy + 5, cx, cy + 8, white);
+  tft->drawLine(cx, cy + 8, cx + 5, cy + 5, white);
+}
+
+static void drawFilesSystemIcon(
+    int cx,
+    int cy,
+    uint16_t color) {
+  const uint16_t white = 0xFFFF;
+
+  tft->fillRoundRect(
+      cx - 17,
+      cy - 14,
+      34,
+      28,
+      6,
+      color);
+
+  tft->fillRoundRect(
+      cx - 13,
+      cy - 18,
+      15,
+      9,
+      4,
+      color);
+
+  tft->drawLine(
+      cx - 10,
+      cy + 2,
+      cx + 10,
+      cy + 2,
+      white);
+}
+
+static void drawTaskSystemIcon(
+    int cx,
+    int cy,
+    HostOsKind os) {
+  const uint16_t white = 0xFFFF;
+
+  if (os == HOST_OS_LINUX) {
+    const uint16_t terminal = 0x034C;
+
+    tft->fillRoundRect(
+        cx - 17,
+        cy - 17,
+        34,
+        34,
+        7,
+        terminal);
+
+    tft->setTextSize(1);
+    tft->setTextColor(white);
+    tft->setCursor(cx - 9, cy - 3);
+    tft->print(">_");
+    return;
+  }
+
+  const uint16_t tile =
+      os == HOST_OS_MAC
+          ? 0xB81F
+          : 0x4E7F;
+
+  tft->fillRoundRect(
+      cx - 17,
+      cy - 17,
+      34,
+      34,
+      7,
+      tile);
+
+  tft->drawRect(
+      cx - 10,
+      cy - 9,
+      15,
+      13,
+      white);
+
+  tft->drawRect(
+      cx - 3,
+      cy - 2,
+      15,
+      13,
+      white);
+}
+
+static void drawSettingsSystemIcon(
+    int cx,
+    int cy) {
+  const uint16_t tile = 0x8410;
+  const uint16_t white = 0xFFFF;
+
+  tft->fillRoundRect(
+      cx - 17,
+      cy - 17,
+      34,
+      34,
+      7,
+      tile);
+
+  tft->drawCircle(cx, cy, 8, white);
+  tft->drawCircle(cx, cy, 3, white);
+
+  tft->drawLine(cx, cy - 13, cx, cy - 8, white);
+  tft->drawLine(cx, cy + 8, cx, cy + 13, white);
+  tft->drawLine(cx - 13, cy, cx - 8, cy, white);
+  tft->drawLine(cx + 8, cy, cx + 13, cy, white);
+
+  tft->drawLine(cx - 9, cy - 9, cx - 6, cy - 6, white);
+  tft->drawLine(cx + 6, cy + 6, cx + 9, cy + 9, white);
+  tft->drawLine(cx + 9, cy - 9, cx + 6, cy - 6, white);
+  tft->drawLine(cx - 6, cy + 6, cx - 9, cy + 9, white);
+}
+
 static void renderMainMenuStatusBar() {
   if (!displayReady ||
       saverActive) {
@@ -1295,236 +1478,39 @@ static void renderMainMenuStatusBar() {
       TFT_HEIGHT -
       MENU_STATUS_HEIGHT;
 
-  const int marginX = 4;
-  const int gap = 4;
-  const int panelW =
-      (TFT_WIDTH -
-       marginX * 2 -
-       gap * 3) /
-      4;
+  const int cellW =
+      TFT_WIDTH / 4;
 
-  const int panelY =
-      y + 3;
+  const int cy =
+      y +
+      MENU_STATUS_HEIGHT / 2;
 
-  const int panelH =
-      MENU_STATUS_HEIGHT - 6;
+  const int x0 = cellW / 2;
+  const int x1 = x0 + cellW;
+  const int x2 = x1 + cellW;
+  const int x3 = x2 + cellW;
 
-  const uint16_t panelColor =
-      0x18C3;
-
-  const uint16_t borderColor =
-      0x39E7;
-
-  const uint16_t profileDot =
-      0xB81F;
-
-  const uint16_t timeDot =
-      0xFFFF;
-
-  const uint16_t cpuDot =
-      0x067F;
-
-  const uint16_t gpuDot =
-      0x07F0;
-
-  for (int col = 0;
-       col < 4;
-       ++col) {
-    int x =
-        marginX +
-        col *
-            (panelW + gap);
-
-    tft->fillRoundRect(
-        x,
-        panelY,
-        panelW,
-        panelH,
-        5,
-        panelColor);
-
-    tft->drawRoundRect(
-        x,
-        panelY,
-        panelW,
-        panelH,
-        5,
-        borderColor);
-  }
-
-  char line[24] = {};
-
-  tft->setTextSize(1);
-  tft->setTextColor(0xFFFF);
-
-  int x0 = marginX;
-  tft->fillCircle(
-      x0 + 10,
-      panelY + 10,
-      3,
-      profileDot);
-
-  tft->setCursor(
-      x0 + 18,
-      panelY + 6);
-  tft->print("Profile");
-
-  snprintf(
-      line,
-      sizeof(line),
-      "%02u/%02u",
-      static_cast<unsigned>(
-          activeProfile + 1),
-      static_cast<unsigned>(
-          PROFILE_COUNT));
-
-  tft->setCursor(
-      x0 + 18,
-      panelY + 21);
-  tft->print(line);
-
-  int x1 =
-      marginX +
-      panelW +
-      gap;
-
-  tft->fillCircle(
-      x1 + 10,
-      panelY + 10,
-      3,
-      timeDot);
-
-  if (menuPcStatusValid) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%02u-%02u",
-        static_cast<unsigned>(menuMonth),
-        static_cast<unsigned>(menuDay));
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 6);
-    tft->print(line);
-
-    snprintf(
-        line,
-        sizeof(line),
-        "%02u:%02u",
-        static_cast<unsigned>(menuHour),
-        static_cast<unsigned>(menuMinute));
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 21);
-    tft->print(line);
+  // eezBotFun-style third row: four compact, icon-only host-system apps.
+  // No labels and no black panels are painted around the icons.
+  if (menuHostOs == HOST_OS_MAC) {
+    drawMacSystemIcon(x0, cy);
+    drawFilesSystemIcon(x1, cy, 0x2D9F);
+  } else if (menuHostOs == HOST_OS_LINUX) {
+    drawLinuxSystemIcon(x0, cy);
+    drawFilesSystemIcon(x1, cy, 0xFD20);
   } else {
-    tft->setCursor(
-        x1 + 18,
-        panelY + 6);
-    tft->print("-- --");
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 21);
-    tft->print("--:--");
+    drawWindowsSystemIcon(x0, cy);
+    drawFilesSystemIcon(x1, cy, 0xFDC0);
   }
 
-  int x2 =
-      marginX +
-      (panelW + gap) * 2;
+  drawTaskSystemIcon(
+      x2,
+      cy,
+      menuHostOs);
 
-  tft->fillCircle(
-      x2 + 10,
-      panelY + 10,
-      3,
-      cpuDot);
-
-  if (menuCpuLoad >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "CPU %d%%",
-        static_cast<int>(
-            menuCpuLoad));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "CPU --%%");
-  }
-
-  tft->setCursor(
-      x2 + 18,
-      panelY + 6);
-  tft->print(line);
-
-  if (menuCpuTemp >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%dC",
-        static_cast<int>(
-            menuCpuTemp));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "--C");
-  }
-
-  tft->setCursor(
-      x2 + 18,
-      panelY + 21);
-  tft->print(line);
-
-  int x3 =
-      marginX +
-      (panelW + gap) * 3;
-
-  tft->fillCircle(
-      x3 + 10,
-      panelY + 10,
-      3,
-      gpuDot);
-
-  if (menuGpuLoad >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "GPU %d%%",
-        static_cast<int>(
-            menuGpuLoad));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "GPU --%%");
-  }
-
-  tft->setCursor(
-      x3 + 18,
-      panelY + 6);
-  tft->print(line);
-
-  if (menuGpuTemp >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%dC",
-        static_cast<int>(
-            menuGpuTemp));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "--C");
-  }
-
-  tft->setCursor(
-      x3 + 18,
-      panelY + 21);
-  tft->print(line);
+  drawSettingsSystemIcon(
+      x3,
+      cy);
 }
 
 static void renderMainMenu() {
@@ -1588,88 +1574,18 @@ static void renderMainMenu() {
             2;
 
     int iconY =
-        y + 3;
+        y +
+        (cellH -
+         MENU_ICON_HEIGHT) /
+            2;
 
-    bool drewIcon =
-        renderMainMenuIcon(
-            profile,
-            slot,
-            iconX,
-            iconY);
-
-    uint8_t action =
-        mainMenuConfig
-            .actions[profile][slot];
-
-    if (action > 0) {
-      const char *label =
-          mainMenuConfig
-              .labels[profile][slot];
-
-      char fallback[8] = {};
-
-      if (label[0] == '\0') {
-        snprintf(
-            fallback,
-            sizeof(fallback),
-            "A%02u",
-            static_cast<unsigned>(
-                action));
-
-        label =
-            fallback;
-      }
-
-      size_t len =
-          strnlen(
-              label,
-              MENU_LABEL_MAX_LEN);
-
-      int textWidth =
-          static_cast<int>(len) *
-          6;
-
-      int textX =
-          x +
-          max(
-              2,
-              (cellW -
-               textWidth) /
-                  2);
-
-      int textY =
-          drewIcon
-              ? y +
-                    cellH -
-                    13
-              : y +
-                    (cellH - 8) /
-                        2;
-
-      // eezBotFun-like floating label: no slot frame, just a tiny
-      // shadow under crisp white action text on top of the wallpaper.
-      tft->setTextSize(1);
-
-      tft->setTextColor(
-          0x0000);
-
-      tft->setCursor(
-          textX + 1,
-          textY + 1);
-
-      tft->print(
-          label);
-
-      tft->setTextColor(
-          0xFFFF);
-
-      tft->setCursor(
-          textX,
-          textY);
-
-      tft->print(
-          label);
-    }
+    // Main 2x4 grid is deliberately icon-only. Action/app names stay in
+    // LumiPad's editor and are not painted on the physical PIXEL PRO LCD.
+    renderMainMenuIcon(
+        profile,
+        slot,
+        iconX,
+        iconY);
   }
 
   renderMainMenuStatusBar();
@@ -5061,9 +4977,10 @@ static void handleCommand(String command) {
     menuHour = 0;
     menuMinute = 0;
     menuPcStatusValid = false;
+    menuHostOs = HOST_OS_OTHER;
 
     if (!saverActive) {
-      renderMainMenuStatusBar();
+      renderMainMenu();
     }
 
     return;
@@ -5078,6 +4995,7 @@ static void handleCommand(String command) {
     int p6 = command.indexOf('|', p5 + 1);
     int p7 = command.indexOf('|', p6 + 1);
     int p8 = command.indexOf('|', p7 + 1);
+    int p9 = command.indexOf('|', p8 + 1);
 
     int16_t cpuLoad = -1;
     int16_t cpuTemp = -1;
@@ -5132,11 +5050,42 @@ static void handleCommand(String command) {
             23,
             hour) ||
         !parseUnsigned(
-            command.substring(p8 + 1),
+            p9 >= 0
+                ? command.substring(p8 + 1, p9)
+                : command.substring(p8 + 1),
             59,
             minute)) {
       return;
     }
+
+    HostOsKind nextHostOs =
+        menuHostOs;
+
+    if (p9 >= 0) {
+      String os =
+          upper.substring(p9 + 1);
+
+      os.trim();
+
+      if (os == "WIN" ||
+          os == "WINDOWS") {
+        nextHostOs = HOST_OS_WINDOWS;
+      } else if (os == "MAC" ||
+                 os == "MACOS" ||
+                 os == "OSX") {
+        nextHostOs = HOST_OS_MAC;
+      } else if (os == "LINUX") {
+        nextHostOs = HOST_OS_LINUX;
+      } else {
+        nextHostOs = HOST_OS_OTHER;
+      }
+    }
+
+    bool hostChanged =
+        nextHostOs != menuHostOs;
+
+    menuHostOs =
+        nextHostOs;
 
     menuCpuLoad = cpuLoad;
     menuCpuTemp = cpuTemp;
@@ -5149,7 +5098,11 @@ static void handleCommand(String command) {
     menuPcStatusValid = true;
 
     if (!saverActive) {
-      renderMainMenuStatusBar();
+      if (hostChanged) {
+        renderMainMenu();
+      } else {
+        renderMainMenuStatusBar();
+      }
     }
 
     return;
@@ -6893,7 +6846,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0182);
+  USB.firmwareVersion(0x0183);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6907,7 +6860,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.2");
+  cdcPrintln("BOOT|PIXELPRO|1.8.3");
 }
 
 void loop() {
