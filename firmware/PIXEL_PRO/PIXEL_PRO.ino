@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.6.0";
+static constexpr char FW_VERSION[] = "1.6.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -53,7 +53,8 @@ static constexpr uint8_t MENU_ICON_HEIGHT = 40;
 static constexpr uint32_t MENU_ICON_BYTES =
     static_cast<uint32_t>(MENU_ICON_WIDTH) * MENU_ICON_HEIGHT * 2UL;
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
-static constexpr uint8_t MENU_STORAGE_VERSION = 1;
+static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
+static constexpr uint8_t MENU_STORAGE_VERSION = 2;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -125,6 +126,7 @@ struct __attribute__((packed)) MainMenuConfig {
   uint8_t version;
   uint8_t layers[MENU_PAGE_COUNT];
   uint8_t actions[MENU_PAGE_COUNT][MENU_SLOT_COUNT];
+  char labels[MENU_PAGE_COUNT][MENU_SLOT_COUNT][MENU_LABEL_MAX_LEN + 1];
 };
 
 USBHID HID;
@@ -1145,8 +1147,7 @@ static void renderMainMenu() {
   const int gapY = 8;
   const int cellW = (TFT_WIDTH - marginX * 2 - gapX * 3) / 4;
   const int cellH = (TFT_HEIGHT - marginY * 2 - gapY * 2) / 3;
-
-  tft->setTextSize(1);
+  uint16_t scaledLine[MENU_ICON_WIDTH * 2] = {};
 
   for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
     int col = slot % 4;
@@ -1174,15 +1175,39 @@ static void renderMainMenu() {
           icon.read(
               reinterpret_cast<uint8_t *>(menuIconBuffer),
               MENU_ICON_BYTES) == MENU_ICON_BYTES) {
-        int iconX = x + (cellW - MENU_ICON_WIDTH) / 2;
-        int iconY = y + 14;
+        const int scaledW = MENU_ICON_WIDTH * 2;
+        const int scaledH = MENU_ICON_HEIGHT * 2;
+        int iconX = x + (cellW - scaledW) / 2;
+        int iconY = y + (cellH - scaledH) / 2;
 
-        tft->draw16bitRGBBitmap(
-            iconX,
-            iconY,
-            menuIconBuffer,
-            MENU_ICON_WIDTH,
-            MENU_ICON_HEIGHT);
+        for (uint8_t sourceY = 0; sourceY < MENU_ICON_HEIGHT; ++sourceY) {
+          const uint16_t *source =
+              menuIconBuffer +
+              static_cast<size_t>(sourceY) * MENU_ICON_WIDTH;
+
+          for (uint8_t sourceX = 0; sourceX < MENU_ICON_WIDTH; ++sourceX) {
+            uint16_t pixel = source[sourceX];
+            scaledLine[sourceX * 2] = pixel;
+            scaledLine[sourceX * 2 + 1] = pixel;
+          }
+
+          int drawY = iconY + sourceY * 2;
+
+          tft->draw16bitRGBBitmap(
+              iconX,
+              drawY,
+              scaledLine,
+              scaledW,
+              1);
+
+          tft->draw16bitRGBBitmap(
+              iconX,
+              drawY + 1,
+              scaledLine,
+              scaledW,
+              1);
+        }
+
         drewIcon = true;
       }
 
@@ -1192,26 +1217,50 @@ static void renderMainMenu() {
     }
 
     uint8_t action = mainMenuConfig.actions[page][slot];
-    char label[8] = {};
-    if (action > 0) {
-      snprintf(label, sizeof(label), "A%02u", static_cast<unsigned>(action));
-    } else {
-      snprintf(label, sizeof(label), "--");
-    }
 
-    tft->setTextColor(0xFFFF);
-    tft->setCursor(
-        x + (cellW / 2) - (static_cast<int>(strlen(label)) * 3),
-        y + cellH - 18);
-    tft->print(label);
-
+    // Icon slots are intentionally icon-only. If no icon exists, render the
+    // actual Lumi Action name stored by the app. Fall back to Axx for older
+    // or unnamed actions.
     if (!drewIcon && action > 0) {
-      tft->setTextSize(2);
-      tft->setCursor(
-          x + (cellW / 2) - 18,
-          y + 29);
-      tft->print(label);
+      const char *label =
+          mainMenuConfig.labels[page][slot];
+
+      char fallback[8] = {};
+      if (label[0] == '\0') {
+        snprintf(
+            fallback,
+            sizeof(fallback),
+            "A%02u",
+            static_cast<unsigned>(action));
+        label = fallback;
+      }
+
+      size_t len =
+          strnlen(
+              label,
+              MENU_LABEL_MAX_LEN);
+
       tft->setTextSize(1);
+      tft->setTextColor(0xFFFF);
+
+      int textWidth =
+          static_cast<int>(len) * 6;
+
+      int textX =
+          x +
+          max(
+              4,
+              (cellW - textWidth) / 2);
+
+      int textY =
+          y +
+          (cellH - 8) / 2;
+
+      tft->setCursor(
+          textX,
+          textY);
+
+      tft->print(label);
     }
   }
 }
@@ -4429,6 +4478,13 @@ static void handleCommand(String command) {
       out += String(mainMenuConfig.actions[page][slot]);
     }
 
+    out += '|';
+
+    for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
+      if (slot) out += ',';
+      out += String(mainMenuConfig.labels[page][slot]);
+    }
+
     cdcPrintln(out);
     return;
   }
@@ -4437,6 +4493,7 @@ static void handleCommand(String command) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
     int p3 = command.indexOf('|', p2 + 1);
+    int p4 = command.indexOf('|', p3 + 1);
 
     uint16_t page = 0;
     uint16_t layer = 0;
@@ -4444,6 +4501,7 @@ static void handleCommand(String command) {
     if (p1 < 0 ||
         p2 < 0 ||
         p3 < 0 ||
+        p4 < 0 ||
         !parseUnsigned(
             command.substring(p1 + 1, p2),
             MENU_PAGE_COUNT - 1,
@@ -4456,12 +4514,22 @@ static void handleCommand(String command) {
       return;
     }
 
-    String csv = command.substring(p3 + 1);
-    int start = 0;
+    String actionCsv =
+        command.substring(
+            p3 + 1,
+            p4);
+
+    int actionStart = 0;
 
     for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
-      int comma = csv.indexOf(',', start);
-      bool last = slot == MENU_SLOT_COUNT - 1;
+      int comma =
+          actionCsv.indexOf(
+              ',',
+              actionStart);
+
+      bool last =
+          slot ==
+          MENU_SLOT_COUNT - 1;
 
       if ((!last && comma < 0) ||
           (last && comma >= 0)) {
@@ -4471,11 +4539,14 @@ static void handleCommand(String command) {
 
       String token =
           last
-              ? csv.substring(start)
-              : csv.substring(start, comma);
+              ? actionCsv.substring(actionStart)
+              : actionCsv.substring(actionStart, comma);
 
       uint16_t action = 0;
-      if (!parseUnsigned(token, ACTION_COUNT, action)) {
+      if (!parseUnsigned(
+              token,
+              ACTION_COUNT,
+              action)) {
         cdcPrintln("ERR|BAD_MENU_ACTION");
         return;
       }
@@ -4483,7 +4554,57 @@ static void handleCommand(String command) {
       mainMenuConfig.actions[page][slot] =
           static_cast<uint8_t>(action);
 
-      start = comma + 1;
+      actionStart =
+          comma + 1;
+    }
+
+    String labelCsv =
+        command.substring(
+            p4 + 1);
+
+    int labelStart = 0;
+
+    for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
+      int comma =
+          labelCsv.indexOf(
+              ',',
+              labelStart);
+
+      bool last =
+          slot ==
+          MENU_SLOT_COUNT - 1;
+
+      if ((!last && comma < 0) ||
+          (last && comma >= 0)) {
+        cdcPrintln("ERR|BAD_MENU_LABELS");
+        return;
+      }
+
+      String label =
+          last
+              ? labelCsv.substring(labelStart)
+              : labelCsv.substring(labelStart, comma);
+
+      label.trim();
+
+      if (label.length() > MENU_LABEL_MAX_LEN) {
+        label =
+            label.substring(
+                0,
+                MENU_LABEL_MAX_LEN);
+      }
+
+      memset(
+          mainMenuConfig.labels[page][slot],
+          0,
+          MENU_LABEL_MAX_LEN + 1);
+
+      label.toCharArray(
+          mainMenuConfig.labels[page][slot],
+          MENU_LABEL_MAX_LEN + 1);
+
+      labelStart =
+          comma + 1;
     }
 
     mainMenuConfig.layers[page] =
@@ -5990,7 +6111,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0160);
+  USB.firmwareVersion(0x0161);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6004,7 +6125,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.6.0");
+  cdcPrintln("BOOT|PIXELPRO|1.6.1");
 }
 
 void loop() {
