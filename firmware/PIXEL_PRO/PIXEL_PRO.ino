@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.5.2";
+static constexpr char FW_VERSION[] = "1.5.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -2138,7 +2138,7 @@ static bool readPackedHeader(
       displayWidth != TFT_WIDTH ||
       displayHeight != TFT_HEIGHT ||
       frameCount == 0 ||
-      fps == 0 ||
+      fps < 15 ||
       fps > 60 ||
       durationMs == 0 ||
       paletteCount !=
@@ -5246,7 +5246,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0152);
+  USB.firmwareVersion(0x0153);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -5260,7 +5260,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.5.2");
+  cdcPrintln("BOOT|PIXELPRO|1.5.3");
 }
 
 void loop() {
