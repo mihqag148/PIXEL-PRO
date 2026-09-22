@@ -333,3 +333,43 @@ The packed PXQ upload ceiling is 2 MiB. The 2.44 MiB LittleFS media partition le
 ## PXQ minimum FPS v1.5.3
 
 Packed PXQ media is accepted only when its declared encoder FPS is between 15 and 60. This makes 15 FPS a firmware-enforced floor for PIXEL PRO packed animation, matching Lumi Macropad 1.20.21. If a source cannot fit the 2 MiB budget at RGB565 / 15 FPS / 360×240, the app must reject the conversion instead of creating a lower-FPS PXQ.
+
+
+## Main menu artwork protocol (firmware 1.6.0)
+
+PIXEL PRO exposes a static 4-page main menu. Each page maps to one keyboard
+layer and contains 12 visual action slots in a 4×3 layout.
+
+Background:
+- `MENUBGBEGIN|<bytes>` starts a JPEG upload. The image must be exactly
+  480×320 and at most 96 KiB.
+- `MENUBGDATA|<offset>|<base64>` streams the JPEG.
+- `MENUBGEND` validates and stores it as `/menu_bg.jpg`.
+- `MENUBGCLEAR` removes the background.
+
+Icons:
+- `MENUICONBEGIN|<page>|<slot>|3200` starts one 40×40 RGB565 icon upload.
+- `MENUICONDATA|<offset>|<base64>` streams icon bytes.
+- `MENUICONEND` stores the icon.
+- `MENUICONCLEAR|<page>|<slot>` removes one icon.
+
+Page mapping:
+- `MENUCFG|<page>|<layer>|<a1>,...,<a12>` stores the layer and action IDs.
+  Page is 0..3, layer is 0..3, action IDs are 0..32 (0 means empty).
+- `GET_MENUCFG|<page>` returns the persisted mapping.
+- `MENUSHOW` exits the screensaver and renders the current layer's menu.
+
+Main-menu backgrounds and icons are static images only. The Windows app rejects
+GIF input for these assets and bakes the requested background brightness into
+the uploaded JPEG.
+
+## Flash usage reporting (firmware 1.6.0)
+
+The `MEM` response now reports Flash used as compiled sketch bytes plus the
+current LittleFS used bytes, capped at the physical flash size. This makes the
+app's Flash gauge reflect uploaded screensaver and main-menu media instead of
+showing only sketch size.
+
+Replacement screensaver uploads reclaim the previous screensaver before the
+firmware checks free space. Therefore a full media partition can replace its
+current GIF/PXQ/JPEG without requiring a manual clear first.

@@ -27,3 +27,18 @@ For CDC, send HELLO followed by LF. The response must start with PIXELPRO|1|.
 The merged image installs a custom 4 MB partition table with a 1.5 MiB application area and a 2.44 MiB LittleFS media area. Reflashing 1.5.2 changes the partition map, so existing uploaded screensaver media should be considered disposable and may be reformatted on first boot.
 
 Persistent GIF/PXQ/JPEG files live in flash LittleFS. PSRAM is runtime buffering only.
+
+
+## Main-menu media (firmware 1.6.0)
+
+Persistent PIXEL PRO main-menu artwork shares the LittleFS media partition with
+the screensaver. The app limits the background JPEG to 96 KiB and stores up to
+48 icons (4 menus × 12 slots) as 40×40 RGB565 files (3,200 bytes each).
+
+Screensaver replacement is destructive by design: the previous screensaver
+GIF/PXQ/JPEG is removed before free-space validation for the new screensaver.
+Main-menu artwork is independent and is not deleted when the screensaver is
+replaced.
+
+PSRAM remains runtime workspace only; all persistent screensaver and main-menu
+artwork is stored in Flash/LittleFS.
