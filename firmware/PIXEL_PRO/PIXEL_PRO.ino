@@ -4579,34 +4579,32 @@ static void handleCommand(String command) {
   }
 
   if (upper.startsWith("GET_MENUCFG|")) {
-    uint16_t page = 0;
+    uint16_t profile = 0;
     int sep = command.indexOf('|');
 
     if (sep < 0 ||
         !parseUnsigned(
             command.substring(sep + 1),
-            MENU_PAGE_COUNT - 1,
-            page)) {
-      cdcPrintln("ERR|BAD_MENU_PAGE");
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln("ERR|BAD_MENU_PROFILE");
       return;
     }
 
     String out = "MENUCFG|";
-    out += String(page);
-    out += '|';
-    out += String(mainMenuConfig.layers[page]);
+    out += String(profile);
     out += '|';
 
     for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
       if (slot) out += ',';
-      out += String(mainMenuConfig.actions[page][slot]);
+      out += String(mainMenuConfig.actions[profile][slot]);
     }
 
     out += '|';
 
     for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
       if (slot) out += ',';
-      out += String(mainMenuConfig.labels[page][slot]);
+      out += String(mainMenuConfig.labels[profile][slot]);
     }
 
     cdcPrintln(out);
@@ -4617,31 +4615,24 @@ static void handleCommand(String command) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
     int p3 = command.indexOf('|', p2 + 1);
-    int p4 = command.indexOf('|', p3 + 1);
 
-    uint16_t page = 0;
-    uint16_t layer = 0;
+    uint16_t profile = 0;
 
     if (p1 < 0 ||
         p2 < 0 ||
         p3 < 0 ||
-        p4 < 0 ||
         !parseUnsigned(
             command.substring(p1 + 1, p2),
-            MENU_PAGE_COUNT - 1,
-            page) ||
-        !parseUnsigned(
-            command.substring(p2 + 1, p3),
-            LAYER_COUNT - 1,
-            layer)) {
+            PROFILE_COUNT - 1,
+            profile)) {
       cdcPrintln("ERR|BAD_MENUCFG");
       return;
     }
 
     String actionCsv =
         command.substring(
-            p3 + 1,
-            p4);
+            p2 + 1,
+            p3);
 
     int actionStart = 0;
 
@@ -4675,7 +4666,7 @@ static void handleCommand(String command) {
         return;
       }
 
-      mainMenuConfig.actions[page][slot] =
+      mainMenuConfig.actions[profile][slot] =
           static_cast<uint8_t>(action);
 
       actionStart =
@@ -4684,7 +4675,7 @@ static void handleCommand(String command) {
 
     String labelCsv =
         command.substring(
-            p4 + 1);
+            p3 + 1);
 
     int labelStart = 0;
 
@@ -4719,38 +4710,48 @@ static void handleCommand(String command) {
       }
 
       memset(
-          mainMenuConfig.labels[page][slot],
+          mainMenuConfig.labels[profile][slot],
           0,
           MENU_LABEL_MAX_LEN + 1);
 
       label.toCharArray(
-          mainMenuConfig.labels[page][slot],
+          mainMenuConfig.labels[profile][slot],
           MENU_LABEL_MAX_LEN + 1);
 
       labelStart =
           comma + 1;
     }
 
-    mainMenuConfig.layers[page] =
-        static_cast<uint8_t>(layer);
-
     saveMainMenuConfig();
-    renderMainMenu();
+
+    if (profile == activeProfile &&
+        !saverActive) {
+      renderMainMenu();
+    }
 
     cdcPrintln("OK|MENUCFG");
     return;
   }
 
   if (upper.startsWith("MENUBGBEGIN|")) {
-    int sep = command.indexOf('|');
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    uint16_t profile = 0;
     uint32_t bytes = 0;
 
-    if (sep < 0 ||
+    if (p1 < 0 ||
+        p2 < 0 ||
+        !parseUnsigned(
+            command.substring(p1 + 1, p2),
+            PROFILE_COUNT - 1,
+            profile) ||
         !parseUnsignedLong(
-            command.substring(sep + 1),
+            command.substring(p2 + 1),
             MENU_BACKGROUND_LIMIT_BYTES,
             bytes) ||
-        !beginMenuBackgroundUpload(bytes)) {
+        !beginMenuBackgroundUpload(
+            static_cast<uint8_t>(profile),
+            bytes)) {
       cdcPrintln("ERR|MENUBGBEGIN");
       return;
     }
@@ -4797,13 +4798,28 @@ static void handleCommand(String command) {
     return;
   }
 
-  if (upper == "MENUBGCLEAR") {
-    closeMenuUpload();
-    if (littleFsReady) {
-      LittleFS.remove(MENU_BG_TMP_PATH);
-      LittleFS.remove(MENU_BG_PATH);
+  if (upper.startsWith("MENUBGCLEAR|")) {
+    int sep = command.indexOf('|');
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln("ERR|MENUBGCLEAR");
+      return;
     }
-    renderMainMenu();
+
+    closeMenuUpload();
+    clearMainMenuBackground(
+        static_cast<uint8_t>(profile));
+
+    if (profile == activeProfile &&
+        !saverActive) {
+      renderMainMenu();
+    }
+
     cdcPrintln("OK|MENUBGCLEAR");
     return;
   }
@@ -4812,7 +4828,7 @@ static void handleCommand(String command) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
     int p3 = command.indexOf('|', p2 + 1);
-    uint16_t page = 0;
+    uint16_t profile = 0;
     uint16_t slot = 0;
     uint32_t bytes = 0;
 
@@ -4821,8 +4837,8 @@ static void handleCommand(String command) {
         p3 < 0 ||
         !parseUnsigned(
             command.substring(p1 + 1, p2),
-            MENU_PAGE_COUNT - 1,
-            page) ||
+            PROFILE_COUNT - 1,
+            profile) ||
         !parseUnsigned(
             command.substring(p2 + 1, p3),
             MENU_SLOT_COUNT - 1,
@@ -4832,7 +4848,7 @@ static void handleCommand(String command) {
             MENU_ICON_BYTES,
             bytes) ||
         !beginMenuIconUpload(
-            static_cast<uint8_t>(page),
+            static_cast<uint8_t>(profile),
             static_cast<uint8_t>(slot),
             bytes)) {
       cdcPrintln("ERR|MENUICONBEGIN");
@@ -4884,15 +4900,15 @@ static void handleCommand(String command) {
   if (upper.startsWith("MENUICONCLEAR|")) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
-    uint16_t page = 0;
+    uint16_t profile = 0;
     uint16_t slot = 0;
 
     if (p1 < 0 ||
         p2 < 0 ||
         !parseUnsigned(
             command.substring(p1 + 1, p2),
-            MENU_PAGE_COUNT - 1,
-            page) ||
+            PROFILE_COUNT - 1,
+            profile) ||
         !parseUnsigned(
             command.substring(p2 + 1),
             MENU_SLOT_COUNT - 1,
@@ -4902,9 +4918,14 @@ static void handleCommand(String command) {
     }
 
     clearMainMenuIcon(
-        static_cast<uint8_t>(page),
+        static_cast<uint8_t>(profile),
         static_cast<uint8_t>(slot));
-    renderMainMenu();
+
+    if (profile == activeProfile &&
+        !saverActive) {
+      renderMainMenu();
+    }
+
     cdcPrintln("OK|MENUICONCLEAR");
     return;
   }
