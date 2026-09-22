@@ -42,7 +42,7 @@ static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
 static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
-static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 1100UL * 1024UL;
+static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
