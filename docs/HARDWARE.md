@@ -73,7 +73,16 @@ full-screen GIF FPS depends on decode complexity and the 8-bit i8080 bus through
 Additional reserved PIXEL PRO pins:
 
 - D9..D11: three-way profile navigation switch.
+- D15: onboard blue USB status LED on LOLIN/WEMOS ESP32-S2 Mini.
 - D18: addressable RGB data.
+
+### Onboard USB status LED
+
+The board's onboard blue LED is driven from **D15 / GPIO15** and is separate
+from the 8-key WS2812 strip on D18.
+
+- PC/USB HID connection ready: LED stays **ON** continuously.
+- USB not enumerated / PC not connected: LED **blinks every 500 ms**.
 
 
 ## PIXEL PRO per-key RGB
