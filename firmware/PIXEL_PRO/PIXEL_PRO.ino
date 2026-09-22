@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.2";
+static constexpr char FW_VERSION[] = "1.8.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -44,17 +44,37 @@ static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
-// PIXEL PRO main-menu artwork. Each keymap profile owns one 2x4 menu,
-// matching the eight physical keys. Backgrounds and icons are JPEG assets.
-// Native 96x96 icon decode avoids the old 40x40 upscaling blur.
+// PIXEL PRO main-menu artwork. Each keymap profile owns one 2x4 icon grid.
+// Backgrounds stay JPEG; icons use a PIXEL binary (RGB565 + 1-bit alpha mask)
+// so transparent PNG/EXE icons are drawn directly over the wallpaper without
+// JPEG's black square/padding.
 static constexpr uint8_t MENU_SLOT_COUNT = 8;
 static constexpr uint8_t MENU_ICON_WIDTH = 96;
 static constexpr uint8_t MENU_ICON_HEIGHT = 96;
-static constexpr uint32_t MENU_ICON_MAX_BYTES = 24UL * 1024UL;
+static constexpr uint32_t MENU_ICON_HEADER_BYTES = 8UL;
+static constexpr uint32_t MENU_ICON_PIXEL_BYTES =
+    static_cast<uint32_t>(MENU_ICON_WIDTH) *
+    MENU_ICON_HEIGHT *
+    2UL;
+static constexpr uint32_t MENU_ICON_MASK_BYTES =
+    (static_cast<uint32_t>(MENU_ICON_WIDTH) *
+     MENU_ICON_HEIGHT +
+     7UL) /
+    8UL;
+static constexpr uint32_t MENU_ICON_FILE_BYTES =
+    MENU_ICON_HEADER_BYTES +
+    MENU_ICON_PIXEL_BYTES +
+    MENU_ICON_MASK_BYTES;
+static constexpr uint32_t MENU_ICON_MAX_BYTES =
+    MENU_ICON_FILE_BYTES;
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 44;
+
+static constexpr uint8_t MENU_OS_WINDOWS = 0;
+static constexpr uint8_t MENU_OS_MAC = 1;
+static constexpr uint8_t MENU_OS_LINUX = 2;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -175,6 +195,11 @@ static uint8_t menuUploadProfile = 0;
 static uint8_t menuUploadSlot = 0;
 static uint32_t menuUploadExpectedBytes = 0;
 static uint32_t menuUploadReceivedBytes = 0;
+static uint8_t menuHostOs = MENU_OS_WINDOWS;
+static uint16_t menuIconPixels[
+    MENU_ICON_WIDTH * MENU_ICON_HEIGHT] = {};
+static uint8_t menuIconMask[
+    MENU_ICON_MASK_BYTES] = {};
 
 static int16_t menuCpuLoad = -1;
 static int16_t menuCpuTemp = -1;
@@ -1132,7 +1157,7 @@ static void menuIconPath(
   snprintf(
       out,
       outSize,
-      temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.jpg",
+      temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.pic",
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 }
@@ -1255,276 +1280,294 @@ static bool renderMainMenuIcon(
           path,
           "r");
 
-  if (!file) {
+  if (!file ||
+      file.size() != MENU_ICON_FILE_BYTES) {
+    if (file) {
+      file.close();
+    }
     return false;
   }
 
-  JPEGDEC decoder;
-  bool valid =
-      decoder.open(
-          file,
-          mainMenuJpegDraw) &&
-      decoder.getWidth() == MENU_ICON_WIDTH &&
-      decoder.getHeight() == MENU_ICON_HEIGHT;
+  uint8_t header[MENU_ICON_HEADER_BYTES] = {};
 
-  if (!valid) {
-    decoder.close();
+  if (file.read(
+          header,
+          sizeof(header)) != sizeof(header) ||
+      header[0] != 'P' ||
+      header[1] != 'I' ||
+      header[2] != 'C' ||
+      header[3] != '1' ||
+      header[4] != MENU_ICON_WIDTH ||
+      header[5] != MENU_ICON_HEIGHT ||
+      header[6] != 1) {
     file.close();
     return false;
   }
 
-  int result =
-      decoder.decode(
-          x,
-          y,
-          0);
+  if (file.read(
+          reinterpret_cast<uint8_t *>(
+              menuIconPixels),
+          MENU_ICON_PIXEL_BYTES) !=
+          MENU_ICON_PIXEL_BYTES ||
+      file.read(
+          menuIconMask,
+          MENU_ICON_MASK_BYTES) !=
+          MENU_ICON_MASK_BYTES) {
+    file.close();
+    return false;
+  }
 
-  decoder.close();
   file.close();
 
-  return result != 0;
+  bool drewAny = false;
+
+  for (int row = 0;
+       row < MENU_ICON_HEIGHT;
+       ++row) {
+    int runStart = -1;
+
+    for (int col = 0;
+         col <= MENU_ICON_WIDTH;
+         ++col) {
+      bool opaque = false;
+
+      if (col < MENU_ICON_WIDTH) {
+        size_t index =
+            static_cast<size_t>(row) *
+                MENU_ICON_WIDTH +
+            col;
+
+        opaque =
+            (menuIconMask[index >> 3] &
+             static_cast<uint8_t>(
+                 0x80u >>
+                 (index & 7))) != 0;
+      }
+
+      if (opaque &&
+          runStart < 0) {
+        runStart = col;
+      } else if (!opaque &&
+                 runStart >= 0) {
+        int runLength =
+            col - runStart;
+
+        tft->draw16bitRGBBitmap(
+            x + runStart,
+            y + row,
+            &menuIconPixels[
+                row * MENU_ICON_WIDTH +
+                runStart],
+            runLength,
+            1);
+
+        drewAny = true;
+        runStart = -1;
+      }
+    }
+  }
+
+  return drewAny;
 }
 
-static void renderMainMenuStatusBar() {
+static void drawMainMenuDockTile(
+    int x,
+    int y,
+    uint16_t color) {
+  tft->fillRoundRect(
+      x,
+      y,
+      34,
+      32,
+      7,
+      color);
+}
+
+static void renderMainMenuOsDock() {
   if (!displayReady ||
       saverActive) {
     return;
   }
 
-  const int y =
+  const int dockW = 218;
+  const int dockH = 40;
+  const int dockX =
+      (TFT_WIDTH - dockW) / 2;
+  const int dockY =
       TFT_HEIGHT -
-      MENU_STATUS_HEIGHT;
+      MENU_STATUS_HEIGHT +
+      2;
 
-  const int marginX = 4;
-  const int gap = 4;
-  const int panelW =
-      (TFT_WIDTH -
-       marginX * 2 -
-       gap * 3) /
-      4;
+  tft->fillRoundRect(
+      dockX,
+      dockY,
+      dockW,
+      dockH,
+      10,
+      0x0841);
 
-  const int panelY =
-      y + 3;
+  tft->drawRoundRect(
+      dockX,
+      dockY,
+      dockW,
+      dockH,
+      10,
+      0x4208);
 
-  const int panelH =
-      MENU_STATUS_HEIGHT - 6;
+  const int tileY =
+      dockY + 4;
 
-  const uint16_t panelColor =
-      0x18C3;
+  const int gap = 8;
+  const int tileW = 34;
+  const int startX =
+      dockX + 8;
 
-  const uint16_t borderColor =
-      0x39E7;
+  int x0 = startX;
+  int x1 = x0 + tileW + gap;
+  int x2 = x1 + tileW + gap;
+  int x3 = x2 + tileW + gap;
+  int x4 = x3 + tileW + gap;
 
-  const uint16_t profileDot =
-      0xB81F;
+  uint16_t launcherColor =
+      menuHostOs == MENU_OS_MAC
+          ? 0x5AEB
+          : menuHostOs == MENU_OS_LINUX
+              ? 0xFD20
+              : 0x1B9F;
 
-  const uint16_t timeDot =
-      0xFFFF;
+  drawMainMenuDockTile(
+      x0,
+      tileY,
+      launcherColor);
 
-  const uint16_t cpuDot =
-      0x067F;
-
-  const uint16_t gpuDot =
-      0x07F0;
-
-  for (int col = 0;
-       col < 4;
-       ++col) {
-    int x =
-        marginX +
-        col *
-            (panelW + gap);
-
-    tft->fillRoundRect(
-        x,
-        panelY,
-        panelW,
-        panelH,
-        5,
-        panelColor);
-
-    tft->drawRoundRect(
-        x,
-        panelY,
-        panelW,
-        panelH,
-        5,
-        borderColor);
+  if (menuHostOs == MENU_OS_WINDOWS) {
+    // Windows logo.
+    tft->fillRect(
+        x0 + 8,
+        tileY + 7,
+        8,
+        8,
+        0xFFFF);
+    tft->fillRect(
+        x0 + 18,
+        tileY + 7,
+        8,
+        8,
+        0xFFFF);
+    tft->fillRect(
+        x0 + 8,
+        tileY + 17,
+        8,
+        8,
+        0xFFFF);
+    tft->fillRect(
+        x0 + 18,
+        tileY + 17,
+        8,
+        8,
+        0xFFFF);
+  } else {
+    tft->setTextSize(2);
+    tft->setTextColor(0xFFFF);
+    tft->setCursor(
+        x0 + 11,
+        tileY + 9);
+    tft->print(
+        menuHostOs == MENU_OS_MAC
+            ? "M"
+            : "L");
   }
 
-  char line[24] = {};
+  // Files / Finder.
+  drawMainMenuDockTile(
+      x1,
+      tileY,
+      0xFDE0);
+  tft->fillRect(
+      x1 + 7,
+      tileY + 12,
+      20,
+      13,
+      0xFFFF);
+  tft->fillRect(
+      x1 + 9,
+      tileY + 9,
+      9,
+      5,
+      0xFFFF);
 
+  // Browser.
+  drawMainMenuDockTile(
+      x2,
+      tileY,
+      0x241F);
+  tft->fillCircle(
+      x2 + 17,
+      tileY + 16,
+      10,
+      0xFFFF);
+  tft->fillCircle(
+      x2 + 17,
+      tileY + 16,
+      6,
+      0x1B9F);
+  tft->fillCircle(
+      x2 + 19,
+      tileY + 14,
+      2,
+      0x07E0);
+
+  // Terminal.
+  drawMainMenuDockTile(
+      x3,
+      tileY,
+      0x2104);
   tft->setTextSize(1);
   tft->setTextColor(0xFFFF);
+  tft->setCursor(
+      x3 + 8,
+      tileY + 12);
+  tft->print(">_");
 
-  int x0 = marginX;
+  // Settings.
+  drawMainMenuDockTile(
+      x4,
+      tileY,
+      0x6B4D);
+  tft->drawCircle(
+      x4 + 17,
+      tileY + 16,
+      8,
+      0xFFFF);
   tft->fillCircle(
-      x0 + 10,
-      panelY + 10,
+      x4 + 17,
+      tileY + 16,
       3,
-      profileDot);
-
-  tft->setCursor(
-      x0 + 18,
-      panelY + 6);
-  tft->print("Profile");
-
-  snprintf(
-      line,
-      sizeof(line),
-      "%02u/%02u",
-      static_cast<unsigned>(
-          activeProfile + 1),
-      static_cast<unsigned>(
-          PROFILE_COUNT));
-
-  tft->setCursor(
-      x0 + 18,
-      panelY + 21);
-  tft->print(line);
-
-  int x1 =
-      marginX +
-      panelW +
-      gap;
-
-  tft->fillCircle(
-      x1 + 10,
-      panelY + 10,
-      3,
-      timeDot);
-
-  if (menuPcStatusValid) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%02u-%02u",
-        static_cast<unsigned>(menuMonth),
-        static_cast<unsigned>(menuDay));
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 6);
-    tft->print(line);
-
-    snprintf(
-        line,
-        sizeof(line),
-        "%02u:%02u",
-        static_cast<unsigned>(menuHour),
-        static_cast<unsigned>(menuMinute));
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 21);
-    tft->print(line);
-  } else {
-    tft->setCursor(
-        x1 + 18,
-        panelY + 6);
-    tft->print("-- --");
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 21);
-    tft->print("--:--");
-  }
-
-  int x2 =
-      marginX +
-      (panelW + gap) * 2;
-
-  tft->fillCircle(
-      x2 + 10,
-      panelY + 10,
-      3,
-      cpuDot);
-
-  if (menuCpuLoad >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "CPU %d%%",
-        static_cast<int>(
-            menuCpuLoad));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "CPU --%%");
-  }
-
-  tft->setCursor(
-      x2 + 18,
-      panelY + 6);
-  tft->print(line);
-
-  if (menuCpuTemp >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%dC",
-        static_cast<int>(
-            menuCpuTemp));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "--C");
-  }
-
-  tft->setCursor(
-      x2 + 18,
-      panelY + 21);
-  tft->print(line);
-
-  int x3 =
-      marginX +
-      (panelW + gap) * 3;
-
-  tft->fillCircle(
-      x3 + 10,
-      panelY + 10,
-      3,
-      gpuDot);
-
-  if (menuGpuLoad >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "GPU %d%%",
-        static_cast<int>(
-            menuGpuLoad));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "GPU --%%");
-  }
-
-  tft->setCursor(
-      x3 + 18,
-      panelY + 6);
-  tft->print(line);
-
-  if (menuGpuTemp >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%dC",
-        static_cast<int>(
-            menuGpuTemp));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "--C");
-  }
-
-  tft->setCursor(
-      x3 + 18,
-      panelY + 21);
-  tft->print(line);
+      0xFFFF);
+  tft->drawLine(
+      x4 + 17,
+      tileY + 5,
+      x4 + 17,
+      tileY + 9,
+      0xFFFF);
+  tft->drawLine(
+      x4 + 17,
+      tileY + 23,
+      x4 + 17,
+      tileY + 27,
+      0xFFFF);
+  tft->drawLine(
+      x4 + 6,
+      tileY + 16,
+      x4 + 10,
+      tileY + 16,
+      0xFFFF);
+  tft->drawLine(
+      x4 + 24,
+      tileY + 16,
+      x4 + 28,
+      tileY + 16,
+      0xFFFF);
 }
 
 static void renderMainMenu() {
@@ -1541,12 +1584,12 @@ static void renderMainMenu() {
   renderMainMenuBackground(
       profile);
 
-  const int statusY =
+  const int dockY =
       TFT_HEIGHT -
       MENU_STATUS_HEIGHT;
 
   const int marginX = 10;
-  const int marginY = 6;
+  const int marginY = 5;
   const int gapX = 6;
   const int gapY = 4;
 
@@ -1557,7 +1600,7 @@ static void renderMainMenu() {
       4;
 
   const int cellH =
-      (statusY -
+      (dockY -
        marginY * 2 -
        gapY) /
       2;
@@ -1588,91 +1631,19 @@ static void renderMainMenu() {
             2;
 
     int iconY =
-        y + 3;
+        y +
+        (cellH -
+         MENU_ICON_HEIGHT) /
+            2;
 
-    bool drewIcon =
-        renderMainMenuIcon(
-            profile,
-            slot,
-            iconX,
-            iconY);
-
-    uint8_t action =
-        mainMenuConfig
-            .actions[profile][slot];
-
-    if (action > 0) {
-      const char *label =
-          mainMenuConfig
-              .labels[profile][slot];
-
-      char fallback[8] = {};
-
-      if (label[0] == '\0') {
-        snprintf(
-            fallback,
-            sizeof(fallback),
-            "A%02u",
-            static_cast<unsigned>(
-                action));
-
-        label =
-            fallback;
-      }
-
-      size_t len =
-          strnlen(
-              label,
-              MENU_LABEL_MAX_LEN);
-
-      int textWidth =
-          static_cast<int>(len) *
-          6;
-
-      int textX =
-          x +
-          max(
-              2,
-              (cellW -
-               textWidth) /
-                  2);
-
-      int textY =
-          drewIcon
-              ? y +
-                    cellH -
-                    13
-              : y +
-                    (cellH - 8) /
-                        2;
-
-      // eezBotFun-like floating label: no slot frame, just a tiny
-      // shadow under crisp white action text on top of the wallpaper.
-      tft->setTextSize(1);
-
-      tft->setTextColor(
-          0x0000);
-
-      tft->setCursor(
-          textX + 1,
-          textY + 1);
-
-      tft->print(
-          label);
-
-      tft->setTextColor(
-          0xFFFF);
-
-      tft->setCursor(
-          textX,
-          textY);
-
-      tft->print(
-          label);
-    }
+    renderMainMenuIcon(
+        profile,
+        slot,
+        iconX,
+        iconY);
   }
 
-  renderMainMenuStatusBar();
+  renderMainMenuOsDock();
 }
 
 static void closeMenuUpload() {
@@ -1741,8 +1712,7 @@ static bool beginMenuIconUpload(
   if (!littleFsReady ||
       profile >= PROFILE_COUNT ||
       slot >= MENU_SLOT_COUNT ||
-      expectedBytes < 4 ||
-      expectedBytes > MENU_ICON_MAX_BYTES) {
+      expectedBytes != MENU_ICON_FILE_BYTES) {
     return false;
   }
 
@@ -1763,27 +1733,46 @@ static bool beginMenuIconUpload(
       tempPath,
       sizeof(tempPath));
 
-  char legacyPath[24] = {};
+  char legacyJpeg[24] = {};
   snprintf(
-      legacyPath,
-      sizeof(legacyPath),
+      legacyJpeg,
+      sizeof(legacyJpeg),
+      "/mi%u_%u.jpg",
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(slot));
+
+  char legacyBin[24] = {};
+  snprintf(
+      legacyBin,
+      sizeof(legacyBin),
       "/mi%u_%u.bin",
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
-  LittleFS.remove(legacyPath);
+  LittleFS.remove(legacyJpeg);
+  LittleFS.remove(legacyBin);
 
-  size_t total = LittleFS.totalBytes();
-  size_t used = LittleFS.usedBytes();
-  size_t freeBytes = total > used ? total - used : 0;
+  size_t total =
+      LittleFS.totalBytes();
+  size_t used =
+      LittleFS.usedBytes();
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
 
-  if (expectedBytes + 1024 > freeBytes) {
+  if (expectedBytes + 1024 >
+      freeBytes) {
     return false;
   }
 
-  menuUploadFile = LittleFS.open(tempPath, "w");
+  menuUploadFile =
+      LittleFS.open(
+          tempPath,
+          "w");
+
   if (!menuUploadFile) {
     return false;
   }
@@ -1900,7 +1889,8 @@ static bool finishMenuIconUpload() {
   if (menuUploadKind != 2 ||
       !menuUploadFile ||
       menuUploadProfile >= PROFILE_COUNT ||
-      menuUploadReceivedBytes != menuUploadExpectedBytes) {
+      menuUploadReceivedBytes !=
+          MENU_ICON_FILE_BYTES) {
     closeMenuUpload();
     return false;
   }
@@ -1916,12 +1906,14 @@ static bool finishMenuIconUpload() {
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+
   menuIconPath(
       profile,
       slot,
       false,
       finalPath,
       sizeof(finalPath));
+
   menuIconPath(
       profile,
       slot,
@@ -1934,21 +1926,29 @@ static bool finishMenuIconUpload() {
           tempPath,
           "r");
 
-  bool valid =
-      false;
+  bool valid = false;
 
-  if (verify) {
-    JPEGDEC decoder;
+  if (verify &&
+      verify.size() ==
+          MENU_ICON_FILE_BYTES) {
+    uint8_t header[
+        MENU_ICON_HEADER_BYTES] = {};
 
     valid =
-        decoder.open(
-            verify,
-            mainMenuJpegDraw) &&
-        decoder.getWidth() == MENU_ICON_WIDTH &&
-        decoder.getHeight() == MENU_ICON_HEIGHT &&
-        verify.size() == menuUploadExpectedBytes;
+        verify.read(
+            header,
+            sizeof(header)) ==
+            sizeof(header) &&
+        header[0] == 'P' &&
+        header[1] == 'I' &&
+        header[2] == 'C' &&
+        header[3] == '1' &&
+        header[4] == MENU_ICON_WIDTH &&
+        header[5] == MENU_ICON_HEIGHT &&
+        header[6] == 1;
+  }
 
-    decoder.close();
+  if (verify) {
     verify.close();
   }
 
@@ -2020,17 +2020,26 @@ static void clearMainMenuIcon(
       tempPath,
       sizeof(tempPath));
 
-  char legacyPath[24] = {};
+  char legacyJpeg[24] = {};
   snprintf(
-      legacyPath,
-      sizeof(legacyPath),
+      legacyJpeg,
+      sizeof(legacyJpeg),
+      "/mi%u_%u.jpg",
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(slot));
+
+  char legacyBin[24] = {};
+  snprintf(
+      legacyBin,
+      sizeof(legacyBin),
       "/mi%u_%u.bin",
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
-  LittleFS.remove(legacyPath);
+  LittleFS.remove(legacyJpeg);
+  LittleFS.remove(legacyBin);
 }
 
 static KeyBinding resolveBinding(uint8_t layer, uint8_t keyIndex) {
@@ -5507,6 +5516,30 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("MENUOS|")) {
+    String os =
+        upper.substring(
+            String("MENUOS|").length());
+
+    if (os == "WIN") {
+      menuHostOs = MENU_OS_WINDOWS;
+    } else if (os == "MAC") {
+      menuHostOs = MENU_OS_MAC;
+    } else if (os == "LINUX") {
+      menuHostOs = MENU_OS_LINUX;
+    } else {
+      cdcPrintln("ERR|MENUOS");
+      return;
+    }
+
+    if (!saverActive) {
+      renderMainMenu();
+    }
+
+    cdcPrintln("OK|MENUOS");
+    return;
+  }
+
   if (upper == "MENUSHOW") {
     stopSaver();
     renderMainMenu();
@@ -6893,7 +6926,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0182);
+  USB.firmwareVersion(0x0183);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6907,7 +6940,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.2");
+  cdcPrintln("BOOT|PIXELPRO|1.8.3");
 }
 
 void loop() {
