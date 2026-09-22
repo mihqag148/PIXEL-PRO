@@ -3976,7 +3976,7 @@ static void handleCommand(String command) {
         !parseUnsignedLong(
             command.substring(
                 sep + 1),
-            PACKED_UPLOAD_LIMIT_BYTES - 1U,
+            PACKED_UPLOAD_LIMIT_BYTES,
             byteCount) ||
         byteCount < 26) {
       cdcPrintln(
