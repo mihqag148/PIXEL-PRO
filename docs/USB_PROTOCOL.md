@@ -276,7 +276,7 @@ The 1 MiB value in Lumi Macropad is a soft optimization target, not a hard firmw
 
 ## PIXEL packed animation (PXQ) v1.5.0 / v1.5.1
 
-PXQ was introduced in firmware 1.5.0. Firmware 1.5.2 raises the packed-media ceiling to 1100 KiB while keeping the decoder format backward compatible.
+PXQ was introduced in firmware 1.5.0. Firmware 1.5.2 raises the packed-media ceiling to 2 MiB while keeping the decoder format backward compatible.
 
 PIXEL PRO GIF media is converted on the PC into the PIXEL-specific `PXQ1` animation format. It follows the same compression ideas as QMK Quantum Painter without embedding QGF itself:
 
@@ -286,14 +286,14 @@ PIXEL PRO GIF media is converted on the PC into the PIXEL-specific `PXQ1` animat
 - Lumi Macropad 1.20.19 and newer generates new PIXEL media at RGB888 or RGB565 only; RGB565 is the color-quality floor
 - logical display canvas is always 480×320
 - new app-generated storage canvas is 480×320 or 360×240; 240×160 remains accepted only for older app payloads
-- packed payload may be up to 1100 KiB
+- packed payload may be up to 2 MiB
 
 Upload commands:
 - `SAVPXBEGIN|bytes`
 - `SAVPXDATA|offset|base64`
 - `SAVPXEND`
 
-The app chooses the highest-quality configuration that fits the 1100 KiB ceiling while preserving at least 360×240 and RGB565. Fill, Fit, Stretch, Tile, Center and Span are composed into the logical 480×320 canvas before packing. PIXEL GIF duration defaults to 10 seconds in the companion app.
+The app chooses the highest-quality configuration that fits the 2 MiB ceiling while preserving at least 360×240 and RGB565. Fill, Fit, Stretch, Tile, Center and Span are composed into the logical 480×320 canvas before packing. PIXEL GIF duration defaults to 10 seconds in the companion app.
 
 ## PIXEL RGB effects v1.5.0
 
@@ -323,3 +323,8 @@ Firmware 1.5.2 uses a custom 4 MB flash partition table optimized for persistent
 GIF/PXQ/JPEG payloads are persisted in flash LittleFS (for example `/screensaver.pxq`) and survive reset/power loss. PSRAM is never the persistent media store. It is used only as transient rendering/decode workspace. Direct GIF playback uses the 480×320 RGB565 PSRAM framebuffer when PSRAM is available; packed PXQ playback also allocates its line decode buffer from PSRAM with an internal-SRAM fallback.
 
 `MEM` flash usage remains the compiled sketch size versus physical flash-chip size. `SAVERINFO` reports the LittleFS media partition total/used/free values. These are intentionally different measurements.
+
+
+### PIXEL packed animation sizing v1.5.2
+
+The packed PXQ upload ceiling is 2 MiB. The 2.44 MiB LittleFS media partition leaves headroom for filesystem metadata and upload overhead. Lumi Macropad chooses candidates in this quality order: color depth first (RGB888 before RGB565), then higher FPS, then higher storage resolution (480×320 before 360×240 at the same FPS). RGB565 and 360×240 remain the hard quality floors for newly generated media.
