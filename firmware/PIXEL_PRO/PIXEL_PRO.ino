@@ -1685,8 +1685,17 @@ static bool beginMenuIconUpload(
       tempPath,
       sizeof(tempPath));
 
+  char legacyPath[24] = {};
+  snprintf(
+      legacyPath,
+      sizeof(legacyPath),
+      "/mi%u_%u.bin",
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(slot));
+
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
+  LittleFS.remove(legacyPath);
 
   size_t total = LittleFS.totalBytes();
   size_t used = LittleFS.usedBytes();
@@ -1933,8 +1942,17 @@ static void clearMainMenuIcon(
       tempPath,
       sizeof(tempPath));
 
+  char legacyPath[24] = {};
+  snprintf(
+      legacyPath,
+      sizeof(legacyPath),
+      "/mi%u_%u.bin",
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(slot));
+
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
+  LittleFS.remove(legacyPath);
 }
 
 static KeyBinding resolveBinding(uint8_t layer, uint8_t keyIndex) {
