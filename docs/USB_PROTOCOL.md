@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.5.1 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
+Firmware 1.5.2 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.5.1|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.5.2|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -276,14 +276,14 @@ The 1 MiB value in Lumi Macropad is a soft optimization target, not a hard firmw
 
 ## PIXEL packed animation (PXQ) v1.5.0 / v1.5.1
 
-PXQ was introduced in firmware 1.5.0. Firmware 1.5.1 raises the packed-media ceiling to 1100 KiB while keeping the decoder format backward compatible.
+PXQ was introduced in firmware 1.5.0. Firmware 1.5.2 raises the packed-media ceiling to 1100 KiB while keeping the decoder format backward compatible.
 
 PIXEL PRO GIF media is converted on the PC into the PIXEL-specific `PXQ1` animation format. It follows the same compression ideas as QMK Quantum Painter without embedding QGF itself:
 
 - delta frames: only changed row spans are stored after the first frame
 - RLE packets inside each changed span
 - decoder compatibility remains RGB888, RGB565, palette 256, palette 16, palette 4, palette 2
-- Lumi Macropad 1.20.x and newer generates new PIXEL media at RGB888, RGB565, or palette 256 only
+- Lumi Macropad 1.20.19 and newer generates new PIXEL media at RGB888 or RGB565 only; RGB565 is the color-quality floor
 - logical display canvas is always 480×320
 - new app-generated storage canvas is 480×320 or 360×240; 240×160 remains accepted only for older app payloads
 - packed payload may be up to 1100 KiB
@@ -293,7 +293,7 @@ Upload commands:
 - `SAVPXDATA|offset|base64`
 - `SAVPXEND`
 
-The app chooses the highest-quality configuration that fits the 1100 KiB ceiling while preserving at least 360×240 and palette 256. Fill, Fit, Stretch, Tile, Center and Span are composed into the logical 480×320 canvas before packing. PIXEL GIF duration defaults to 10 seconds in the companion app.
+The app chooses the highest-quality configuration that fits the 1100 KiB ceiling while preserving at least 360×240 and RGB565. Fill, Fit, Stretch, Tile, Center and Span are composed into the logical 480×320 canvas before packing. PIXEL GIF duration defaults to 10 seconds in the companion app.
 
 ## PIXEL RGB effects v1.5.0
 
@@ -310,3 +310,16 @@ Effect ids:
 - 9 Wave
 
 RGB colors and effect are stored per keymap profile. Effect speed remains global.
+
+
+## Flash media layout v1.5.2
+
+Firmware 1.5.2 uses a custom 4 MB flash partition table optimized for persistent media:
+
+- 20 KiB NVS for Preferences/keymap settings
+- 1.5 MiB factory application partition
+- 0x270000 bytes (2.44 MiB) flash filesystem partition for LittleFS media
+
+GIF/PXQ/JPEG payloads are persisted in flash LittleFS (for example `/screensaver.pxq`) and survive reset/power loss. PSRAM is never the persistent media store. It is used only as transient rendering/decode workspace. Direct GIF playback uses the 480×320 RGB565 PSRAM framebuffer when PSRAM is available; packed PXQ playback also allocates its line decode buffer from PSRAM with an internal-SRAM fallback.
+
+`MEM` flash usage remains the compiled sketch size versus physical flash-chip size. `SAVERINFO` reports the LittleFS media partition total/used/free values. These are intentionally different measurements.
