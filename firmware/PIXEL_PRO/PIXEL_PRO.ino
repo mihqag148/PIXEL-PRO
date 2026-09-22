@@ -1024,32 +1024,82 @@ static void saveMainMenuConfig() {
 static void loadMainMenuConfig() {
   setDefaultMainMenuConfig();
 
-  if (preferences.getUChar("menuver", 0) != MENU_STORAGE_VERSION ||
-      preferences.getBytesLength("menucfg") != sizeof(mainMenuConfig)) {
+  uint8_t storedVersion =
+      preferences.getUChar("menuver", 0);
+
+  size_t storedBytes =
+      preferences.getBytesLength("menucfg");
+
+  if (storedVersion == 3 &&
+      storedBytes == sizeof(LegacyMainMenuConfigV3)) {
+    LegacyMainMenuConfigV3 legacy = {};
+
+    if (preferences.getBytes(
+            "menucfg",
+            &legacy,
+            sizeof(legacy)) ==
+            sizeof(legacy) &&
+        legacy.version == 3) {
+      for (uint8_t profile = 0;
+           profile < PROFILE_COUNT;
+           ++profile) {
+        for (uint8_t slot = 0;
+             slot < MENU_SLOT_COUNT;
+             ++slot) {
+          mainMenuConfig.actions[profile][slot] =
+              legacy.actions[profile][slot];
+
+          memcpy(
+              mainMenuConfig.labels[profile][slot],
+              legacy.labels[profile][slot],
+              MENU_LABEL_MAX_LEN + 1);
+
+          mainMenuConfig.labels[profile][slot]
+              [MENU_LABEL_MAX_LEN] = '\0';
+        }
+      }
+
+      saveMainMenuConfig();
+      return;
+    }
+  }
+
+  if (storedVersion != MENU_STORAGE_VERSION ||
+      storedBytes != sizeof(mainMenuConfig)) {
     saveMainMenuConfig();
     return;
   }
 
   MainMenuConfig stored = {};
-  if (preferences.getBytes("menucfg", &stored, sizeof(stored)) !=
-          sizeof(stored) ||
+  if (preferences.getBytes(
+          "menucfg",
+          &stored,
+          sizeof(stored)) != sizeof(stored) ||
       stored.version != MENU_STORAGE_VERSION) {
     saveMainMenuConfig();
     return;
   }
 
-  for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
-    for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
+  for (uint8_t profile = 0;
+       profile < PROFILE_COUNT;
+       ++profile) {
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
       if (stored.actions[profile][slot] > ACTION_COUNT) {
         saveMainMenuConfig();
         return;
       }
 
-      stored.labels[profile][slot][MENU_LABEL_MAX_LEN] = '\0';
+      stored.labels[profile][slot]
+          [MENU_LABEL_MAX_LEN] = '\0';
     }
   }
 
-  memcpy(&mainMenuConfig, &stored, sizeof(mainMenuConfig));
+  memcpy(
+      &mainMenuConfig,
+      &stored,
+      sizeof(mainMenuConfig));
 }
 
 static void menuBackgroundPath(
@@ -1073,7 +1123,7 @@ static void menuIconPath(
   snprintf(
       out,
       outSize,
-      temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.bin",
+      temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.jpg",
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 }
@@ -1097,12 +1147,15 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
     return 0;
   }
 
-  for (int row = 0; row < draw->iHeight; ++row) {
+  for (int row = 0;
+       row < draw->iHeight;
+       ++row) {
     tft->draw16bitRGBBitmap(
         draw->x,
         draw->y + row,
         draw->pPixels +
-            static_cast<size_t>(row) * draw->iWidth,
+            static_cast<size_t>(row) *
+                draw->iWidth,
         width,
         1);
   }
@@ -1110,7 +1163,8 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
   return 1;
 }
 
-static bool renderMainMenuBackground(uint8_t profile) {
+static bool renderMainMenuBackground(
+    uint8_t profile) {
   if (profile >= PROFILE_COUNT) {
     profile = 0;
   }
@@ -1128,14 +1182,20 @@ static bool renderMainMenuBackground(uint8_t profile) {
     return false;
   }
 
-  File file = LittleFS.open(path, "r");
+  File file =
+      LittleFS.open(
+          path,
+          "r");
+
   if (!file) {
     tft->fillScreen(RGB565_BLACK);
     return false;
   }
 
   JPEGDEC decoder;
-  if (!decoder.open(file, mainMenuJpegDraw) ||
+  if (!decoder.open(
+          file,
+          mainMenuJpegDraw) ||
       decoder.getWidth() != TFT_WIDTH ||
       decoder.getHeight() != TFT_HEIGHT) {
     decoder.close();
@@ -1145,14 +1205,259 @@ static bool renderMainMenuBackground(uint8_t profile) {
   }
 
   tft->fillScreen(RGB565_BLACK);
-  int result = decoder.decode(0, 0, 0);
+
+  int result =
+      decoder.decode(
+          0,
+          0,
+          0);
+
   decoder.close();
   file.close();
+
   return result != 0;
 }
 
+static bool renderMainMenuIcon(
+    uint8_t profile,
+    uint8_t slot,
+    int x,
+    int y) {
+  if (!littleFsReady ||
+      profile >= PROFILE_COUNT ||
+      slot >= MENU_SLOT_COUNT) {
+    return false;
+  }
+
+  char path[24] = {};
+  menuIconPath(
+      profile,
+      slot,
+      false,
+      path,
+      sizeof(path));
+
+  if (!LittleFS.exists(path)) {
+    return false;
+  }
+
+  File file =
+      LittleFS.open(
+          path,
+          "r");
+
+  if (!file) {
+    return false;
+  }
+
+  JPEGDEC decoder;
+  bool valid =
+      decoder.open(
+          file,
+          mainMenuJpegDraw) &&
+      decoder.getWidth() == MENU_ICON_WIDTH &&
+      decoder.getHeight() == MENU_ICON_HEIGHT;
+
+  if (!valid) {
+    decoder.close();
+    file.close();
+    return false;
+  }
+
+  int result =
+      decoder.decode(
+          x,
+          y,
+          0);
+
+  decoder.close();
+  file.close();
+
+  return result != 0;
+}
+
+static void renderMainMenuStatusBar() {
+  if (!displayReady ||
+      saverActive) {
+    return;
+  }
+
+  const int y =
+      TFT_HEIGHT -
+      MENU_STATUS_HEIGHT;
+
+  tft->fillRect(
+      0,
+      y,
+      TFT_WIDTH,
+      MENU_STATUS_HEIGHT,
+      0x0000);
+
+  tft->fillRect(
+      0,
+      y,
+      TFT_WIDTH,
+      1,
+      0x7BEF);
+
+  tft->fillRect(
+      118,
+      y + 5,
+      1,
+      MENU_STATUS_HEIGHT - 10,
+      0x4208);
+
+  tft->fillRect(
+      235,
+      y + 5,
+      1,
+      MENU_STATUS_HEIGHT - 10,
+      0x4208);
+
+  tft->fillRect(
+      356,
+      y + 5,
+      1,
+      MENU_STATUS_HEIGHT - 10,
+      0x4208);
+
+  tft->setTextSize(1);
+  tft->setTextColor(0xFFFF);
+
+  char line[32] = {};
+
+  snprintf(
+      line,
+      sizeof(line),
+      "Profile:%02u/%02u",
+      static_cast<unsigned>(activeProfile + 1),
+      static_cast<unsigned>(PROFILE_COUNT));
+
+  tft->setCursor(
+      8,
+      y + 9);
+  tft->print(line);
+
+  tft->setTextColor(0xBDF7);
+  tft->setCursor(
+      8,
+      y + 31);
+  tft->print("PIXEL PRO");
+
+  tft->setTextColor(0xFFFF);
+
+  if (menuPcStatusValid) {
+    snprintf(
+        line,
+        sizeof(line),
+        "%02u-%02u",
+        static_cast<unsigned>(menuMonth),
+        static_cast<unsigned>(menuDay));
+
+    tft->setCursor(
+        137,
+        y + 9);
+    tft->print(line);
+
+    snprintf(
+        line,
+        sizeof(line),
+        "%02u:%02u",
+        static_cast<unsigned>(menuHour),
+        static_cast<unsigned>(menuMinute));
+
+    tft->setCursor(
+        137,
+        y + 31);
+    tft->print(line);
+  } else {
+    tft->setCursor(
+        137,
+        y + 9);
+    tft->print("-- --");
+
+    tft->setCursor(
+        137,
+        y + 31);
+    tft->print("--:--");
+  }
+
+  if (menuCpuLoad >= 0) {
+    snprintf(
+        line,
+        sizeof(line),
+        "CPU %d%%",
+        static_cast<int>(menuCpuLoad));
+  } else {
+    snprintf(
+        line,
+        sizeof(line),
+        "CPU --%%");
+  }
+
+  tft->setCursor(
+      253,
+      y + 9);
+  tft->print(line);
+
+  if (menuCpuTemp >= 0) {
+    snprintf(
+        line,
+        sizeof(line),
+        "%dC",
+        static_cast<int>(menuCpuTemp));
+  } else {
+    snprintf(
+        line,
+        sizeof(line),
+        "--C");
+  }
+
+  tft->setCursor(
+      253,
+      y + 31);
+  tft->print(line);
+
+  if (menuGpuLoad >= 0) {
+    snprintf(
+        line,
+        sizeof(line),
+        "GPU %d%%",
+        static_cast<int>(menuGpuLoad));
+  } else {
+    snprintf(
+        line,
+        sizeof(line),
+        "GPU --%%");
+  }
+
+  tft->setCursor(
+      374,
+      y + 9);
+  tft->print(line);
+
+  if (menuGpuTemp >= 0) {
+    snprintf(
+        line,
+        sizeof(line),
+        "%dC",
+        static_cast<int>(menuGpuTemp));
+  } else {
+    snprintf(
+        line,
+        sizeof(line),
+        "--C");
+  }
+
+  tft->setCursor(
+      374,
+      y + 31);
+  tft->print(line);
+}
+
 static void renderMainMenu() {
-  if (!displayReady || saverActive) {
+  if (!displayReady ||
+      saverActive) {
     return;
   }
 
@@ -1161,22 +1466,48 @@ static void renderMainMenu() {
           ? activeProfile
           : 0;
 
-  renderMainMenuBackground(profile);
+  renderMainMenuBackground(
+      profile);
+
+  const int statusY =
+      TFT_HEIGHT -
+      MENU_STATUS_HEIGHT;
 
   const int marginX = 12;
-  const int marginY = 10;
+  const int marginY = 8;
   const int gapX = 8;
   const int gapY = 8;
-  const int cellW = (TFT_WIDTH - marginX * 2 - gapX * 3) / 4;
-  const int cellH = (TFT_HEIGHT - marginY * 2 - gapY * 2) / 3;
-  const int iconSize = min(cellW - 6, cellH - 6);
-  uint16_t scaledLine[120] = {};
 
-  for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
-    int col = slot % 4;
-    int row = slot / 4;
-    int x = marginX + col * (cellW + gapX);
-    int y = marginY + row * (cellH + gapY);
+  const int cellW =
+      (TFT_WIDTH -
+       marginX * 2 -
+       gapX * 3) /
+      4;
+
+  const int cellH =
+      (statusY -
+       marginY * 2 -
+       gapY) /
+      2;
+
+  for (uint8_t slot = 0;
+       slot < MENU_SLOT_COUNT;
+       ++slot) {
+    int col =
+        slot % 4;
+
+    int row =
+        slot / 4;
+
+    int x =
+        marginX +
+        col *
+            (cellW + gapX);
+
+    int y =
+        marginY +
+        row *
+            (cellH + gapY);
 
     tft->drawRoundRect(
         x,
@@ -1186,87 +1517,47 @@ static void renderMainMenu() {
         9,
         0x7BEF);
 
-    char path[24] = {};
-    menuIconPath(
-        profile,
-        slot,
-        false,
-        path,
-        sizeof(path));
+    int iconX =
+        x +
+        (cellW -
+         MENU_ICON_WIDTH) /
+            2;
 
-    bool drewIcon = false;
-    if (littleFsReady && LittleFS.exists(path)) {
-      File icon = LittleFS.open(path, "r");
+    int iconY =
+        y +
+        (cellH -
+         MENU_ICON_HEIGHT) /
+            2;
 
-      if (icon &&
-          icon.size() == MENU_ICON_BYTES &&
-          icon.read(
-              reinterpret_cast<uint8_t *>(menuIconBuffer),
-              MENU_ICON_BYTES) == MENU_ICON_BYTES) {
-        int iconX =
-            x +
-            (cellW - iconSize) / 2;
-
-        int iconY =
-            y +
-            (cellH - iconSize) / 2;
-
-        for (int targetY = 0;
-             targetY < iconSize;
-             ++targetY) {
-          int sourceY =
-              targetY *
-              MENU_ICON_HEIGHT /
-              iconSize;
-
-          const uint16_t *source =
-              menuIconBuffer +
-              static_cast<size_t>(sourceY) *
-                  MENU_ICON_WIDTH;
-
-          for (int targetX = 0;
-               targetX < iconSize;
-               ++targetX) {
-            int sourceX =
-                targetX *
-                MENU_ICON_WIDTH /
-                iconSize;
-
-            scaledLine[targetX] =
-                source[sourceX];
-          }
-
-          tft->draw16bitRGBBitmap(
-              iconX,
-              iconY + targetY,
-              scaledLine,
-              iconSize,
-              1);
-        }
-
-        drewIcon = true;
-      }
-
-      if (icon) {
-        icon.close();
-      }
-    }
+    bool drewIcon =
+        renderMainMenuIcon(
+            profile,
+            slot,
+            iconX,
+            iconY);
 
     uint8_t action =
-        mainMenuConfig.actions[profile][slot];
+        mainMenuConfig
+            .actions[profile][slot];
 
-    if (!drewIcon && action > 0) {
+    if (!drewIcon &&
+        action > 0) {
       const char *label =
-          mainMenuConfig.labels[profile][slot];
+          mainMenuConfig
+              .labels[profile][slot];
 
       char fallback[8] = {};
+
       if (label[0] == '\0') {
         snprintf(
             fallback,
             sizeof(fallback),
             "A%02u",
-            static_cast<unsigned>(action));
-        label = fallback;
+            static_cast<unsigned>(
+                action));
+
+        label =
+            fallback;
       }
 
       size_t len =
@@ -1278,25 +1569,32 @@ static void renderMainMenu() {
       tft->setTextColor(0xFFFF);
 
       int textWidth =
-          static_cast<int>(len) * 6;
+          static_cast<int>(len) *
+          6;
 
       int textX =
           x +
           max(
               4,
-              (cellW - textWidth) / 2);
+              (cellW -
+               textWidth) /
+                  2);
 
       int textY =
           y +
-          (cellH - 8) / 2;
+          (cellH - 8) /
+              2;
 
       tft->setCursor(
           textX,
           textY);
 
-      tft->print(label);
+      tft->print(
+          label);
     }
   }
+
+  renderMainMenuStatusBar();
 }
 
 static void closeMenuUpload() {
