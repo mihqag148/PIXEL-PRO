@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.0";
+static constexpr char FW_VERSION[] = "1.8.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -87,6 +87,11 @@ static constexpr int8_t TFT_D7 = 40;
 static constexpr uint8_t RGB_PIN = 18;
 static constexpr uint8_t RGB_LED_COUNT = 8;
 static constexpr uint8_t RGB_STORAGE_VERSION = 1;
+
+// LOLIN/WEMOS ESP32-S2 Mini onboard blue status LED.
+// GPIO15 is active-high and is independent from the per-key WS2812 strip.
+static constexpr uint8_t STATUS_LED_PIN = 15;
+static constexpr uint32_t STATUS_LED_BLINK_MS = 500;
 // Physical LED order requested by PIXEL PRO layout:
 // LED1=K1, LED2=K2, LED3=K3, LED4=K4,
 // LED5=K8, LED6=K7, LED7=K6, LED8=K5.
@@ -202,6 +207,10 @@ static uint8_t baseLayer = 0;
 static int8_t momentaryLayer = -1;
 static uint8_t toggledLayerMask = 0;
 static String cdcLine;
+
+static bool statusLedState = false;
+static bool statusLedUsbReady = false;
+static uint32_t statusLedLastToggleAt = 0;
 
 enum SaverPixelFormat : uint8_t {
   SAVER_NONE = 0,
@@ -6701,6 +6710,65 @@ static void initKeys() {
   }
 }
 
+static void initStatusLed() {
+  pinMode(
+      STATUS_LED_PIN,
+      OUTPUT);
+
+  statusLedState = false;
+  statusLedUsbReady = false;
+  statusLedLastToggleAt = millis();
+
+  digitalWrite(
+      STATUS_LED_PIN,
+      LOW);
+}
+
+static void pollStatusLed() {
+  const bool usbReady =
+      HID.ready();
+
+  const uint32_t now =
+      millis();
+
+  if (usbReady) {
+    if (!statusLedUsbReady ||
+        !statusLedState) {
+      statusLedState = true;
+      digitalWrite(
+          STATUS_LED_PIN,
+          HIGH);
+    }
+
+    statusLedUsbReady = true;
+    return;
+  }
+
+  if (statusLedUsbReady) {
+    statusLedUsbReady = false;
+    statusLedState = false;
+    statusLedLastToggleAt = now;
+
+    digitalWrite(
+        STATUS_LED_PIN,
+        LOW);
+
+    return;
+  }
+
+  if (now - statusLedLastToggleAt >=
+      STATUS_LED_BLINK_MS) {
+    statusLedLastToggleAt = now;
+    statusLedState = !statusLedState;
+
+    digitalWrite(
+        STATUS_LED_PIN,
+        statusLedState
+            ? HIGH
+            : LOW);
+  }
+}
+
 static void pollKeys() {
   const uint32_t now = millis();
 
@@ -6731,6 +6799,7 @@ void setup() {
   rgbStrip.clear();
   applyRgbProfile();
 
+  initStatusLed();
   initKeys();
   initDisplay();
 
@@ -6755,7 +6824,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0180);
+  USB.firmwareVersion(0x0181);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6769,7 +6838,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.0");
+  cdcPrintln("BOOT|PIXELPRO|1.8.1");
 }
 
 void loop() {
@@ -6777,6 +6846,7 @@ void loop() {
   pollCdc();
   pollRgbEffect();
   pollSaver();
+  pollStatusLed();
 
   if (bootloaderArmed &&
       static_cast<int32_t>(
