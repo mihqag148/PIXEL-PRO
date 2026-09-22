@@ -2049,6 +2049,48 @@ static bool parseUnsigned(
   return true;
 }
 
+static bool parseSigned(
+    const String &text,
+    int16_t minValue,
+    int16_t maxValue,
+    int16_t &value) {
+  if (text.length() == 0) {
+    return false;
+  }
+
+  size_t start = 0;
+  if (text[0] == '-') {
+    start = 1;
+  }
+
+  if (start >= text.length()) {
+    return false;
+  }
+
+  for (size_t i = start; i < text.length(); ++i) {
+    if (!isDigit(text[i])) {
+      return false;
+    }
+  }
+
+  long parsed =
+      strtol(
+          text.c_str(),
+          nullptr,
+          10);
+
+  if (parsed < minValue ||
+      parsed > maxValue) {
+    return false;
+  }
+
+  value =
+      static_cast<int16_t>(
+          parsed);
+
+  return true;
+}
+
 static bool parseUnsignedLong(
     const String &text,
     uint32_t maxValue,
@@ -4738,7 +4780,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -4910,6 +4952,110 @@ static void handleCommand(String command) {
 
   if (upper == "PANEL") {
     cdcPrintln("PANEL|ILI9486|60|0|60");
+    return;
+  }
+
+  if (upper == "PCCLEAR") {
+    menuCpuLoad = -1;
+    menuCpuTemp = -1;
+    menuGpuLoad = -1;
+    menuGpuTemp = -1;
+    menuMonth = 0;
+    menuDay = 0;
+    menuHour = 0;
+    menuMinute = 0;
+    menuPcStatusValid = false;
+
+    if (!saverActive) {
+      renderMainMenuStatusBar();
+    }
+
+    return;
+  }
+
+  if (upper.startsWith("PCMON|")) {
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    int p3 = command.indexOf('|', p2 + 1);
+    int p4 = command.indexOf('|', p3 + 1);
+    int p5 = command.indexOf('|', p4 + 1);
+    int p6 = command.indexOf('|', p5 + 1);
+    int p7 = command.indexOf('|', p6 + 1);
+    int p8 = command.indexOf('|', p7 + 1);
+
+    int16_t cpuLoad = -1;
+    int16_t cpuTemp = -1;
+    int16_t gpuLoad = -1;
+    int16_t gpuTemp = -1;
+
+    uint16_t month = 0;
+    uint16_t day = 0;
+    uint16_t hour = 0;
+    uint16_t minute = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        p4 < 0 ||
+        p5 < 0 ||
+        p6 < 0 ||
+        p7 < 0 ||
+        p8 < 0 ||
+        !parseSigned(
+            command.substring(p1 + 1, p2),
+            -1,
+            100,
+            cpuLoad) ||
+        !parseSigned(
+            command.substring(p2 + 1, p3),
+            -1,
+            150,
+            cpuTemp) ||
+        !parseSigned(
+            command.substring(p3 + 1, p4),
+            -1,
+            100,
+            gpuLoad) ||
+        !parseSigned(
+            command.substring(p4 + 1, p5),
+            -1,
+            150,
+            gpuTemp) ||
+        !parseUnsigned(
+            command.substring(p5 + 1, p6),
+            12,
+            month) ||
+        month < 1 ||
+        !parseUnsigned(
+            command.substring(p6 + 1, p7),
+            31,
+            day) ||
+        day < 1 ||
+        !parseUnsigned(
+            command.substring(p7 + 1, p8),
+            23,
+            hour) ||
+        !parseUnsigned(
+            command.substring(p8 + 1),
+            59,
+            minute)) {
+      return;
+    }
+
+    menuCpuLoad = cpuLoad;
+    menuCpuTemp = cpuTemp;
+    menuGpuLoad = gpuLoad;
+    menuGpuTemp = gpuTemp;
+    menuMonth = static_cast<uint8_t>(month);
+    menuDay = static_cast<uint8_t>(day);
+    menuHour = static_cast<uint8_t>(hour);
+    menuMinute = static_cast<uint8_t>(minute);
+    menuPcStatusValid = true;
+
+    if (!saverActive) {
+      renderMainMenuStatusBar();
+    }
+
     return;
   }
 
@@ -5180,7 +5326,7 @@ static void handleCommand(String command) {
             slot) ||
         !parseUnsignedLong(
             command.substring(p3 + 1),
-            MENU_ICON_BYTES,
+            MENU_ICON_MAX_BYTES,
             bytes) ||
         !beginMenuIconUpload(
             static_cast<uint8_t>(profile),
@@ -6591,7 +6737,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0170);
+  USB.firmwareVersion(0x0180);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6605,7 +6751,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.7.0");
+  cdcPrintln("BOOT|PIXELPRO|1.8.0");
 }
 
 void loop() {
