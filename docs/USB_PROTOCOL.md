@@ -413,3 +413,37 @@ consume no extra runtime framebuffer RAM. App/EXE assignment reuses the Lumi
 Action Run mechanism and can extract the associated EXE icon. Firmware scales
 the 40x40 icon source to nearly fill its action frame while preserving the
 icon-only behavior.
+
+
+## 8-key HQ Main Menu + status strip (firmware 1.8.0)
+
+Firmware 1.8.0 changes the PIXEL PRO Main Menu to match the eight physical
+keys and the eezBotFun-style screen layout used as the visual reference:
+
+- Main Menu is 2 rows x 4 action icons (8 slots total), still stored per
+  Keymap Profile 01..20 and independent of keyboard layers.
+- The former third icon row is replaced by a fixed bottom status strip showing
+  active profile, PC date/time, CPU load/temperature, and GPU load/temperature.
+- The companion app sends the status strip telemetry with:
+  `PCMON|cpuLoad|cpuTemp|gpuLoad|gpuTemp|month|day|hour|minute`.
+  Unknown sensor values are sent as -1. `PCCLEAR` clears the telemetry.
+- `PCMON` is advertised in the firmware capability list.
+
+High-quality icons:
+
+- `MENUICONBEGIN|<profile>|<slot>|<bytes>` now accepts a JPEG icon for
+  slot 0..7, up to 24 KiB.
+- Icon dimensions must be exactly 96x96. Firmware validates the JPEG and
+  decodes it directly at native size, removing the old 40x40-to-large-frame
+  upscaling blur.
+- Companion app 1.23.0 extracts a high-resolution EXE icon when available,
+  trims transparent padding, preserves aspect ratio, and normalizes both
+  EXE icons and user-selected custom images through the same 96x96 pipeline.
+- Changing the Main Menu action dropdown now replaces the complete visual
+  assignment too: a Run/EXE action receives that app's icon; a non-app action
+  clears the previous app icon and falls back to the current action name.
+- Existing firmware 1.7.0 12-slot profile mappings migrate by preserving
+  slots 1..8 and dropping the former third row.
+
+Background behavior remains per keymap profile with Blur, Opacity, and
+Fill/Fit/Stretch preparation in Lumi Macropad before the 480x320 JPEG upload.
