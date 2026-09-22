@@ -44,9 +44,8 @@ static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
-// PIXEL PRO main-menu artwork. Background is a static JPEG only. Icons are
-// tiny raw RGB565 tiles so four 3x4 menus fit alongside a 2 MiB screensaver.
-static constexpr uint8_t MENU_PAGE_COUNT = 4;
+// PIXEL PRO main-menu artwork. Each keymap profile owns one 3x4 menu.
+// Backgrounds are static JPEGs; icons are compact raw RGB565 tiles.
 static constexpr uint8_t MENU_SLOT_COUNT = 12;
 static constexpr uint8_t MENU_ICON_WIDTH = 40;
 static constexpr uint8_t MENU_ICON_HEIGHT = 40;
@@ -54,7 +53,7 @@ static constexpr uint32_t MENU_ICON_BYTES =
     static_cast<uint32_t>(MENU_ICON_WIDTH) * MENU_ICON_HEIGHT * 2UL;
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
-static constexpr uint8_t MENU_STORAGE_VERSION = 2;
+static constexpr uint8_t MENU_STORAGE_VERSION = 3;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -69,8 +68,6 @@ static constexpr char JPEG_PATH[] = "/screensaver.jpg";
 static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
 static constexpr char PACKED_PATH[] = "/screensaver.pxq";
 static constexpr char PACKED_TMP_PATH[] = "/screensaver_pxq.tmp";
-static constexpr char MENU_BG_PATH[] = "/menu_bg.jpg";
-static constexpr char MENU_BG_TMP_PATH[] = "/menu_bg.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -124,9 +121,8 @@ struct KeyState {
 
 struct __attribute__((packed)) MainMenuConfig {
   uint8_t version;
-  uint8_t layers[MENU_PAGE_COUNT];
-  uint8_t actions[MENU_PAGE_COUNT][MENU_SLOT_COUNT];
-  char labels[MENU_PAGE_COUNT][MENU_SLOT_COUNT][MENU_LABEL_MAX_LEN + 1];
+  uint8_t actions[PROFILE_COUNT][MENU_SLOT_COUNT];
+  char labels[PROFILE_COUNT][MENU_SLOT_COUNT][MENU_LABEL_MAX_LEN + 1];
 };
 
 USBHID HID;
@@ -163,7 +159,7 @@ static String macros[MACRO_COUNT];
 static MainMenuConfig mainMenuConfig = {};
 static File menuUploadFile;
 static uint8_t menuUploadKind = 0;  // 1=background, 2=icon
-static uint8_t menuUploadPage = 0;
+static uint8_t menuUploadProfile = 0;
 static uint8_t menuUploadSlot = 0;
 static uint32_t menuUploadExpectedBytes = 0;
 static uint32_t menuUploadReceivedBytes = 0;
