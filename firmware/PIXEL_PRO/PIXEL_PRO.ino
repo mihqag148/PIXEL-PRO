@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.1";
+static constexpr char FW_VERSION[] = "1.8.2";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -54,7 +54,7 @@ static constexpr uint32_t MENU_ICON_MAX_BYTES = 24UL * 1024UL;
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
-static constexpr uint8_t MENU_STATUS_HEIGHT = 54;
+static constexpr uint8_t MENU_STATUS_HEIGHT = 44;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -1295,65 +1295,104 @@ static void renderMainMenuStatusBar() {
       TFT_HEIGHT -
       MENU_STATUS_HEIGHT;
 
-  tft->fillRect(
-      0,
-      y,
-      TFT_WIDTH,
-      MENU_STATUS_HEIGHT,
-      0x0000);
+  const int marginX = 4;
+  const int gap = 4;
+  const int panelW =
+      (TFT_WIDTH -
+       marginX * 2 -
+       gap * 3) /
+      4;
 
-  tft->fillRect(
-      0,
-      y,
-      TFT_WIDTH,
-      1,
-      0x7BEF);
+  const int panelY =
+      y + 3;
 
-  tft->fillRect(
-      118,
-      y + 5,
-      1,
-      MENU_STATUS_HEIGHT - 10,
-      0x4208);
+  const int panelH =
+      MENU_STATUS_HEIGHT - 6;
 
-  tft->fillRect(
-      235,
-      y + 5,
-      1,
-      MENU_STATUS_HEIGHT - 10,
-      0x4208);
+  const uint16_t panelColor =
+      0x18C3;
 
-  tft->fillRect(
-      356,
-      y + 5,
-      1,
-      MENU_STATUS_HEIGHT - 10,
-      0x4208);
+  const uint16_t borderColor =
+      0x39E7;
+
+  const uint16_t profileDot =
+      0xB81F;
+
+  const uint16_t timeDot =
+      0xFFFF;
+
+  const uint16_t cpuDot =
+      0x067F;
+
+  const uint16_t gpuDot =
+      0x07F0;
+
+  for (int col = 0;
+       col < 4;
+       ++col) {
+    int x =
+        marginX +
+        col *
+            (panelW + gap);
+
+    tft->fillRoundRect(
+        x,
+        panelY,
+        panelW,
+        panelH,
+        5,
+        panelColor);
+
+    tft->drawRoundRect(
+        x,
+        panelY,
+        panelW,
+        panelH,
+        5,
+        borderColor);
+  }
+
+  char line[24] = {};
 
   tft->setTextSize(1);
   tft->setTextColor(0xFFFF);
 
-  char line[32] = {};
+  int x0 = marginX;
+  tft->fillCircle(
+      x0 + 10,
+      panelY + 10,
+      3,
+      profileDot);
+
+  tft->setCursor(
+      x0 + 18,
+      panelY + 6);
+  tft->print("Profile");
 
   snprintf(
       line,
       sizeof(line),
-      "Profile:%02u/%02u",
-      static_cast<unsigned>(activeProfile + 1),
-      static_cast<unsigned>(PROFILE_COUNT));
+      "%02u/%02u",
+      static_cast<unsigned>(
+          activeProfile + 1),
+      static_cast<unsigned>(
+          PROFILE_COUNT));
 
   tft->setCursor(
-      8,
-      y + 9);
+      x0 + 18,
+      panelY + 21);
   tft->print(line);
 
-  tft->setTextColor(0xBDF7);
-  tft->setCursor(
-      8,
-      y + 31);
-  tft->print("PIXEL PRO");
+  int x1 =
+      marginX +
+      panelW +
+      gap;
 
-  tft->setTextColor(0xFFFF);
+  tft->fillCircle(
+      x1 + 10,
+      panelY + 10,
+      3,
+      timeDot);
 
   if (menuPcStatusValid) {
     snprintf(
@@ -1364,8 +1403,8 @@ static void renderMainMenuStatusBar() {
         static_cast<unsigned>(menuDay));
 
     tft->setCursor(
-        137,
-        y + 9);
+        x1 + 18,
+        panelY + 6);
     tft->print(line);
 
     snprintf(
@@ -1376,27 +1415,38 @@ static void renderMainMenuStatusBar() {
         static_cast<unsigned>(menuMinute));
 
     tft->setCursor(
-        137,
-        y + 31);
+        x1 + 18,
+        panelY + 21);
     tft->print(line);
   } else {
     tft->setCursor(
-        137,
-        y + 9);
+        x1 + 18,
+        panelY + 6);
     tft->print("-- --");
 
     tft->setCursor(
-        137,
-        y + 31);
+        x1 + 18,
+        panelY + 21);
     tft->print("--:--");
   }
+
+  int x2 =
+      marginX +
+      (panelW + gap) * 2;
+
+  tft->fillCircle(
+      x2 + 10,
+      panelY + 10,
+      3,
+      cpuDot);
 
   if (menuCpuLoad >= 0) {
     snprintf(
         line,
         sizeof(line),
         "CPU %d%%",
-        static_cast<int>(menuCpuLoad));
+        static_cast<int>(
+            menuCpuLoad));
   } else {
     snprintf(
         line,
@@ -1405,8 +1455,8 @@ static void renderMainMenuStatusBar() {
   }
 
   tft->setCursor(
-      253,
-      y + 9);
+      x2 + 18,
+      panelY + 6);
   tft->print(line);
 
   if (menuCpuTemp >= 0) {
@@ -1414,7 +1464,8 @@ static void renderMainMenuStatusBar() {
         line,
         sizeof(line),
         "%dC",
-        static_cast<int>(menuCpuTemp));
+        static_cast<int>(
+            menuCpuTemp));
   } else {
     snprintf(
         line,
@@ -1423,16 +1474,27 @@ static void renderMainMenuStatusBar() {
   }
 
   tft->setCursor(
-      253,
-      y + 31);
+      x2 + 18,
+      panelY + 21);
   tft->print(line);
+
+  int x3 =
+      marginX +
+      (panelW + gap) * 3;
+
+  tft->fillCircle(
+      x3 + 10,
+      panelY + 10,
+      3,
+      gpuDot);
 
   if (menuGpuLoad >= 0) {
     snprintf(
         line,
         sizeof(line),
         "GPU %d%%",
-        static_cast<int>(menuGpuLoad));
+        static_cast<int>(
+            menuGpuLoad));
   } else {
     snprintf(
         line,
@@ -1441,8 +1503,8 @@ static void renderMainMenuStatusBar() {
   }
 
   tft->setCursor(
-      374,
-      y + 9);
+      x3 + 18,
+      panelY + 6);
   tft->print(line);
 
   if (menuGpuTemp >= 0) {
@@ -1450,7 +1512,8 @@ static void renderMainMenuStatusBar() {
         line,
         sizeof(line),
         "%dC",
-        static_cast<int>(menuGpuTemp));
+        static_cast<int>(
+            menuGpuTemp));
   } else {
     snprintf(
         line,
@@ -1459,8 +1522,8 @@ static void renderMainMenuStatusBar() {
   }
 
   tft->setCursor(
-      374,
-      y + 31);
+      x3 + 18,
+      panelY + 21);
   tft->print(line);
 }
 
@@ -1482,10 +1545,10 @@ static void renderMainMenu() {
       TFT_HEIGHT -
       MENU_STATUS_HEIGHT;
 
-  const int marginX = 12;
-  const int marginY = 8;
-  const int gapX = 8;
-  const int gapY = 8;
+  const int marginX = 10;
+  const int marginY = 6;
+  const int gapX = 6;
+  const int gapY = 4;
 
   const int cellW =
       (TFT_WIDTH -
@@ -1518,14 +1581,6 @@ static void renderMainMenu() {
         row *
             (cellH + gapY);
 
-    tft->drawRoundRect(
-        x,
-        y,
-        cellW,
-        cellH,
-        9,
-        0x7BEF);
-
     int iconX =
         x +
         (cellW -
@@ -1533,10 +1588,7 @@ static void renderMainMenu() {
             2;
 
     int iconY =
-        y +
-        (cellH -
-         MENU_ICON_HEIGHT) /
-            2;
+        y + 3;
 
     bool drewIcon =
         renderMainMenuIcon(
@@ -1549,8 +1601,7 @@ static void renderMainMenu() {
         mainMenuConfig
             .actions[profile][slot];
 
-    if (!drewIcon &&
-        action > 0) {
+    if (action > 0) {
       const char *label =
           mainMenuConfig
               .labels[profile][slot];
@@ -1574,9 +1625,6 @@ static void renderMainMenu() {
               label,
               MENU_LABEL_MAX_LEN);
 
-      tft->setTextSize(1);
-      tft->setTextColor(0xFFFF);
-
       int textWidth =
           static_cast<int>(len) *
           6;
@@ -1584,15 +1632,36 @@ static void renderMainMenu() {
       int textX =
           x +
           max(
-              4,
+              2,
               (cellW -
                textWidth) /
                   2);
 
       int textY =
-          y +
-          (cellH - 8) /
-              2;
+          drewIcon
+              ? y +
+                    cellH -
+                    13
+              : y +
+                    (cellH - 8) /
+                        2;
+
+      // eezBotFun-like floating label: no slot frame, just a tiny
+      // shadow under crisp white action text on top of the wallpaper.
+      tft->setTextSize(1);
+
+      tft->setTextColor(
+          0x0000);
+
+      tft->setCursor(
+          textX + 1,
+          textY + 1);
+
+      tft->print(
+          label);
+
+      tft->setTextColor(
+          0xFFFF);
 
       tft->setCursor(
           textX,
@@ -6824,7 +6893,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0181);
+  USB.firmwareVersion(0x0182);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6838,7 +6907,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.1");
+  cdcPrintln("BOOT|PIXELPRO|1.8.2");
 }
 
 void loop() {
