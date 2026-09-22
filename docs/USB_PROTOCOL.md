@@ -235,7 +235,7 @@ The firmware then enables the Arduino-ESP32 DTR/RTS ROM-boot sequence for five s
 
 ## PIXEL PRO media v1.4.0
 
-The display refresh configuration remains approximately 60 Hz. PIXEL GIF uploads are capped at 1 MiB by firmware; the app preserves GIF canvas resolution and reduces temporal frame density between 60 and 20 FPS when needed. Static images are prepared as high-quality JPEG on the PC and decoded directly on-device without upscaling.
+Firmware 1.4.0 introduced the approximately 60 Hz media path and an initial 1 MiB app-side GIF optimization target. Later direct-GIF builds made upload sizing capacity-based. Static images are prepared as high-quality JPEG on the PC and decoded directly on-device without upscaling.
 
 JPEG upload:
 - `SAVJPGBEGIN|bytes|width|height`
@@ -274,7 +274,9 @@ The active effect is stored per keymap profile. Speed is global.
 The 1 MiB value in Lumi Macropad is a soft optimization target, not a hard firmware rejection limit. Firmware accepts a larger direct GIF when it fits the LittleFS media partition. Uploaded and persisted GIFs always use Center/no-upscale mode: small GIFs are never enlarged, while oversized GIFs are reduced only as needed to fit the 480×320 display.
 
 
-## PIXEL packed animation (PXQ) v1.5.0
+## PIXEL packed animation (PXQ) v1.5.0 / v1.5.1
+
+PXQ was introduced in firmware 1.5.0. Firmware 1.5.1 raises the packed-media ceiling to 1100 KiB while keeping the decoder format backward compatible.
 
 PIXEL PRO GIF media is converted on the PC into the PIXEL-specific `PXQ1` animation format. It follows the same compression ideas as QMK Quantum Painter without embedding QGF itself:
 
