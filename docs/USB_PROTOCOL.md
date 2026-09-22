@@ -1,12 +1,12 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.5.0 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
+Firmware 1.5.1 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
 
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.5.0|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,RGB_PER_KEY,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.5.1|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -235,7 +235,7 @@ The firmware then enables the Arduino-ESP32 DTR/RTS ROM-boot sequence for five s
 
 ## PIXEL PRO media v1.4.0
 
-The display refresh configuration remains approximately 60 Hz. PIXEL GIF uploads are capped at 1 MiB by firmware; the app preserves GIF canvas resolution and reduces temporal frame density between 60 and 20 FPS when needed. Static images are prepared as high-quality JPEG on the PC and decoded directly on-device without upscaling.
+Firmware 1.4.0 introduced the approximately 60 Hz media path and an initial 1 MiB app-side GIF optimization target. Later direct-GIF builds made upload sizing capacity-based. Static images are prepared as high-quality JPEG on the PC and decoded directly on-device without upscaling.
 
 JPEG upload:
 - `SAVJPGBEGIN|bytes|width|height`
@@ -274,23 +274,26 @@ The active effect is stored per keymap profile. Speed is global.
 The 1 MiB value in Lumi Macropad is a soft optimization target, not a hard firmware rejection limit. Firmware accepts a larger direct GIF when it fits the LittleFS media partition. Uploaded and persisted GIFs always use Center/no-upscale mode: small GIFs are never enlarged, while oversized GIFs are reduced only as needed to fit the 480×320 display.
 
 
-## PIXEL packed animation (PXQ) v1.5.0
+## PIXEL packed animation (PXQ) v1.5.0 / v1.5.1
+
+PXQ was introduced in firmware 1.5.0. Firmware 1.5.1 raises the packed-media ceiling to 1100 KiB while keeping the decoder format backward compatible.
 
 PIXEL PRO GIF media is converted on the PC into the PIXEL-specific `PXQ1` animation format. It follows the same compression ideas as QMK Quantum Painter without embedding QGF itself:
 
 - delta frames: only changed row spans are stored after the first frame
 - RLE packets inside each changed span
-- color modes: RGB888, RGB565, palette 256, palette 16, palette 4, palette 2
+- decoder compatibility remains RGB888, RGB565, palette 256, palette 16, palette 4, palette 2
+- Lumi Macropad 1.20.x and newer generates new PIXEL media at RGB888, RGB565, or palette 256 only
 - logical display canvas is always 480×320
-- storage canvas may be 480×320, 360×240, or 240×160 and is scaled by firmware to 480×320
-- packed payload must be strictly smaller than 1 MiB
+- new app-generated storage canvas is 480×320 or 360×240; 240×160 remains accepted only for older app payloads
+- packed payload may be up to 1100 KiB
 
 Upload commands:
 - `SAVPXBEGIN|bytes`
 - `SAVPXDATA|offset|base64`
 - `SAVPXEND`
 
-The app chooses the highest-quality configuration that satisfies the hard size cap. Fill and Center are composed into the logical 480×320 canvas before packing.
+The app chooses the highest-quality configuration that fits the 1100 KiB ceiling while preserving at least 360×240 and palette 256. Fill, Fit, Stretch, Tile, Center and Span are composed into the logical 480×320 canvas before packing. PIXEL GIF duration defaults to 10 seconds in the companion app.
 
 ## PIXEL RGB effects v1.5.0
 
