@@ -388,3 +388,28 @@ slot now also stores a short action label (up to 16 ASCII characters).
 - Companion app 1.21.1 integrates Main Menu editing into Home and adds
   background opacity in addition to brightness. Opacity/brightness are baked
   into the uploaded static 480×320 JPEG, so no extra runtime RAM is required.
+
+
+## Profile Main Menu protocol (firmware 1.7.0)
+
+Firmware 1.7.0 binds Main Menu state to the active keymap profile (0..19)
+instead of the active layer. Layer changes no longer select or redraw a
+different menu.
+
+- `MENUCFG|<profile>|<actionsCSV>|<labelsCSV>` stores 12 Lumi Action IDs and
+  12 short labels for one keymap profile.
+- `GET_MENUCFG|<profile>` returns that profile's menu configuration.
+- `MENUBGBEGIN|<profile>|<bytes>`, `MENUBGDATA`, and `MENUBGEND` upload
+  one 480x320 JPEG background for a profile.
+- `MENUBGCLEAR|<profile>` removes that profile's background.
+- `MENUICONBEGIN|<profile>|<slot>|3200`, `MENUICONDATA`, and
+  `MENUICONEND` upload one 40x40 RGB565 source icon.
+- `MENUICONCLEAR|<profile>|<slot>` removes one icon.
+- `MENUSHOW` renders the active profile's menu immediately.
+
+The companion app 1.22.0 prepares static backgrounds with per-profile Blur,
+Opacity, and Fill/Fit/Stretch settings before upload. These effects therefore
+consume no extra runtime framebuffer RAM. App/EXE assignment reuses the Lumi
+Action Run mechanism and can extract the associated EXE icon. Firmware scales
+the 40x40 icon source to nearly fill its action frame while preserving the
+icon-only behavior.
