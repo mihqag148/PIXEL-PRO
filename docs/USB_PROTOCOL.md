@@ -451,3 +451,23 @@ Fill/Fit/Stretch preparation in Lumi Macropad before the 480x320 JPEG upload.
 ### v1.8.2 visual layout
 
 PIXEL PRO Main Menu uses two rows of four app/action icons with a small action-name label under each icon and a four-part bottom status strip (profile, date/time, CPU, GPU), matching the eezBotFun-style reference layout. Slot card outlines were removed so the wallpaper remains visible.
+
+
+## PIXEL PRO Main Menu OS dock / transparent icons
+
+Firmware 1.8.3 uses transparent 96x96 Main Menu icon assets instead of
+black-backed JPEG tiles. The app uploads a PIXEL icon file containing:
+
+- 8-byte header: `PIC1`, width, height, version, reserved.
+- 96x96 RGB565 pixels.
+- 1-bit opacity mask (1 = draw pixel, 0 = keep wallpaper).
+
+The host announces the connected desktop OS before showing the menu:
+
+`MENUOS|WIN`
+`MENUOS|MAC`
+`MENUOS|LINUX`
+
+A valid OS command returns `OK|MENUOS`. The bottom Main Menu row is then
+drawn as an OS-style launcher dock. Main Menu app/action names are not drawn
+on the device screen; the eight main slots are icon-only.
