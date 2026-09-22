@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.5.3";
+static constexpr char FW_VERSION[] = "1.6.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -44,6 +44,17 @@ static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
+// PIXEL PRO main-menu artwork. Background is a static JPEG only. Icons are
+// tiny raw RGB565 tiles so four 3x4 menus fit alongside a 2 MiB screensaver.
+static constexpr uint8_t MENU_PAGE_COUNT = 4;
+static constexpr uint8_t MENU_SLOT_COUNT = 12;
+static constexpr uint8_t MENU_ICON_WIDTH = 40;
+static constexpr uint8_t MENU_ICON_HEIGHT = 40;
+static constexpr uint32_t MENU_ICON_BYTES =
+    static_cast<uint32_t>(MENU_ICON_WIDTH) * MENU_ICON_HEIGHT * 2UL;
+static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
+static constexpr uint8_t MENU_STORAGE_VERSION = 1;
+
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
 // original full-resolution GIF file instead.
@@ -57,6 +68,8 @@ static constexpr char JPEG_PATH[] = "/screensaver.jpg";
 static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
 static constexpr char PACKED_PATH[] = "/screensaver.pxq";
 static constexpr char PACKED_TMP_PATH[] = "/screensaver_pxq.tmp";
+static constexpr char MENU_BG_PATH[] = "/menu_bg.jpg";
+static constexpr char MENU_BG_TMP_PATH[] = "/menu_bg.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -108,6 +121,12 @@ struct KeyState {
   uint32_t changedAt;
 };
 
+struct __attribute__((packed)) MainMenuConfig {
+  uint8_t version;
+  uint8_t layers[MENU_PAGE_COUNT];
+  uint8_t actions[MENU_PAGE_COUNT][MENU_SLOT_COUNT];
+};
+
 USBHID HID;
 USBHIDKeyboard Keyboard;
 USBHIDConsumerControl ConsumerControl;
@@ -139,6 +158,14 @@ static KeyState keyState[KEY_COUNT] = {};
 static KeyBinding keymap[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
 static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
+static MainMenuConfig mainMenuConfig = {};
+static File menuUploadFile;
+static uint8_t menuUploadKind = 0;  // 1=background, 2=icon
+static uint8_t menuUploadPage = 0;
+static uint8_t menuUploadSlot = 0;
+static uint32_t menuUploadExpectedBytes = 0;
+static uint32_t menuUploadReceivedBytes = 0;
+static uint16_t menuIconBuffer[MENU_ICON_WIDTH * MENU_ICON_HEIGHT] = {};
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
 // PIXEL effects: 0 rainbow, 1 purple ping-pong, 2 orange blink,
@@ -966,6 +993,440 @@ static uint8_t currentLayer() {
   }
 
   return baseLayer;
+}
+
+
+static void setDefaultMainMenuConfig() {
+  memset(&mainMenuConfig, 0, sizeof(mainMenuConfig));
+  mainMenuConfig.version = MENU_STORAGE_VERSION;
+
+  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
+    mainMenuConfig.layers[page] = page < LAYER_COUNT ? page : 0;
+  }
+}
+
+static void saveMainMenuConfig() {
+  mainMenuConfig.version = MENU_STORAGE_VERSION;
+  preferences.putUChar("menuver", MENU_STORAGE_VERSION);
+  preferences.putBytes("menucfg", &mainMenuConfig, sizeof(mainMenuConfig));
+}
+
+static void loadMainMenuConfig() {
+  setDefaultMainMenuConfig();
+
+  if (preferences.getUChar("menuver", 0) != MENU_STORAGE_VERSION ||
+      preferences.getBytesLength("menucfg") != sizeof(mainMenuConfig)) {
+    saveMainMenuConfig();
+    return;
+  }
+
+  MainMenuConfig stored = {};
+  if (preferences.getBytes("menucfg", &stored, sizeof(stored)) !=
+      sizeof(stored) ||
+      stored.version != MENU_STORAGE_VERSION) {
+    saveMainMenuConfig();
+    return;
+  }
+
+  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
+    if (stored.layers[page] >= LAYER_COUNT) {
+      saveMainMenuConfig();
+      return;
+    }
+
+    for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
+      if (stored.actions[page][slot] > ACTION_COUNT) {
+        saveMainMenuConfig();
+        return;
+      }
+    }
+  }
+
+  memcpy(&mainMenuConfig, &stored, sizeof(mainMenuConfig));
+}
+
+static uint8_t mainMenuPageForLayer(uint8_t layer) {
+  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
+    if (mainMenuConfig.layers[page] == layer) {
+      return page;
+    }
+  }
+
+  return 0;
+}
+
+static void menuIconPath(
+    uint8_t page,
+    uint8_t slot,
+    bool temporary,
+    char *out,
+    size_t outSize) {
+  snprintf(
+      out,
+      outSize,
+      temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.bin",
+      static_cast<unsigned>(page),
+      static_cast<unsigned>(slot));
+}
+
+static int mainMenuJpegDraw(JPEGDRAW *draw) {
+  if (draw == nullptr ||
+      draw->pPixels == nullptr ||
+      !displayReady) {
+    return 0;
+  }
+
+  int width =
+      draw->iWidthUsed > 0
+          ? draw->iWidthUsed
+          : draw->iWidth;
+
+  if (draw->x < 0 ||
+      draw->y < 0 ||
+      draw->x + width > TFT_WIDTH ||
+      draw->y + draw->iHeight > TFT_HEIGHT) {
+    return 0;
+  }
+
+  for (int row = 0; row < draw->iHeight; ++row) {
+    tft->draw16bitRGBBitmap(
+        draw->x,
+        draw->y + row,
+        draw->pPixels +
+            static_cast<size_t>(row) * draw->iWidth,
+        width,
+        1);
+  }
+
+  return 1;
+}
+
+static bool renderMainMenuBackground() {
+  if (!littleFsReady ||
+      !LittleFS.exists(MENU_BG_PATH)) {
+    tft->fillScreen(RGB565_BLACK);
+    return false;
+  }
+
+  File file = LittleFS.open(MENU_BG_PATH, "r");
+  if (!file) {
+    tft->fillScreen(RGB565_BLACK);
+    return false;
+  }
+
+  JPEGDEC decoder;
+  if (!decoder.open(file, mainMenuJpegDraw) ||
+      decoder.getWidth() != TFT_WIDTH ||
+      decoder.getHeight() != TFT_HEIGHT) {
+    decoder.close();
+    file.close();
+    tft->fillScreen(RGB565_BLACK);
+    return false;
+  }
+
+  tft->fillScreen(RGB565_BLACK);
+  int result = decoder.decode(0, 0, 0);
+  decoder.close();
+  file.close();
+  return result != 0;
+}
+
+static void renderMainMenu() {
+  if (!displayReady || saverActive) {
+    return;
+  }
+
+  renderMainMenuBackground();
+
+  const uint8_t page = mainMenuPageForLayer(currentLayer());
+  const int marginX = 12;
+  const int marginY = 10;
+  const int gapX = 8;
+  const int gapY = 8;
+  const int cellW = (TFT_WIDTH - marginX * 2 - gapX * 3) / 4;
+  const int cellH = (TFT_HEIGHT - marginY * 2 - gapY * 2) / 3;
+
+  tft->setTextSize(1);
+
+  for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
+    int col = slot % 4;
+    int row = slot / 4;
+    int x = marginX + col * (cellW + gapX);
+    int y = marginY + row * (cellH + gapY);
+
+    tft->drawRoundRect(
+        x,
+        y,
+        cellW,
+        cellH,
+        9,
+        0x7BEF);
+
+    char path[24] = {};
+    menuIconPath(page, slot, false, path, sizeof(path));
+
+    bool drewIcon = false;
+    if (littleFsReady && LittleFS.exists(path)) {
+      File icon = LittleFS.open(path, "r");
+
+      if (icon &&
+          icon.size() == MENU_ICON_BYTES &&
+          icon.read(
+              reinterpret_cast<uint8_t *>(menuIconBuffer),
+              MENU_ICON_BYTES) == MENU_ICON_BYTES) {
+        int iconX = x + (cellW - MENU_ICON_WIDTH) / 2;
+        int iconY = y + 14;
+
+        tft->draw16bitRGBBitmap(
+            iconX,
+            iconY,
+            menuIconBuffer,
+            MENU_ICON_WIDTH,
+            MENU_ICON_HEIGHT);
+        drewIcon = true;
+      }
+
+      if (icon) {
+        icon.close();
+      }
+    }
+
+    uint8_t action = mainMenuConfig.actions[page][slot];
+    char label[8] = {};
+    if (action > 0) {
+      snprintf(label, sizeof(label), "A%02u", static_cast<unsigned>(action));
+    } else {
+      snprintf(label, sizeof(label), "--");
+    }
+
+    tft->setTextColor(0xFFFF);
+    tft->setCursor(
+        x + (cellW / 2) - (static_cast<int>(strlen(label)) * 3),
+        y + cellH - 18);
+    tft->print(label);
+
+    if (!drewIcon && action > 0) {
+      tft->setTextSize(2);
+      tft->setCursor(
+          x + (cellW / 2) - 18,
+          y + 29);
+      tft->print(label);
+      tft->setTextSize(1);
+    }
+  }
+}
+
+static void closeMenuUpload() {
+  if (menuUploadFile) {
+    menuUploadFile.close();
+  }
+
+  menuUploadKind = 0;
+  menuUploadExpectedBytes = 0;
+  menuUploadReceivedBytes = 0;
+}
+
+static bool beginMenuBackgroundUpload(uint32_t expectedBytes) {
+  if (!littleFsReady ||
+      expectedBytes < 4 ||
+      expectedBytes > MENU_BACKGROUND_LIMIT_BYTES) {
+    return false;
+  }
+
+  closeMenuUpload();
+
+  // Replacing artwork must reclaim the previous asset first. This prevents
+  // an old menu image from blocking its replacement when LittleFS is full.
+  LittleFS.remove(MENU_BG_TMP_PATH);
+  LittleFS.remove(MENU_BG_PATH);
+
+  size_t total = LittleFS.totalBytes();
+  size_t used = LittleFS.usedBytes();
+  size_t freeBytes = total > used ? total - used : 0;
+
+  if (expectedBytes + 4096 > freeBytes) {
+    return false;
+  }
+
+  menuUploadFile = LittleFS.open(MENU_BG_TMP_PATH, "w");
+  if (!menuUploadFile) {
+    return false;
+  }
+
+  menuUploadKind = 1;
+  menuUploadExpectedBytes = expectedBytes;
+  menuUploadReceivedBytes = 0;
+  return true;
+}
+
+static bool beginMenuIconUpload(
+    uint8_t page,
+    uint8_t slot,
+    uint32_t expectedBytes) {
+  if (!littleFsReady ||
+      page >= MENU_PAGE_COUNT ||
+      slot >= MENU_SLOT_COUNT ||
+      expectedBytes != MENU_ICON_BYTES) {
+    return false;
+  }
+
+  closeMenuUpload();
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuIconPath(page, slot, false, finalPath, sizeof(finalPath));
+  menuIconPath(page, slot, true, tempPath, sizeof(tempPath));
+
+  LittleFS.remove(tempPath);
+  LittleFS.remove(finalPath);
+
+  size_t total = LittleFS.totalBytes();
+  size_t used = LittleFS.usedBytes();
+  size_t freeBytes = total > used ? total - used : 0;
+
+  if (expectedBytes + 1024 > freeBytes) {
+    return false;
+  }
+
+  menuUploadFile = LittleFS.open(tempPath, "w");
+  if (!menuUploadFile) {
+    return false;
+  }
+
+  menuUploadKind = 2;
+  menuUploadPage = page;
+  menuUploadSlot = slot;
+  menuUploadExpectedBytes = expectedBytes;
+  menuUploadReceivedBytes = 0;
+  return true;
+}
+
+static bool writeMenuAssetChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (menuUploadKind == 0 ||
+      !menuUploadFile ||
+      offset != menuUploadReceivedBytes) {
+    return false;
+  }
+
+  uint8_t decoded[1100] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<const unsigned char *>(encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      menuUploadReceivedBytes + decodedLength >
+          menuUploadExpectedBytes) {
+    return false;
+  }
+
+  if (menuUploadFile.write(decoded, decodedLength) != decodedLength) {
+    return false;
+  }
+
+  menuUploadReceivedBytes += decodedLength;
+  return true;
+}
+
+static bool finishMenuBackgroundUpload() {
+  if (menuUploadKind != 1 ||
+      !menuUploadFile ||
+      menuUploadReceivedBytes != menuUploadExpectedBytes) {
+    closeMenuUpload();
+    return false;
+  }
+
+  menuUploadFile.flush();
+  menuUploadFile.close();
+
+  File file = LittleFS.open(MENU_BG_TMP_PATH, "r");
+  if (!file) {
+    closeMenuUpload();
+    return false;
+  }
+
+  JPEGDEC decoder;
+  bool valid =
+      decoder.open(file, mainMenuJpegDraw) &&
+      decoder.getWidth() == TFT_WIDTH &&
+      decoder.getHeight() == TFT_HEIGHT &&
+      file.size() == menuUploadExpectedBytes;
+
+  decoder.close();
+  file.close();
+
+  if (!valid) {
+    LittleFS.remove(MENU_BG_TMP_PATH);
+    closeMenuUpload();
+    return false;
+  }
+
+  if (!LittleFS.rename(MENU_BG_TMP_PATH, MENU_BG_PATH)) {
+    LittleFS.remove(MENU_BG_TMP_PATH);
+    closeMenuUpload();
+    return false;
+  }
+
+  closeMenuUpload();
+  renderMainMenu();
+  return true;
+}
+
+static bool finishMenuIconUpload() {
+  if (menuUploadKind != 2 ||
+      !menuUploadFile ||
+      menuUploadReceivedBytes != MENU_ICON_BYTES) {
+    closeMenuUpload();
+    return false;
+  }
+
+  uint8_t page = menuUploadPage;
+  uint8_t slot = menuUploadSlot;
+
+  menuUploadFile.flush();
+  menuUploadFile.close();
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuIconPath(page, slot, false, finalPath, sizeof(finalPath));
+  menuIconPath(page, slot, true, tempPath, sizeof(tempPath));
+
+  File verify = LittleFS.open(tempPath, "r");
+  bool valid = verify && verify.size() == MENU_ICON_BYTES;
+  if (verify) {
+    verify.close();
+  }
+
+  if (!valid ||
+      !LittleFS.rename(tempPath, finalPath)) {
+    LittleFS.remove(tempPath);
+    closeMenuUpload();
+    return false;
+  }
+
+  closeMenuUpload();
+  renderMainMenu();
+  return true;
+}
+
+static void clearMainMenuIcon(uint8_t page, uint8_t slot) {
+  if (!littleFsReady ||
+      page >= MENU_PAGE_COUNT ||
+      slot >= MENU_SLOT_COUNT) {
+    return;
+  }
+
+  char path[24] = {};
+  menuIconPath(page, slot, false, path, sizeof(path));
+  LittleFS.remove(path);
 }
 
 static KeyBinding resolveBinding(uint8_t layer, uint8_t keyIndex) {
@@ -3536,7 +3997,7 @@ static void stopSaver() {
   }
 
   if (wasActive && displayReady) {
-    tft->fillScreen(RGB565_BLACK);
+    renderMainMenu();
   }
 }
 
@@ -3769,7 +4230,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -3778,7 +4239,15 @@ static String deviceHello() {
 
 static void sendMemoryInfo() {
   const uint32_t flashTotal = ESP.getFlashChipSize();
-  const uint32_t flashUsed = ESP.getSketchSize();
+  const uint32_t fileSystemUsed =
+      littleFsReady
+          ? static_cast<uint32_t>(LittleFS.usedBytes())
+          : 0;
+  const uint32_t sketchUsed = ESP.getSketchSize();
+  const uint32_t flashUsed =
+      sketchUsed + fileSystemUsed > flashTotal
+          ? flashTotal
+          : sketchUsed + fileSystemUsed;
 
   const uint32_t sramTotal = ESP.getHeapSize();
   const uint32_t sramFree = ESP.getFreeHeap();
@@ -3933,6 +4402,272 @@ static void handleCommand(String command) {
 
   if (upper == "PANEL") {
     cdcPrintln("PANEL|ILI9486|60|0|60");
+    return;
+  }
+
+  if (upper.startsWith("GET_MENUCFG|")) {
+    uint16_t page = 0;
+    int sep = command.indexOf('|');
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(sep + 1),
+            MENU_PAGE_COUNT - 1,
+            page)) {
+      cdcPrintln("ERR|BAD_MENU_PAGE");
+      return;
+    }
+
+    String out = "MENUCFG|";
+    out += String(page);
+    out += '|';
+    out += String(mainMenuConfig.layers[page]);
+    out += '|';
+
+    for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
+      if (slot) out += ',';
+      out += String(mainMenuConfig.actions[page][slot]);
+    }
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper.startsWith("MENUCFG|")) {
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    int p3 = command.indexOf('|', p2 + 1);
+
+    uint16_t page = 0;
+    uint16_t layer = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        !parseUnsigned(
+            command.substring(p1 + 1, p2),
+            MENU_PAGE_COUNT - 1,
+            page) ||
+        !parseUnsigned(
+            command.substring(p2 + 1, p3),
+            LAYER_COUNT - 1,
+            layer)) {
+      cdcPrintln("ERR|BAD_MENUCFG");
+      return;
+    }
+
+    String csv = command.substring(p3 + 1);
+    int start = 0;
+
+    for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
+      int comma = csv.indexOf(',', start);
+      bool last = slot == MENU_SLOT_COUNT - 1;
+
+      if ((!last && comma < 0) ||
+          (last && comma >= 0)) {
+        cdcPrintln("ERR|BAD_MENU_ACTIONS");
+        return;
+      }
+
+      String token =
+          last
+              ? csv.substring(start)
+              : csv.substring(start, comma);
+
+      uint16_t action = 0;
+      if (!parseUnsigned(token, ACTION_COUNT, action)) {
+        cdcPrintln("ERR|BAD_MENU_ACTION");
+        return;
+      }
+
+      mainMenuConfig.actions[page][slot] =
+          static_cast<uint8_t>(action);
+
+      start = comma + 1;
+    }
+
+    mainMenuConfig.layers[page] =
+        static_cast<uint8_t>(layer);
+
+    saveMainMenuConfig();
+    renderMainMenu();
+
+    cdcPrintln("OK|MENUCFG");
+    return;
+  }
+
+  if (upper.startsWith("MENUBGBEGIN|")) {
+    int sep = command.indexOf('|');
+    uint32_t bytes = 0;
+
+    if (sep < 0 ||
+        !parseUnsignedLong(
+            command.substring(sep + 1),
+            MENU_BACKGROUND_LIMIT_BYTES,
+            bytes) ||
+        !beginMenuBackgroundUpload(bytes)) {
+      cdcPrintln("ERR|MENUBGBEGIN");
+      return;
+    }
+
+    cdcPrintln("OK|MENUBGBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("MENUBGDATA|")) {
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    uint32_t offset = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        !parseUnsignedLong(
+            command.substring(p1 + 1, p2),
+            menuUploadExpectedBytes,
+            offset) ||
+        !writeMenuAssetChunk(
+            offset,
+            command.substring(p2 + 1))) {
+      cdcPrintln("ERR|MENUBGDATA");
+      return;
+    }
+
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|MENUBGDATA|%lu",
+        static_cast<unsigned long>(menuUploadReceivedBytes));
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "MENUBGEND") {
+    if (!finishMenuBackgroundUpload()) {
+      cdcPrintln("ERR|MENUBGEND");
+      return;
+    }
+
+    cdcPrintln("OK|MENUBGEND");
+    return;
+  }
+
+  if (upper == "MENUBGCLEAR") {
+    closeMenuUpload();
+    if (littleFsReady) {
+      LittleFS.remove(MENU_BG_TMP_PATH);
+      LittleFS.remove(MENU_BG_PATH);
+    }
+    renderMainMenu();
+    cdcPrintln("OK|MENUBGCLEAR");
+    return;
+  }
+
+  if (upper.startsWith("MENUICONBEGIN|")) {
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    int p3 = command.indexOf('|', p2 + 1);
+    uint16_t page = 0;
+    uint16_t slot = 0;
+    uint32_t bytes = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        !parseUnsigned(
+            command.substring(p1 + 1, p2),
+            MENU_PAGE_COUNT - 1,
+            page) ||
+        !parseUnsigned(
+            command.substring(p2 + 1, p3),
+            MENU_SLOT_COUNT - 1,
+            slot) ||
+        !parseUnsignedLong(
+            command.substring(p3 + 1),
+            MENU_ICON_BYTES,
+            bytes) ||
+        !beginMenuIconUpload(
+            static_cast<uint8_t>(page),
+            static_cast<uint8_t>(slot),
+            bytes)) {
+      cdcPrintln("ERR|MENUICONBEGIN");
+      return;
+    }
+
+    cdcPrintln("OK|MENUICONBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("MENUICONDATA|")) {
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    uint32_t offset = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        !parseUnsignedLong(
+            command.substring(p1 + 1, p2),
+            menuUploadExpectedBytes,
+            offset) ||
+        !writeMenuAssetChunk(
+            offset,
+            command.substring(p2 + 1))) {
+      cdcPrintln("ERR|MENUICONDATA");
+      return;
+    }
+
+    char out[40];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|MENUICONDATA|%lu",
+        static_cast<unsigned long>(menuUploadReceivedBytes));
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "MENUICONEND") {
+    if (!finishMenuIconUpload()) {
+      cdcPrintln("ERR|MENUICONEND");
+      return;
+    }
+
+    cdcPrintln("OK|MENUICONEND");
+    return;
+  }
+
+  if (upper.startsWith("MENUICONCLEAR|")) {
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    uint16_t page = 0;
+    uint16_t slot = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        !parseUnsigned(
+            command.substring(p1 + 1, p2),
+            MENU_PAGE_COUNT - 1,
+            page) ||
+        !parseUnsigned(
+            command.substring(p2 + 1),
+            MENU_SLOT_COUNT - 1,
+            slot)) {
+      cdcPrintln("ERR|MENUICONCLEAR");
+      return;
+    }
+
+    clearMainMenuIcon(
+        static_cast<uint8_t>(page),
+        static_cast<uint8_t>(slot));
+    renderMainMenu();
+    cdcPrintln("OK|MENUICONCLEAR");
+    return;
+  }
+
+  if (upper == "MENUSHOW") {
+    stopSaver();
+    renderMainMenu();
+    cdcPrintln("OK|MENUSHOW");
     return;
   }
 
@@ -5124,6 +5859,8 @@ static void pollCdc() {
 }
 
 static void emitKeyEvent(uint8_t index, bool pressed) {
+  uint8_t menuLayerBefore = currentLayer();
+
   if (pressed) {
     lastUserActivityAt = millis();
     stopSaver();
@@ -5165,6 +5902,11 @@ static void emitKeyEvent(uint8_t index, bool pressed) {
   }
 
   sendMappedReports();
+
+  if (!saverActive &&
+      currentLayer() != menuLayerBefore) {
+    renderMainMenu();
+  }
 
   char out[48];
   snprintf(
@@ -5218,6 +5960,7 @@ void setup() {
   loadKeymap();
   loadMacros();
   loadRgbProfiles();
+  loadMainMenuConfig();
 
   rgbStrip.begin();
   rgbStrip.clear();
@@ -5231,6 +5974,7 @@ void setup() {
     loadPersistedMedia();
   }
 
+  renderMainMenu();
   lastUserActivityAt = millis();
 
   uint64_t mac = ESP.getEfuseMac();
@@ -5246,7 +5990,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0153);
+  USB.firmwareVersion(0x0160);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -5260,7 +6004,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.5.3");
+  cdcPrintln("BOOT|PIXELPRO|1.6.0");
 }
 
 void loop() {
