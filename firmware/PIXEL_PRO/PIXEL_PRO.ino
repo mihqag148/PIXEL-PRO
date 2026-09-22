@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.2";
+static constexpr char FW_VERSION[] = "1.8.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -45,16 +45,20 @@ static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
 // PIXEL PRO main-menu artwork. Each keymap profile owns one 2x4 menu,
-// matching the eight physical keys. Backgrounds and icons are JPEG assets.
-// Native 96x96 icon decode avoids the old 40x40 upscaling blur.
+// matching the eight physical keys. Backgrounds stay JPEG; icons use a compact
+// PXI1 RGB565 payload with a transparent color key so aspect-ratio padding
+// reveals the wallpaper instead of a black rectangle.
 static constexpr uint8_t MENU_SLOT_COUNT = 8;
 static constexpr uint8_t MENU_ICON_WIDTH = 96;
 static constexpr uint8_t MENU_ICON_HEIGHT = 96;
 static constexpr uint32_t MENU_ICON_MAX_BYTES = 24UL * 1024UL;
+static constexpr uint16_t MENU_ICON_TRANSPARENT = 0xF81F;
+static constexpr uint32_t MENU_ICON_ASSET_BYTES =
+    8UL + MENU_ICON_WIDTH * MENU_ICON_HEIGHT * 2UL;
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
-static constexpr uint8_t MENU_STATUS_HEIGHT = 44;
+static constexpr uint8_t MENU_STATUS_HEIGHT = 50;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -185,6 +189,7 @@ static uint8_t menuDay = 0;
 static uint8_t menuHour = 0;
 static uint8_t menuMinute = 0;
 static bool menuPcStatusValid = false;
+static uint8_t menuHostOs = 0;  // 0=unknown, 1=Windows, 2=macOS, 3=Linux
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
 // PIXEL effects: 0 rainbow, 1 purple ping-pong, 2 orange blink,
@@ -1132,7 +1137,20 @@ static void menuIconPath(
   snprintf(
       out,
       outSize,
-      temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.jpg",
+      temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.pxi",
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(slot));
+}
+
+static void menuLegacyIconJpegPath(
+    uint8_t profile,
+    uint8_t slot,
+    char *out,
+    size_t outSize) {
+  snprintf(
+      out,
+      outSize,
+      "/mi%u_%u.jpg",
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 }
@@ -1246,30 +1264,134 @@ static bool renderMainMenuIcon(
       path,
       sizeof(path));
 
-  if (!LittleFS.exists(path)) {
+  if (LittleFS.exists(path)) {
+    File file =
+        LittleFS.open(
+            path,
+            "r");
+
+    if (file) {
+      uint8_t header[8] = {};
+
+      bool valid =
+          file.size() == MENU_ICON_ASSET_BYTES &&
+          file.read(
+              header,
+              sizeof(header)) ==
+              sizeof(header) &&
+          header[0] == 'P' &&
+          header[1] == 'X' &&
+          header[2] == 'I' &&
+          header[3] == '1';
+
+      uint16_t width =
+          static_cast<uint16_t>(
+              header[4] |
+              (static_cast<uint16_t>(
+                   header[5]) <<
+               8));
+
+      uint16_t height =
+          static_cast<uint16_t>(
+              header[6] |
+              (static_cast<uint16_t>(
+                   header[7]) <<
+               8));
+
+      valid =
+          valid &&
+          width == MENU_ICON_WIDTH &&
+          height == MENU_ICON_HEIGHT;
+
+      if (valid) {
+        uint16_t rowPixels[MENU_ICON_WIDTH] = {};
+
+        for (uint16_t row = 0;
+             row < MENU_ICON_HEIGHT;
+             ++row) {
+          size_t bytesRead =
+              file.read(
+                  reinterpret_cast<uint8_t *>(
+                      rowPixels),
+                  sizeof(rowPixels));
+
+          if (bytesRead !=
+              sizeof(rowPixels)) {
+            valid = false;
+            break;
+          }
+
+          int runStart = -1;
+
+          for (int col = 0;
+               col <= MENU_ICON_WIDTH;
+               ++col) {
+            bool transparent =
+                col == MENU_ICON_WIDTH ||
+                rowPixels[col] ==
+                    MENU_ICON_TRANSPARENT;
+
+            if (!transparent &&
+                runStart < 0) {
+              runStart = col;
+            }
+
+            if (transparent &&
+                runStart >= 0) {
+              tft->draw16bitRGBBitmap(
+                  x + runStart,
+                  y + row,
+                  rowPixels + runStart,
+                  col - runStart,
+                  1);
+
+              runStart = -1;
+            }
+          }
+        }
+      }
+
+      file.close();
+
+      if (valid) {
+        return true;
+      }
+    }
+  }
+
+  // Preserve icons already uploaded by firmware 1.8.2 until the new app
+  // replaces them with transparent PXI1 assets.
+  char legacyPath[24] = {};
+  menuLegacyIconJpegPath(
+      profile,
+      slot,
+      legacyPath,
+      sizeof(legacyPath));
+
+  if (!LittleFS.exists(legacyPath)) {
     return false;
   }
 
-  File file =
+  File legacy =
       LittleFS.open(
-          path,
+          legacyPath,
           "r");
 
-  if (!file) {
+  if (!legacy) {
     return false;
   }
 
   JPEGDEC decoder;
   bool valid =
       decoder.open(
-          file,
+          legacy,
           mainMenuJpegDraw) &&
       decoder.getWidth() == MENU_ICON_WIDTH &&
       decoder.getHeight() == MENU_ICON_HEIGHT;
 
   if (!valid) {
     decoder.close();
-    file.close();
+    legacy.close();
     return false;
   }
 
@@ -1280,9 +1402,271 @@ static bool renderMainMenuIcon(
           0);
 
   decoder.close();
-  file.close();
+  legacy.close();
 
   return result != 0;
+}
+
+static void drawDockTile(
+    int x,
+    int y,
+    uint16_t color) {
+  tft->fillRoundRect(
+      x,
+      y,
+      42,
+      36,
+      9,
+      color);
+}
+
+static void drawDockFolder(
+    int x,
+    int y,
+    uint16_t tileColor) {
+  drawDockTile(
+      x,
+      y,
+      tileColor);
+
+  const uint16_t white =
+      0xFFFF;
+
+  tft->fillRoundRect(
+      x + 9,
+      y + 12,
+      24,
+      16,
+      3,
+      white);
+
+  tft->fillRect(
+      x + 11,
+      y + 9,
+      10,
+      6,
+      white);
+}
+
+static void drawDockBrowser(
+    int x,
+    int y,
+    uint16_t tileColor) {
+  drawDockTile(
+      x,
+      y,
+      tileColor);
+
+  const uint16_t white =
+      0xFFFF;
+
+  tft->drawCircle(
+      x + 21,
+      y + 18,
+      10,
+      white);
+
+  tft->drawCircle(
+      x + 21,
+      y + 18,
+      5,
+      white);
+
+  tft->drawLine(
+      x + 12,
+      y + 18,
+      x + 30,
+      y + 18,
+      white);
+}
+
+static void drawDockTerminal(
+    int x,
+    int y) {
+  drawDockTile(
+      x,
+      y,
+      0x3186);
+
+  tft->drawRoundRect(
+      x + 8,
+      y + 8,
+      26,
+      20,
+      4,
+      0xFFFF);
+
+  tft->setTextSize(1);
+  tft->setTextColor(
+      0xFFFF);
+
+  tft->setCursor(
+      x + 13,
+      y + 15);
+
+  tft->print(">_");
+}
+
+static void drawDockSettings(
+    int x,
+    int y) {
+  drawDockTile(
+      x,
+      y,
+      0x5ACB);
+
+  const int cx =
+      x + 21;
+
+  const int cy =
+      y + 18;
+
+  tft->drawCircle(
+      cx,
+      cy,
+      7,
+      0xFFFF);
+
+  tft->fillCircle(
+      cx,
+      cy,
+      2,
+      0xFFFF);
+
+  tft->drawLine(
+      cx - 11,
+      cy,
+      cx - 7,
+      cy,
+      0xFFFF);
+
+  tft->drawLine(
+      cx + 7,
+      cy,
+      cx + 11,
+      cy,
+      0xFFFF);
+
+  tft->drawLine(
+      cx,
+      cy - 11,
+      cx,
+      cy - 7,
+      0xFFFF);
+
+  tft->drawLine(
+      cx,
+      cy + 7,
+      cx,
+      cy + 11,
+      0xFFFF);
+}
+
+static void drawHostOsBadge(
+    int x,
+    int y) {
+  drawDockTile(
+      x,
+      y,
+      0x2124);
+
+  if (menuHostOs == 2) {
+    // macOS: simple Finder-like split face, no app-name text.
+    tft->fillRoundRect(
+        x + 10,
+        y + 8,
+        22,
+        20,
+        5,
+        0x5DFF);
+
+    tft->drawLine(
+        x + 21,
+        y + 8,
+        x + 21,
+        y + 28,
+        0xFFFF);
+
+    tft->fillCircle(
+        x + 16,
+        y + 16,
+        1,
+        0xFFFF);
+
+    tft->fillCircle(
+        x + 26,
+        y + 16,
+        1,
+        0xFFFF);
+
+    tft->drawLine(
+        x + 15,
+        y + 23,
+        x + 27,
+        y + 23,
+        0xFFFF);
+
+    return;
+  }
+
+  if (menuHostOs == 3) {
+    // Linux: compact penguin-style mark.
+    tft->fillCircle(
+        x + 21,
+        y + 18,
+        10,
+        0xFFFF);
+
+    tft->fillCircle(
+        x + 17,
+        y + 15,
+        2,
+        0x0000);
+
+    tft->fillCircle(
+        x + 25,
+        y + 15,
+        2,
+        0x0000);
+
+    tft->fillRect(
+        x + 19,
+        y + 19,
+        5,
+        3,
+        0xFD20);
+
+    return;
+  }
+
+  // Windows / unknown: four-pane mark.
+  tft->fillRect(
+      x + 10,
+      y + 9,
+      9,
+      8,
+      0xFFFF);
+
+  tft->fillRect(
+      x + 22,
+      y + 9,
+      10,
+      8,
+      0xFFFF);
+
+  tft->fillRect(
+      x + 10,
+      y + 20,
+      9,
+      8,
+      0xFFFF);
+
+  tft->fillRect(
+      x + 22,
+      y + 20,
+      10,
+      8,
+      0xFFFF);
 }
 
 static void renderMainMenuStatusBar() {
@@ -1291,240 +1675,74 @@ static void renderMainMenuStatusBar() {
     return;
   }
 
-  const int y =
-      TFT_HEIGHT -
-      MENU_STATUS_HEIGHT;
+  const int dockW =
+      286;
 
-  const int marginX = 4;
-  const int gap = 4;
-  const int panelW =
+  const int dockH =
+      46;
+
+  const int dockX =
       (TFT_WIDTH -
-       marginX * 2 -
-       gap * 3) /
-      4;
+       dockW) /
+      2;
 
-  const int panelY =
-      y + 3;
+  const int dockY =
+      TFT_HEIGHT -
+      dockH -
+      2;
 
-  const int panelH =
-      MENU_STATUS_HEIGHT - 6;
+  tft->fillRoundRect(
+      dockX,
+      dockY,
+      dockW,
+      dockH,
+      13,
+      0x18C3);
 
-  const uint16_t panelColor =
-      0x18C3;
+  const int tileY =
+      dockY + 5;
 
-  const uint16_t borderColor =
-      0x39E7;
+  const int firstX =
+      dockX + 8;
 
-  const uint16_t profileDot =
-      0xB81F;
+  const int step =
+      54;
 
-  const uint16_t timeDot =
-      0xFFFF;
+  drawHostOsBadge(
+      firstX,
+      tileY);
 
-  const uint16_t cpuDot =
-      0x067F;
+  uint16_t folderColor =
+      menuHostOs == 2
+          ? 0x5DFF
+          : menuHostOs == 3
+              ? 0xFD20
+              : 0x2B7F;
 
-  const uint16_t gpuDot =
-      0x07F0;
+  uint16_t browserColor =
+      menuHostOs == 2
+          ? 0x04FF
+          : menuHostOs == 3
+              ? 0xFBA0
+              : 0x1595;
 
-  for (int col = 0;
-       col < 4;
-       ++col) {
-    int x =
-        marginX +
-        col *
-            (panelW + gap);
+  drawDockFolder(
+      firstX + step,
+      tileY,
+      folderColor);
 
-    tft->fillRoundRect(
-        x,
-        panelY,
-        panelW,
-        panelH,
-        5,
-        panelColor);
+  drawDockBrowser(
+      firstX + step * 2,
+      tileY,
+      browserColor);
 
-    tft->drawRoundRect(
-        x,
-        panelY,
-        panelW,
-        panelH,
-        5,
-        borderColor);
-  }
+  drawDockTerminal(
+      firstX + step * 3,
+      tileY);
 
-  char line[24] = {};
-
-  tft->setTextSize(1);
-  tft->setTextColor(0xFFFF);
-
-  int x0 = marginX;
-  tft->fillCircle(
-      x0 + 10,
-      panelY + 10,
-      3,
-      profileDot);
-
-  tft->setCursor(
-      x0 + 18,
-      panelY + 6);
-  tft->print("Profile");
-
-  snprintf(
-      line,
-      sizeof(line),
-      "%02u/%02u",
-      static_cast<unsigned>(
-          activeProfile + 1),
-      static_cast<unsigned>(
-          PROFILE_COUNT));
-
-  tft->setCursor(
-      x0 + 18,
-      panelY + 21);
-  tft->print(line);
-
-  int x1 =
-      marginX +
-      panelW +
-      gap;
-
-  tft->fillCircle(
-      x1 + 10,
-      panelY + 10,
-      3,
-      timeDot);
-
-  if (menuPcStatusValid) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%02u-%02u",
-        static_cast<unsigned>(menuMonth),
-        static_cast<unsigned>(menuDay));
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 6);
-    tft->print(line);
-
-    snprintf(
-        line,
-        sizeof(line),
-        "%02u:%02u",
-        static_cast<unsigned>(menuHour),
-        static_cast<unsigned>(menuMinute));
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 21);
-    tft->print(line);
-  } else {
-    tft->setCursor(
-        x1 + 18,
-        panelY + 6);
-    tft->print("-- --");
-
-    tft->setCursor(
-        x1 + 18,
-        panelY + 21);
-    tft->print("--:--");
-  }
-
-  int x2 =
-      marginX +
-      (panelW + gap) * 2;
-
-  tft->fillCircle(
-      x2 + 10,
-      panelY + 10,
-      3,
-      cpuDot);
-
-  if (menuCpuLoad >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "CPU %d%%",
-        static_cast<int>(
-            menuCpuLoad));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "CPU --%%");
-  }
-
-  tft->setCursor(
-      x2 + 18,
-      panelY + 6);
-  tft->print(line);
-
-  if (menuCpuTemp >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%dC",
-        static_cast<int>(
-            menuCpuTemp));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "--C");
-  }
-
-  tft->setCursor(
-      x2 + 18,
-      panelY + 21);
-  tft->print(line);
-
-  int x3 =
-      marginX +
-      (panelW + gap) * 3;
-
-  tft->fillCircle(
-      x3 + 10,
-      panelY + 10,
-      3,
-      gpuDot);
-
-  if (menuGpuLoad >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "GPU %d%%",
-        static_cast<int>(
-            menuGpuLoad));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "GPU --%%");
-  }
-
-  tft->setCursor(
-      x3 + 18,
-      panelY + 6);
-  tft->print(line);
-
-  if (menuGpuTemp >= 0) {
-    snprintf(
-        line,
-        sizeof(line),
-        "%dC",
-        static_cast<int>(
-            menuGpuTemp));
-  } else {
-    snprintf(
-        line,
-        sizeof(line),
-        "--C");
-  }
-
-  tft->setCursor(
-      x3 + 18,
-      panelY + 21);
-  tft->print(line);
+  drawDockSettings(
+      firstX + step * 4,
+      tileY);
 }
 
 static void renderMainMenu() {
@@ -1588,7 +1806,10 @@ static void renderMainMenu() {
             2;
 
     int iconY =
-        y + 3;
+        y +
+        (cellH -
+         MENU_ICON_HEIGHT) /
+            2;
 
     bool drewIcon =
         renderMainMenuIcon(
@@ -1601,7 +1822,10 @@ static void renderMainMenu() {
         mainMenuConfig
             .actions[profile][slot];
 
-    if (action > 0) {
+    // Match the requested eezBotFun behavior: custom icons stand alone.
+    // The action name is shown only as a fallback when no icon is assigned.
+    if (!drewIcon &&
+        action > 0) {
       const char *label =
           mainMenuConfig
               .labels[profile][slot];
@@ -1638,18 +1862,11 @@ static void renderMainMenu() {
                   2);
 
       int textY =
-          drewIcon
-              ? y +
-                    cellH -
-                    13
-              : y +
-                    (cellH - 8) /
-                        2;
+          y +
+          (cellH - 8) /
+              2;
 
-      // eezBotFun-like floating label: no slot frame, just a tiny
-      // shadow under crisp white action text on top of the wallpaper.
       tft->setTextSize(1);
-
       tft->setTextColor(
           0x0000);
 
@@ -1741,7 +1958,7 @@ static bool beginMenuIconUpload(
   if (!littleFsReady ||
       profile >= PROFILE_COUNT ||
       slot >= MENU_SLOT_COUNT ||
-      expectedBytes < 4 ||
+      expectedBytes != MENU_ICON_ASSET_BYTES ||
       expectedBytes > MENU_ICON_MAX_BYTES) {
     return false;
   }
@@ -1763,17 +1980,25 @@ static bool beginMenuIconUpload(
       tempPath,
       sizeof(tempPath));
 
-  char legacyPath[24] = {};
+  char legacyBinPath[24] = {};
   snprintf(
-      legacyPath,
-      sizeof(legacyPath),
+      legacyBinPath,
+      sizeof(legacyBinPath),
       "/mi%u_%u.bin",
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 
+  char legacyJpegPath[24] = {};
+  menuLegacyIconJpegPath(
+      profile,
+      slot,
+      legacyJpegPath,
+      sizeof(legacyJpegPath));
+
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
-  LittleFS.remove(legacyPath);
+  LittleFS.remove(legacyBinPath);
+  LittleFS.remove(legacyJpegPath);
 
   size_t total = LittleFS.totalBytes();
   size_t used = LittleFS.usedBytes();
@@ -1916,12 +2141,14 @@ static bool finishMenuIconUpload() {
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+
   menuIconPath(
       profile,
       slot,
       false,
       finalPath,
       sizeof(finalPath));
+
   menuIconPath(
       profile,
       slot,
@@ -1938,17 +2165,39 @@ static bool finishMenuIconUpload() {
       false;
 
   if (verify) {
-    JPEGDEC decoder;
+    uint8_t header[8] = {};
 
     valid =
-        decoder.open(
-            verify,
-            mainMenuJpegDraw) &&
-        decoder.getWidth() == MENU_ICON_WIDTH &&
-        decoder.getHeight() == MENU_ICON_HEIGHT &&
-        verify.size() == menuUploadExpectedBytes;
+        verify.size() ==
+            MENU_ICON_ASSET_BYTES &&
+        verify.read(
+            header,
+            sizeof(header)) ==
+            sizeof(header) &&
+        header[0] == 'P' &&
+        header[1] == 'X' &&
+        header[2] == 'I' &&
+        header[3] == '1';
 
-    decoder.close();
+    uint16_t width =
+        static_cast<uint16_t>(
+            header[4] |
+            (static_cast<uint16_t>(
+                 header[5]) <<
+             8));
+
+    uint16_t height =
+        static_cast<uint16_t>(
+            header[6] |
+            (static_cast<uint16_t>(
+                 header[7]) <<
+             8));
+
+    valid =
+        valid &&
+        width == MENU_ICON_WIDTH &&
+        height == MENU_ICON_HEIGHT;
+
     verify.close();
   }
 
@@ -1960,6 +2209,16 @@ static bool finishMenuIconUpload() {
     closeMenuUpload();
     return false;
   }
+
+  char legacyJpegPath[24] = {};
+  menuLegacyIconJpegPath(
+      profile,
+      slot,
+      legacyJpegPath,
+      sizeof(legacyJpegPath));
+
+  LittleFS.remove(
+      legacyJpegPath);
 
   closeMenuUpload();
 
@@ -2020,17 +2279,25 @@ static void clearMainMenuIcon(
       tempPath,
       sizeof(tempPath));
 
-  char legacyPath[24] = {};
+  char legacyBinPath[24] = {};
   snprintf(
-      legacyPath,
-      sizeof(legacyPath),
+      legacyBinPath,
+      sizeof(legacyBinPath),
       "/mi%u_%u.bin",
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 
+  char legacyJpegPath[24] = {};
+  menuLegacyIconJpegPath(
+      profile,
+      slot,
+      legacyJpegPath,
+      sizeof(legacyJpegPath));
+
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
-  LittleFS.remove(legacyPath);
+  LittleFS.remove(legacyBinPath);
+  LittleFS.remove(legacyJpegPath);
 }
 
 static KeyBinding resolveBinding(uint8_t layer, uint8_t keyIndex) {
@@ -5051,6 +5318,36 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("HOSTOS|")) {
+    String host =
+        upper.substring(7);
+
+    host.trim();
+
+    if (host == "WIN" ||
+        host == "WINDOWS") {
+      menuHostOs = 1;
+    } else if (
+        host == "MAC" ||
+        host == "MACOS" ||
+        host == "OSX") {
+      menuHostOs = 2;
+    } else if (
+        host == "LINUX") {
+      menuHostOs = 3;
+    } else {
+      cdcPrintln("ERR|HOSTOS");
+      return;
+    }
+
+    if (!saverActive) {
+      renderMainMenuStatusBar();
+    }
+
+    cdcPrintln("OK|HOSTOS");
+    return;
+  }
+
   if (upper == "PCCLEAR") {
     menuCpuLoad = -1;
     menuCpuTemp = -1;
@@ -6893,7 +7190,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0182);
+  USB.firmwareVersion(0x0183);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6907,7 +7204,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.2");
+  cdcPrintln("BOOT|PIXELPRO|1.8.3");
 }
 
 void loop() {
