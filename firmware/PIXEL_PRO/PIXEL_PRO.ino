@@ -997,10 +997,6 @@ static uint8_t currentLayer() {
 static void setDefaultMainMenuConfig() {
   memset(&mainMenuConfig, 0, sizeof(mainMenuConfig));
   mainMenuConfig.version = MENU_STORAGE_VERSION;
-
-  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
-    mainMenuConfig.layers[page] = page < LAYER_COUNT ? page : 0;
-  }
 }
 
 static void saveMainMenuConfig() {
@@ -1020,41 +1016,40 @@ static void loadMainMenuConfig() {
 
   MainMenuConfig stored = {};
   if (preferences.getBytes("menucfg", &stored, sizeof(stored)) !=
-      sizeof(stored) ||
+          sizeof(stored) ||
       stored.version != MENU_STORAGE_VERSION) {
     saveMainMenuConfig();
     return;
   }
 
-  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
-    if (stored.layers[page] >= LAYER_COUNT) {
-      saveMainMenuConfig();
-      return;
-    }
-
+  for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
     for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
-      if (stored.actions[page][slot] > ACTION_COUNT) {
+      if (stored.actions[profile][slot] > ACTION_COUNT) {
         saveMainMenuConfig();
         return;
       }
+
+      stored.labels[profile][slot][MENU_LABEL_MAX_LEN] = '\0';
     }
   }
 
   memcpy(&mainMenuConfig, &stored, sizeof(mainMenuConfig));
 }
 
-static uint8_t mainMenuPageForLayer(uint8_t layer) {
-  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
-    if (mainMenuConfig.layers[page] == layer) {
-      return page;
-    }
-  }
-
-  return 0;
+static void menuBackgroundPath(
+    uint8_t profile,
+    bool temporary,
+    char *out,
+    size_t outSize) {
+  snprintf(
+      out,
+      outSize,
+      temporary ? "/mb%u.tmp" : "/mb%u.jpg",
+      static_cast<unsigned>(profile));
 }
 
 static void menuIconPath(
-    uint8_t page,
+    uint8_t profile,
     uint8_t slot,
     bool temporary,
     char *out,
@@ -1063,7 +1058,7 @@ static void menuIconPath(
       out,
       outSize,
       temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.bin",
-      static_cast<unsigned>(page),
+      static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 }
 
@@ -1099,14 +1094,25 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
   return 1;
 }
 
-static bool renderMainMenuBackground() {
+static bool renderMainMenuBackground(uint8_t profile) {
+  if (profile >= PROFILE_COUNT) {
+    profile = 0;
+  }
+
+  char path[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      path,
+      sizeof(path));
+
   if (!littleFsReady ||
-      !LittleFS.exists(MENU_BG_PATH)) {
+      !LittleFS.exists(path)) {
     tft->fillScreen(RGB565_BLACK);
     return false;
   }
 
-  File file = LittleFS.open(MENU_BG_PATH, "r");
+  File file = LittleFS.open(path, "r");
   if (!file) {
     tft->fillScreen(RGB565_BLACK);
     return false;
@@ -1134,16 +1140,21 @@ static void renderMainMenu() {
     return;
   }
 
-  renderMainMenuBackground();
+  const uint8_t profile =
+      activeProfile < PROFILE_COUNT
+          ? activeProfile
+          : 0;
 
-  const uint8_t page = mainMenuPageForLayer(currentLayer());
+  renderMainMenuBackground(profile);
+
   const int marginX = 12;
   const int marginY = 10;
   const int gapX = 8;
   const int gapY = 8;
   const int cellW = (TFT_WIDTH - marginX * 2 - gapX * 3) / 4;
   const int cellH = (TFT_HEIGHT - marginY * 2 - gapY * 2) / 3;
-  uint16_t scaledLine[MENU_ICON_WIDTH * 2] = {};
+  const int iconSize = min(cellW - 6, cellH - 6);
+  uint16_t scaledLine[120] = {};
 
   for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
     int col = slot % 4;
@@ -1160,7 +1171,12 @@ static void renderMainMenu() {
         0x7BEF);
 
     char path[24] = {};
-    menuIconPath(page, slot, false, path, sizeof(path));
+    menuIconPath(
+        profile,
+        slot,
+        false,
+        path,
+        sizeof(path));
 
     bool drewIcon = false;
     if (littleFsReady && LittleFS.exists(path)) {
@@ -1171,36 +1187,44 @@ static void renderMainMenu() {
           icon.read(
               reinterpret_cast<uint8_t *>(menuIconBuffer),
               MENU_ICON_BYTES) == MENU_ICON_BYTES) {
-        const int scaledW = MENU_ICON_WIDTH * 2;
-        const int scaledH = MENU_ICON_HEIGHT * 2;
-        int iconX = x + (cellW - scaledW) / 2;
-        int iconY = y + (cellH - scaledH) / 2;
+        int iconX =
+            x +
+            (cellW - iconSize) / 2;
 
-        for (uint8_t sourceY = 0; sourceY < MENU_ICON_HEIGHT; ++sourceY) {
+        int iconY =
+            y +
+            (cellH - iconSize) / 2;
+
+        for (int targetY = 0;
+             targetY < iconSize;
+             ++targetY) {
+          int sourceY =
+              targetY *
+              MENU_ICON_HEIGHT /
+              iconSize;
+
           const uint16_t *source =
               menuIconBuffer +
-              static_cast<size_t>(sourceY) * MENU_ICON_WIDTH;
+              static_cast<size_t>(sourceY) *
+                  MENU_ICON_WIDTH;
 
-          for (uint8_t sourceX = 0; sourceX < MENU_ICON_WIDTH; ++sourceX) {
-            uint16_t pixel = source[sourceX];
-            scaledLine[sourceX * 2] = pixel;
-            scaledLine[sourceX * 2 + 1] = pixel;
+          for (int targetX = 0;
+               targetX < iconSize;
+               ++targetX) {
+            int sourceX =
+                targetX *
+                MENU_ICON_WIDTH /
+                iconSize;
+
+            scaledLine[targetX] =
+                source[sourceX];
           }
 
-          int drawY = iconY + sourceY * 2;
-
           tft->draw16bitRGBBitmap(
               iconX,
-              drawY,
+              iconY + targetY,
               scaledLine,
-              scaledW,
-              1);
-
-          tft->draw16bitRGBBitmap(
-              iconX,
-              drawY + 1,
-              scaledLine,
-              scaledW,
+              iconSize,
               1);
         }
 
@@ -1212,14 +1236,12 @@ static void renderMainMenu() {
       }
     }
 
-    uint8_t action = mainMenuConfig.actions[page][slot];
+    uint8_t action =
+        mainMenuConfig.actions[profile][slot];
 
-    // Icon slots are intentionally icon-only. If no icon exists, render the
-    // actual Lumi Action name stored by the app. Fall back to Axx for older
-    // or unnamed actions.
     if (!drewIcon && action > 0) {
       const char *label =
-          mainMenuConfig.labels[page][slot];
+          mainMenuConfig.labels[profile][slot];
 
       char fallback[8] = {};
       if (label[0] == '\0') {
