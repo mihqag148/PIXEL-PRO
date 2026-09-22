@@ -1663,7 +1663,8 @@ static bool beginMenuIconUpload(
   if (!littleFsReady ||
       profile >= PROFILE_COUNT ||
       slot >= MENU_SLOT_COUNT ||
-      expectedBytes != MENU_ICON_BYTES) {
+      expectedBytes < 4 ||
+      expectedBytes > MENU_ICON_MAX_BYTES) {
     return false;
   }
 
@@ -1812,7 +1813,7 @@ static bool finishMenuIconUpload() {
   if (menuUploadKind != 2 ||
       !menuUploadFile ||
       menuUploadProfile >= PROFILE_COUNT ||
-      menuUploadReceivedBytes != MENU_ICON_BYTES) {
+      menuUploadReceivedBytes != menuUploadExpectedBytes) {
     closeMenuUpload();
     return false;
   }
@@ -1847,10 +1848,20 @@ static bool finishMenuIconUpload() {
           "r");
 
   bool valid =
-      verify &&
-      verify.size() == MENU_ICON_BYTES;
+      false;
 
   if (verify) {
+    JPEGDEC decoder;
+
+    valid =
+        decoder.open(
+            verify,
+            mainMenuJpegDraw) &&
+        decoder.getWidth() == MENU_ICON_WIDTH &&
+        decoder.getHeight() == MENU_ICON_HEIGHT &&
+        verify.size() == menuUploadExpectedBytes;
+
+    decoder.close();
     verify.close();
   }
 
@@ -1905,15 +1916,25 @@ static void clearMainMenuIcon(
     return;
   }
 
-  char path[24] = {};
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+
   menuIconPath(
       profile,
       slot,
       false,
-      path,
-      sizeof(path));
+      finalPath,
+      sizeof(finalPath));
 
-  LittleFS.remove(path);
+  menuIconPath(
+      profile,
+      slot,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
+  LittleFS.remove(tempPath);
+  LittleFS.remove(finalPath);
 }
 
 static KeyBinding resolveBinding(uint8_t layer, uint8_t keyIndex) {
