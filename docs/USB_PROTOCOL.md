@@ -373,3 +373,18 @@ showing only sketch size.
 Replacement screensaver uploads reclaim the previous screensaver before the
 firmware checks free space. Therefore a full media partition can replace its
 current GIF/PXQ/JPEG without requiring a manual clear first.
+
+
+## Main Menu UX v1.6.1
+
+Firmware 1.6.1 keeps the same 4-page / 12-slot Main Menu storage, but each
+slot now also stores a short action label (up to 16 ASCII characters).
+
+- If a slot has an icon, the icon is rendered icon-only and scaled 2× on the
+  LCD to fill the action frame more naturally; no action text is drawn below it.
+- If a slot has no icon, the stored Lumi Action name is rendered in the frame.
+- `MENUCFG` now carries both the 12 action IDs and 12 labels:
+  `MENUCFG|<page>|<layer>|<actionsCSV>|<labelsCSV>`.
+- Companion app 1.21.1 integrates Main Menu editing into Home and adds
+  background opacity in addition to brightness. Opacity/brightness are baked
+  into the uploaded static 480×320 JPEG, so no extra runtime RAM is required.
