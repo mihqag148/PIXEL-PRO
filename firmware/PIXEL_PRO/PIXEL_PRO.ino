@@ -6051,12 +6051,19 @@ static void handleCommand(String command) {
       return;
     }
 
+    bool profileChanged =
+        activeProfile != static_cast<uint8_t>(profile);
+
     activeProfile = static_cast<uint8_t>(profile);
     baseLayer = static_cast<uint8_t>(layer);
     momentaryLayer = -1;
     toggledLayerMask = 0;
     sendMappedReports();
     applyRgbProfile();
+
+    if (profileChanged && !saverActive) {
+      renderMainMenu();
+    }
 
     char out[40];
     snprintf(
@@ -6125,8 +6132,6 @@ static void pollCdc() {
 }
 
 static void emitKeyEvent(uint8_t index, bool pressed) {
-  uint8_t menuLayerBefore = currentLayer();
-
   if (pressed) {
     lastUserActivityAt = millis();
     stopSaver();
@@ -6168,11 +6173,6 @@ static void emitKeyEvent(uint8_t index, bool pressed) {
   }
 
   sendMappedReports();
-
-  if (!saverActive &&
-      currentLayer() != menuLayerBefore) {
-    renderMainMenu();
-  }
 
   char out[48];
   snprintf(
