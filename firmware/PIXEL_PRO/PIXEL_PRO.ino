@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.6.1";
+static constexpr char FW_VERSION[] = "1.7.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -44,9 +44,8 @@ static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
-// PIXEL PRO main-menu artwork. Background is a static JPEG only. Icons are
-// tiny raw RGB565 tiles so four 3x4 menus fit alongside a 2 MiB screensaver.
-static constexpr uint8_t MENU_PAGE_COUNT = 4;
+// PIXEL PRO main-menu artwork. Each keymap profile owns one 3x4 menu.
+// Backgrounds are static JPEGs; icons are compact raw RGB565 tiles.
 static constexpr uint8_t MENU_SLOT_COUNT = 12;
 static constexpr uint8_t MENU_ICON_WIDTH = 40;
 static constexpr uint8_t MENU_ICON_HEIGHT = 40;
@@ -54,7 +53,7 @@ static constexpr uint32_t MENU_ICON_BYTES =
     static_cast<uint32_t>(MENU_ICON_WIDTH) * MENU_ICON_HEIGHT * 2UL;
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
-static constexpr uint8_t MENU_STORAGE_VERSION = 2;
+static constexpr uint8_t MENU_STORAGE_VERSION = 3;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -69,8 +68,6 @@ static constexpr char JPEG_PATH[] = "/screensaver.jpg";
 static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
 static constexpr char PACKED_PATH[] = "/screensaver.pxq";
 static constexpr char PACKED_TMP_PATH[] = "/screensaver_pxq.tmp";
-static constexpr char MENU_BG_PATH[] = "/menu_bg.jpg";
-static constexpr char MENU_BG_TMP_PATH[] = "/menu_bg.tmp";
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -124,9 +121,8 @@ struct KeyState {
 
 struct __attribute__((packed)) MainMenuConfig {
   uint8_t version;
-  uint8_t layers[MENU_PAGE_COUNT];
-  uint8_t actions[MENU_PAGE_COUNT][MENU_SLOT_COUNT];
-  char labels[MENU_PAGE_COUNT][MENU_SLOT_COUNT][MENU_LABEL_MAX_LEN + 1];
+  uint8_t actions[PROFILE_COUNT][MENU_SLOT_COUNT];
+  char labels[PROFILE_COUNT][MENU_SLOT_COUNT][MENU_LABEL_MAX_LEN + 1];
 };
 
 USBHID HID;
@@ -163,7 +159,7 @@ static String macros[MACRO_COUNT];
 static MainMenuConfig mainMenuConfig = {};
 static File menuUploadFile;
 static uint8_t menuUploadKind = 0;  // 1=background, 2=icon
-static uint8_t menuUploadPage = 0;
+static uint8_t menuUploadProfile = 0;
 static uint8_t menuUploadSlot = 0;
 static uint32_t menuUploadExpectedBytes = 0;
 static uint32_t menuUploadReceivedBytes = 0;
@@ -1001,10 +997,6 @@ static uint8_t currentLayer() {
 static void setDefaultMainMenuConfig() {
   memset(&mainMenuConfig, 0, sizeof(mainMenuConfig));
   mainMenuConfig.version = MENU_STORAGE_VERSION;
-
-  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
-    mainMenuConfig.layers[page] = page < LAYER_COUNT ? page : 0;
-  }
 }
 
 static void saveMainMenuConfig() {
@@ -1024,41 +1016,40 @@ static void loadMainMenuConfig() {
 
   MainMenuConfig stored = {};
   if (preferences.getBytes("menucfg", &stored, sizeof(stored)) !=
-      sizeof(stored) ||
+          sizeof(stored) ||
       stored.version != MENU_STORAGE_VERSION) {
     saveMainMenuConfig();
     return;
   }
 
-  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
-    if (stored.layers[page] >= LAYER_COUNT) {
-      saveMainMenuConfig();
-      return;
-    }
-
+  for (uint8_t profile = 0; profile < PROFILE_COUNT; ++profile) {
     for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
-      if (stored.actions[page][slot] > ACTION_COUNT) {
+      if (stored.actions[profile][slot] > ACTION_COUNT) {
         saveMainMenuConfig();
         return;
       }
+
+      stored.labels[profile][slot][MENU_LABEL_MAX_LEN] = '\0';
     }
   }
 
   memcpy(&mainMenuConfig, &stored, sizeof(mainMenuConfig));
 }
 
-static uint8_t mainMenuPageForLayer(uint8_t layer) {
-  for (uint8_t page = 0; page < MENU_PAGE_COUNT; ++page) {
-    if (mainMenuConfig.layers[page] == layer) {
-      return page;
-    }
-  }
-
-  return 0;
+static void menuBackgroundPath(
+    uint8_t profile,
+    bool temporary,
+    char *out,
+    size_t outSize) {
+  snprintf(
+      out,
+      outSize,
+      temporary ? "/mb%u.tmp" : "/mb%u.jpg",
+      static_cast<unsigned>(profile));
 }
 
 static void menuIconPath(
-    uint8_t page,
+    uint8_t profile,
     uint8_t slot,
     bool temporary,
     char *out,
@@ -1067,7 +1058,7 @@ static void menuIconPath(
       out,
       outSize,
       temporary ? "/mi%u_%u.tmp" : "/mi%u_%u.bin",
-      static_cast<unsigned>(page),
+      static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 }
 
@@ -1103,14 +1094,25 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
   return 1;
 }
 
-static bool renderMainMenuBackground() {
+static bool renderMainMenuBackground(uint8_t profile) {
+  if (profile >= PROFILE_COUNT) {
+    profile = 0;
+  }
+
+  char path[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      path,
+      sizeof(path));
+
   if (!littleFsReady ||
-      !LittleFS.exists(MENU_BG_PATH)) {
+      !LittleFS.exists(path)) {
     tft->fillScreen(RGB565_BLACK);
     return false;
   }
 
-  File file = LittleFS.open(MENU_BG_PATH, "r");
+  File file = LittleFS.open(path, "r");
   if (!file) {
     tft->fillScreen(RGB565_BLACK);
     return false;
@@ -1138,16 +1140,21 @@ static void renderMainMenu() {
     return;
   }
 
-  renderMainMenuBackground();
+  const uint8_t profile =
+      activeProfile < PROFILE_COUNT
+          ? activeProfile
+          : 0;
 
-  const uint8_t page = mainMenuPageForLayer(currentLayer());
+  renderMainMenuBackground(profile);
+
   const int marginX = 12;
   const int marginY = 10;
   const int gapX = 8;
   const int gapY = 8;
   const int cellW = (TFT_WIDTH - marginX * 2 - gapX * 3) / 4;
   const int cellH = (TFT_HEIGHT - marginY * 2 - gapY * 2) / 3;
-  uint16_t scaledLine[MENU_ICON_WIDTH * 2] = {};
+  const int iconSize = min(cellW - 6, cellH - 6);
+  uint16_t scaledLine[120] = {};
 
   for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
     int col = slot % 4;
@@ -1164,7 +1171,12 @@ static void renderMainMenu() {
         0x7BEF);
 
     char path[24] = {};
-    menuIconPath(page, slot, false, path, sizeof(path));
+    menuIconPath(
+        profile,
+        slot,
+        false,
+        path,
+        sizeof(path));
 
     bool drewIcon = false;
     if (littleFsReady && LittleFS.exists(path)) {
@@ -1175,36 +1187,44 @@ static void renderMainMenu() {
           icon.read(
               reinterpret_cast<uint8_t *>(menuIconBuffer),
               MENU_ICON_BYTES) == MENU_ICON_BYTES) {
-        const int scaledW = MENU_ICON_WIDTH * 2;
-        const int scaledH = MENU_ICON_HEIGHT * 2;
-        int iconX = x + (cellW - scaledW) / 2;
-        int iconY = y + (cellH - scaledH) / 2;
+        int iconX =
+            x +
+            (cellW - iconSize) / 2;
 
-        for (uint8_t sourceY = 0; sourceY < MENU_ICON_HEIGHT; ++sourceY) {
+        int iconY =
+            y +
+            (cellH - iconSize) / 2;
+
+        for (int targetY = 0;
+             targetY < iconSize;
+             ++targetY) {
+          int sourceY =
+              targetY *
+              MENU_ICON_HEIGHT /
+              iconSize;
+
           const uint16_t *source =
               menuIconBuffer +
-              static_cast<size_t>(sourceY) * MENU_ICON_WIDTH;
+              static_cast<size_t>(sourceY) *
+                  MENU_ICON_WIDTH;
 
-          for (uint8_t sourceX = 0; sourceX < MENU_ICON_WIDTH; ++sourceX) {
-            uint16_t pixel = source[sourceX];
-            scaledLine[sourceX * 2] = pixel;
-            scaledLine[sourceX * 2 + 1] = pixel;
+          for (int targetX = 0;
+               targetX < iconSize;
+               ++targetX) {
+            int sourceX =
+                targetX *
+                MENU_ICON_WIDTH /
+                iconSize;
+
+            scaledLine[targetX] =
+                source[sourceX];
           }
 
-          int drawY = iconY + sourceY * 2;
-
           tft->draw16bitRGBBitmap(
               iconX,
-              drawY,
+              iconY + targetY,
               scaledLine,
-              scaledW,
-              1);
-
-          tft->draw16bitRGBBitmap(
-              iconX,
-              drawY + 1,
-              scaledLine,
-              scaledW,
+              iconSize,
               1);
         }
 
@@ -1216,14 +1236,12 @@ static void renderMainMenu() {
       }
     }
 
-    uint8_t action = mainMenuConfig.actions[page][slot];
+    uint8_t action =
+        mainMenuConfig.actions[profile][slot];
 
-    // Icon slots are intentionally icon-only. If no icon exists, render the
-    // actual Lumi Action name stored by the app. Fall back to Axx for older
-    // or unnamed actions.
     if (!drewIcon && action > 0) {
       const char *label =
-          mainMenuConfig.labels[page][slot];
+          mainMenuConfig.labels[profile][slot];
 
       char fallback[8] = {};
       if (label[0] == '\0') {
@@ -1275,8 +1293,11 @@ static void closeMenuUpload() {
   menuUploadReceivedBytes = 0;
 }
 
-static bool beginMenuBackgroundUpload(uint32_t expectedBytes) {
+static bool beginMenuBackgroundUpload(
+    uint8_t profile,
+    uint32_t expectedBytes) {
   if (!littleFsReady ||
+      profile >= PROFILE_COUNT ||
       expectedBytes < 4 ||
       expectedBytes > MENU_BACKGROUND_LIMIT_BYTES) {
     return false;
@@ -1284,10 +1305,22 @@ static bool beginMenuBackgroundUpload(uint32_t expectedBytes) {
 
   closeMenuUpload();
 
-  // Replacing artwork must reclaim the previous asset first. This prevents
-  // an old menu image from blocking its replacement when LittleFS is full.
-  LittleFS.remove(MENU_BG_TMP_PATH);
-  LittleFS.remove(MENU_BG_PATH);
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuBackgroundPath(
+      profile,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
+  // Reclaim this profile's old background before checking free space.
+  LittleFS.remove(tempPath);
+  LittleFS.remove(finalPath);
 
   size_t total = LittleFS.totalBytes();
   size_t used = LittleFS.usedBytes();
@@ -1297,23 +1330,24 @@ static bool beginMenuBackgroundUpload(uint32_t expectedBytes) {
     return false;
   }
 
-  menuUploadFile = LittleFS.open(MENU_BG_TMP_PATH, "w");
+  menuUploadFile = LittleFS.open(tempPath, "w");
   if (!menuUploadFile) {
     return false;
   }
 
   menuUploadKind = 1;
+  menuUploadProfile = profile;
   menuUploadExpectedBytes = expectedBytes;
   menuUploadReceivedBytes = 0;
   return true;
 }
 
 static bool beginMenuIconUpload(
-    uint8_t page,
+    uint8_t profile,
     uint8_t slot,
     uint32_t expectedBytes) {
   if (!littleFsReady ||
-      page >= MENU_PAGE_COUNT ||
+      profile >= PROFILE_COUNT ||
       slot >= MENU_SLOT_COUNT ||
       expectedBytes != MENU_ICON_BYTES) {
     return false;
@@ -1323,8 +1357,18 @@ static bool beginMenuIconUpload(
 
   char finalPath[24] = {};
   char tempPath[24] = {};
-  menuIconPath(page, slot, false, finalPath, sizeof(finalPath));
-  menuIconPath(page, slot, true, tempPath, sizeof(tempPath));
+  menuIconPath(
+      profile,
+      slot,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuIconPath(
+      profile,
+      slot,
+      true,
+      tempPath,
+      sizeof(tempPath));
 
   LittleFS.remove(tempPath);
   LittleFS.remove(finalPath);
@@ -1343,7 +1387,7 @@ static bool beginMenuIconUpload(
   }
 
   menuUploadKind = 2;
-  menuUploadPage = page;
+  menuUploadProfile = profile;
   menuUploadSlot = slot;
   menuUploadExpectedBytes = expectedBytes;
   menuUploadReceivedBytes = 0;
@@ -1388,15 +1432,32 @@ static bool writeMenuAssetChunk(
 static bool finishMenuBackgroundUpload() {
   if (menuUploadKind != 1 ||
       !menuUploadFile ||
+      menuUploadProfile >= PROFILE_COUNT ||
       menuUploadReceivedBytes != menuUploadExpectedBytes) {
     closeMenuUpload();
     return false;
   }
 
+  uint8_t profile =
+      menuUploadProfile;
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuBackgroundPath(
+      profile,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
   menuUploadFile.flush();
   menuUploadFile.close();
 
-  File file = LittleFS.open(MENU_BG_TMP_PATH, "r");
+  File file = LittleFS.open(tempPath, "r");
   if (!file) {
     closeMenuUpload();
     return false;
@@ -1413,68 +1474,131 @@ static bool finishMenuBackgroundUpload() {
   file.close();
 
   if (!valid) {
-    LittleFS.remove(MENU_BG_TMP_PATH);
+    LittleFS.remove(tempPath);
     closeMenuUpload();
     return false;
   }
 
-  if (!LittleFS.rename(MENU_BG_TMP_PATH, MENU_BG_PATH)) {
-    LittleFS.remove(MENU_BG_TMP_PATH);
-    closeMenuUpload();
-    return false;
-  }
-
-  closeMenuUpload();
-  renderMainMenu();
-  return true;
-}
-
-static bool finishMenuIconUpload() {
-  if (menuUploadKind != 2 ||
-      !menuUploadFile ||
-      menuUploadReceivedBytes != MENU_ICON_BYTES) {
-    closeMenuUpload();
-    return false;
-  }
-
-  uint8_t page = menuUploadPage;
-  uint8_t slot = menuUploadSlot;
-
-  menuUploadFile.flush();
-  menuUploadFile.close();
-
-  char finalPath[24] = {};
-  char tempPath[24] = {};
-  menuIconPath(page, slot, false, finalPath, sizeof(finalPath));
-  menuIconPath(page, slot, true, tempPath, sizeof(tempPath));
-
-  File verify = LittleFS.open(tempPath, "r");
-  bool valid = verify && verify.size() == MENU_ICON_BYTES;
-  if (verify) {
-    verify.close();
-  }
-
-  if (!valid ||
-      !LittleFS.rename(tempPath, finalPath)) {
+  if (!LittleFS.rename(tempPath, finalPath)) {
     LittleFS.remove(tempPath);
     closeMenuUpload();
     return false;
   }
 
   closeMenuUpload();
-  renderMainMenu();
+
+  if (profile == activeProfile) {
+    renderMainMenu();
+  }
+
   return true;
 }
 
-static void clearMainMenuIcon(uint8_t page, uint8_t slot) {
+static bool finishMenuIconUpload() {
+  if (menuUploadKind != 2 ||
+      !menuUploadFile ||
+      menuUploadProfile >= PROFILE_COUNT ||
+      menuUploadReceivedBytes != MENU_ICON_BYTES) {
+    closeMenuUpload();
+    return false;
+  }
+
+  uint8_t profile =
+      menuUploadProfile;
+
+  uint8_t slot =
+      menuUploadSlot;
+
+  menuUploadFile.flush();
+  menuUploadFile.close();
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuIconPath(
+      profile,
+      slot,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuIconPath(
+      profile,
+      slot,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
+  File verify =
+      LittleFS.open(
+          tempPath,
+          "r");
+
+  bool valid =
+      verify &&
+      verify.size() == MENU_ICON_BYTES;
+
+  if (verify) {
+    verify.close();
+  }
+
+  if (!valid ||
+      !LittleFS.rename(
+          tempPath,
+          finalPath)) {
+    LittleFS.remove(tempPath);
+    closeMenuUpload();
+    return false;
+  }
+
+  closeMenuUpload();
+
+  if (profile == activeProfile) {
+    renderMainMenu();
+  }
+
+  return true;
+}
+
+static void clearMainMenuBackground(
+    uint8_t profile) {
   if (!littleFsReady ||
-      page >= MENU_PAGE_COUNT ||
+      profile >= PROFILE_COUNT) {
+    return;
+  }
+
+  char finalPath[24] = {};
+  char tempPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      finalPath,
+      sizeof(finalPath));
+  menuBackgroundPath(
+      profile,
+      true,
+      tempPath,
+      sizeof(tempPath));
+
+  LittleFS.remove(tempPath);
+  LittleFS.remove(finalPath);
+}
+
+static void clearMainMenuIcon(
+    uint8_t profile,
+    uint8_t slot) {
+  if (!littleFsReady ||
+      profile >= PROFILE_COUNT ||
       slot >= MENU_SLOT_COUNT) {
     return;
   }
 
   char path[24] = {};
-  menuIconPath(page, slot, false, path, sizeof(path));
+  menuIconPath(
+      profile,
+      slot,
+      false,
+      path,
+      sizeof(path));
+
   LittleFS.remove(path);
 }
 
@@ -4455,34 +4579,32 @@ static void handleCommand(String command) {
   }
 
   if (upper.startsWith("GET_MENUCFG|")) {
-    uint16_t page = 0;
+    uint16_t profile = 0;
     int sep = command.indexOf('|');
 
     if (sep < 0 ||
         !parseUnsigned(
             command.substring(sep + 1),
-            MENU_PAGE_COUNT - 1,
-            page)) {
-      cdcPrintln("ERR|BAD_MENU_PAGE");
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln("ERR|BAD_MENU_PROFILE");
       return;
     }
 
     String out = "MENUCFG|";
-    out += String(page);
-    out += '|';
-    out += String(mainMenuConfig.layers[page]);
+    out += String(profile);
     out += '|';
 
     for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
       if (slot) out += ',';
-      out += String(mainMenuConfig.actions[page][slot]);
+      out += String(mainMenuConfig.actions[profile][slot]);
     }
 
     out += '|';
 
     for (uint8_t slot = 0; slot < MENU_SLOT_COUNT; ++slot) {
       if (slot) out += ',';
-      out += String(mainMenuConfig.labels[page][slot]);
+      out += String(mainMenuConfig.labels[profile][slot]);
     }
 
     cdcPrintln(out);
@@ -4493,31 +4615,24 @@ static void handleCommand(String command) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
     int p3 = command.indexOf('|', p2 + 1);
-    int p4 = command.indexOf('|', p3 + 1);
 
-    uint16_t page = 0;
-    uint16_t layer = 0;
+    uint16_t profile = 0;
 
     if (p1 < 0 ||
         p2 < 0 ||
         p3 < 0 ||
-        p4 < 0 ||
         !parseUnsigned(
             command.substring(p1 + 1, p2),
-            MENU_PAGE_COUNT - 1,
-            page) ||
-        !parseUnsigned(
-            command.substring(p2 + 1, p3),
-            LAYER_COUNT - 1,
-            layer)) {
+            PROFILE_COUNT - 1,
+            profile)) {
       cdcPrintln("ERR|BAD_MENUCFG");
       return;
     }
 
     String actionCsv =
         command.substring(
-            p3 + 1,
-            p4);
+            p2 + 1,
+            p3);
 
     int actionStart = 0;
 
@@ -4551,7 +4666,7 @@ static void handleCommand(String command) {
         return;
       }
 
-      mainMenuConfig.actions[page][slot] =
+      mainMenuConfig.actions[profile][slot] =
           static_cast<uint8_t>(action);
 
       actionStart =
@@ -4560,7 +4675,7 @@ static void handleCommand(String command) {
 
     String labelCsv =
         command.substring(
-            p4 + 1);
+            p3 + 1);
 
     int labelStart = 0;
 
@@ -4595,38 +4710,48 @@ static void handleCommand(String command) {
       }
 
       memset(
-          mainMenuConfig.labels[page][slot],
+          mainMenuConfig.labels[profile][slot],
           0,
           MENU_LABEL_MAX_LEN + 1);
 
       label.toCharArray(
-          mainMenuConfig.labels[page][slot],
+          mainMenuConfig.labels[profile][slot],
           MENU_LABEL_MAX_LEN + 1);
 
       labelStart =
           comma + 1;
     }
 
-    mainMenuConfig.layers[page] =
-        static_cast<uint8_t>(layer);
-
     saveMainMenuConfig();
-    renderMainMenu();
+
+    if (profile == activeProfile &&
+        !saverActive) {
+      renderMainMenu();
+    }
 
     cdcPrintln("OK|MENUCFG");
     return;
   }
 
   if (upper.startsWith("MENUBGBEGIN|")) {
-    int sep = command.indexOf('|');
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    uint16_t profile = 0;
     uint32_t bytes = 0;
 
-    if (sep < 0 ||
+    if (p1 < 0 ||
+        p2 < 0 ||
+        !parseUnsigned(
+            command.substring(p1 + 1, p2),
+            PROFILE_COUNT - 1,
+            profile) ||
         !parseUnsignedLong(
-            command.substring(sep + 1),
+            command.substring(p2 + 1),
             MENU_BACKGROUND_LIMIT_BYTES,
             bytes) ||
-        !beginMenuBackgroundUpload(bytes)) {
+        !beginMenuBackgroundUpload(
+            static_cast<uint8_t>(profile),
+            bytes)) {
       cdcPrintln("ERR|MENUBGBEGIN");
       return;
     }
@@ -4673,13 +4798,28 @@ static void handleCommand(String command) {
     return;
   }
 
-  if (upper == "MENUBGCLEAR") {
-    closeMenuUpload();
-    if (littleFsReady) {
-      LittleFS.remove(MENU_BG_TMP_PATH);
-      LittleFS.remove(MENU_BG_PATH);
+  if (upper.startsWith("MENUBGCLEAR|")) {
+    int sep = command.indexOf('|');
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln("ERR|MENUBGCLEAR");
+      return;
     }
-    renderMainMenu();
+
+    closeMenuUpload();
+    clearMainMenuBackground(
+        static_cast<uint8_t>(profile));
+
+    if (profile == activeProfile &&
+        !saverActive) {
+      renderMainMenu();
+    }
+
     cdcPrintln("OK|MENUBGCLEAR");
     return;
   }
@@ -4688,7 +4828,7 @@ static void handleCommand(String command) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
     int p3 = command.indexOf('|', p2 + 1);
-    uint16_t page = 0;
+    uint16_t profile = 0;
     uint16_t slot = 0;
     uint32_t bytes = 0;
 
@@ -4697,8 +4837,8 @@ static void handleCommand(String command) {
         p3 < 0 ||
         !parseUnsigned(
             command.substring(p1 + 1, p2),
-            MENU_PAGE_COUNT - 1,
-            page) ||
+            PROFILE_COUNT - 1,
+            profile) ||
         !parseUnsigned(
             command.substring(p2 + 1, p3),
             MENU_SLOT_COUNT - 1,
@@ -4708,7 +4848,7 @@ static void handleCommand(String command) {
             MENU_ICON_BYTES,
             bytes) ||
         !beginMenuIconUpload(
-            static_cast<uint8_t>(page),
+            static_cast<uint8_t>(profile),
             static_cast<uint8_t>(slot),
             bytes)) {
       cdcPrintln("ERR|MENUICONBEGIN");
@@ -4760,15 +4900,15 @@ static void handleCommand(String command) {
   if (upper.startsWith("MENUICONCLEAR|")) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
-    uint16_t page = 0;
+    uint16_t profile = 0;
     uint16_t slot = 0;
 
     if (p1 < 0 ||
         p2 < 0 ||
         !parseUnsigned(
             command.substring(p1 + 1, p2),
-            MENU_PAGE_COUNT - 1,
-            page) ||
+            PROFILE_COUNT - 1,
+            profile) ||
         !parseUnsigned(
             command.substring(p2 + 1),
             MENU_SLOT_COUNT - 1,
@@ -4778,9 +4918,14 @@ static void handleCommand(String command) {
     }
 
     clearMainMenuIcon(
-        static_cast<uint8_t>(page),
+        static_cast<uint8_t>(profile),
         static_cast<uint8_t>(slot));
-    renderMainMenu();
+
+    if (profile == activeProfile &&
+        !saverActive) {
+      renderMainMenu();
+    }
+
     cdcPrintln("OK|MENUICONCLEAR");
     return;
   }
@@ -5906,12 +6051,19 @@ static void handleCommand(String command) {
       return;
     }
 
+    bool profileChanged =
+        activeProfile != static_cast<uint8_t>(profile);
+
     activeProfile = static_cast<uint8_t>(profile);
     baseLayer = static_cast<uint8_t>(layer);
     momentaryLayer = -1;
     toggledLayerMask = 0;
     sendMappedReports();
     applyRgbProfile();
+
+    if (profileChanged && !saverActive) {
+      renderMainMenu();
+    }
 
     char out[40];
     snprintf(
@@ -5980,8 +6132,6 @@ static void pollCdc() {
 }
 
 static void emitKeyEvent(uint8_t index, bool pressed) {
-  uint8_t menuLayerBefore = currentLayer();
-
   if (pressed) {
     lastUserActivityAt = millis();
     stopSaver();
@@ -6023,11 +6173,6 @@ static void emitKeyEvent(uint8_t index, bool pressed) {
   }
 
   sendMappedReports();
-
-  if (!saverActive &&
-      currentLayer() != menuLayerBefore) {
-    renderMainMenu();
-  }
 
   char out[48];
   snprintf(
@@ -6111,7 +6256,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0161);
+  USB.firmwareVersion(0x0170);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -6125,7 +6270,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.6.1");
+  cdcPrintln("BOOT|PIXELPRO|1.7.0");
 }
 
 void loop() {
