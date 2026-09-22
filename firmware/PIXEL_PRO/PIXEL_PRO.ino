@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.7.0";
+static constexpr char FW_VERSION[] = "1.8.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -44,16 +44,17 @@ static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 
-// PIXEL PRO main-menu artwork. Each keymap profile owns one 3x4 menu.
-// Backgrounds are static JPEGs; icons are compact raw RGB565 tiles.
-static constexpr uint8_t MENU_SLOT_COUNT = 12;
-static constexpr uint8_t MENU_ICON_WIDTH = 40;
-static constexpr uint8_t MENU_ICON_HEIGHT = 40;
-static constexpr uint32_t MENU_ICON_BYTES =
-    static_cast<uint32_t>(MENU_ICON_WIDTH) * MENU_ICON_HEIGHT * 2UL;
+// PIXEL PRO main-menu artwork. Each keymap profile owns one 2x4 menu,
+// matching the eight physical keys. Backgrounds and icons are JPEG assets.
+// Native 96x96 icon decode avoids the old 40x40 upscaling blur.
+static constexpr uint8_t MENU_SLOT_COUNT = 8;
+static constexpr uint8_t MENU_ICON_WIDTH = 96;
+static constexpr uint8_t MENU_ICON_HEIGHT = 96;
+static constexpr uint32_t MENU_ICON_MAX_BYTES = 24UL * 1024UL;
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
-static constexpr uint8_t MENU_STORAGE_VERSION = 3;
+static constexpr uint8_t MENU_STORAGE_VERSION = 4;
+static constexpr uint8_t MENU_STATUS_HEIGHT = 54;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -125,6 +126,12 @@ struct __attribute__((packed)) MainMenuConfig {
   char labels[PROFILE_COUNT][MENU_SLOT_COUNT][MENU_LABEL_MAX_LEN + 1];
 };
 
+struct __attribute__((packed)) LegacyMainMenuConfigV3 {
+  uint8_t version;
+  uint8_t actions[PROFILE_COUNT][12];
+  char labels[PROFILE_COUNT][12][MENU_LABEL_MAX_LEN + 1];
+};
+
 USBHID HID;
 USBHIDKeyboard Keyboard;
 USBHIDConsumerControl ConsumerControl;
@@ -163,7 +170,16 @@ static uint8_t menuUploadProfile = 0;
 static uint8_t menuUploadSlot = 0;
 static uint32_t menuUploadExpectedBytes = 0;
 static uint32_t menuUploadReceivedBytes = 0;
-static uint16_t menuIconBuffer[MENU_ICON_WIDTH * MENU_ICON_HEIGHT] = {};
+
+static int16_t menuCpuLoad = -1;
+static int16_t menuCpuTemp = -1;
+static int16_t menuGpuLoad = -1;
+static int16_t menuGpuTemp = -1;
+static uint8_t menuMonth = 0;
+static uint8_t menuDay = 0;
+static uint8_t menuHour = 0;
+static uint8_t menuMinute = 0;
+static bool menuPcStatusValid = false;
 
 static uint8_t rgbProfiles[PROFILE_COUNT][KEY_COUNT][3] = {};
 // PIXEL effects: 0 rainbow, 1 purple ping-pong, 2 orange blink,
