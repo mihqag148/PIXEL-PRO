@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.5.0";
+static constexpr char FW_VERSION[] = "1.5.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -42,7 +42,7 @@ static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
 static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
-static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 1024UL * 1024UL;
+static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 1100UL * 1024UL;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -2147,7 +2147,7 @@ static bool readPackedHeader(
   }
 
   if (file.size() == 0 ||
-      file.size() >=
+      file.size() >
           PACKED_UPLOAD_LIMIT_BYTES) {
     return false;
   }
@@ -2242,7 +2242,7 @@ static bool beginPackedUpload(
     uint32_t expectedBytes) {
   if (!littleFsReady ||
       expectedBytes < 26 ||
-      expectedBytes >=
+      expectedBytes >
           PACKED_UPLOAD_LIMIT_BYTES) {
     return false;
   }
@@ -5249,7 +5249,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.5.0");
+  cdcPrintln("BOOT|PIXELPRO|1.5.1");
 }
 
 void loop() {
