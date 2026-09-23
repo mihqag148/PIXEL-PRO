@@ -6147,6 +6147,314 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "SAVMEDIA") {
+    if (!saverReady) {
+      cdcPrintln(
+          "SAVMEDIA|STATE=EMPTY");
+      return;
+    }
+
+    String kind =
+        preferences.getString(
+            "sav_kind",
+            "");
+
+    if (kind.length() == 0) {
+      kind =
+          saverFormat == SAVER_PACKED
+              ? "GIF"
+              : saverFormat == SAVER_GIF
+                  ? "GIF"
+                  : saverFormat == SAVER_JPEG
+                      ? "IMAGE"
+                      : "MEDIA";
+    }
+
+    String name =
+        preferences.getString(
+            "sav_name",
+            "");
+
+    unsigned char encodedName[192] = {};
+    size_t encodedNameLength = 0;
+
+    if (name.length() > 0) {
+      mbedtls_base64_encode(
+          encodedName,
+          sizeof(encodedName) - 1,
+          &encodedNameLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              name.c_str()),
+          name.length());
+
+      encodedName[
+          encodedNameLength] = 0;
+    }
+
+    size_t thumbBytes = 0;
+
+    if (littleFsReady &&
+        LittleFS.exists(
+            SAVER_THUMB_PATH)) {
+      File thumb =
+          LittleFS.open(
+              SAVER_THUMB_PATH,
+              "r");
+
+      if (thumb) {
+        thumbBytes =
+            thumb.size();
+
+        thumb.close();
+      }
+    }
+
+    char out[420] = {};
+
+    snprintf(
+        out,
+        sizeof(out),
+        "SAVMEDIA|STATE=READY|KIND=%s|NAME=%s|BYTES=%lu|W=%u|H=%u|FPS=%u|DUR=%lu|THUMB=%lu",
+        kind.c_str(),
+        reinterpret_cast<
+            const char *>(
+            encodedName),
+        static_cast<unsigned long>(
+            saverDataBytes),
+        static_cast<unsigned>(
+            saverWidth),
+        static_cast<unsigned>(
+            saverHeight),
+        static_cast<unsigned>(
+            saverFormat == SAVER_PACKED
+                ? packedFps
+                : 0),
+        static_cast<unsigned long>(
+            saverFormat == SAVER_PACKED
+                ? packedDurationMs
+                : 0),
+        static_cast<unsigned long>(
+            thumbBytes));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper.startsWith("SAVMETA|")) {
+    int first =
+        command.indexOf('|');
+
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    if (!saverReady ||
+        first < 0 ||
+        second < 0 ||
+        !storeSaverMetadata(
+            command.substring(
+                first + 1,
+                second),
+            command.substring(
+                second + 1))) {
+      cdcPrintln(
+          "ERR|SAVMETA");
+      return;
+    }
+
+    cdcPrintln(
+        "OK|SAVMETA");
+    return;
+  }
+
+  if (upper.startsWith("SAVTHBEGIN|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint32_t byteCount = 0;
+
+    if (!saverReady ||
+        sep < 0 ||
+        !parseUnsignedLong(
+            command.substring(
+                sep + 1),
+            SAVER_THUMB_LIMIT_BYTES,
+            byteCount) ||
+        !beginSaverThumbUpload(
+            byteCount)) {
+      cdcPrintln(
+          "ERR|SAVTHBEGIN");
+      return;
+    }
+
+    cdcPrintln(
+        "OK|SAVTHBEGIN");
+    return;
+  }
+
+  if (upper.startsWith("SAVTHDATA|")) {
+    int first =
+        command.indexOf('|');
+
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    uint32_t offset = 0;
+
+    if (first < 0 ||
+        second < 0 ||
+        !parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            saverThumbExpectedBytes,
+            offset) ||
+        !writeSaverThumbChunk(
+            offset,
+            command.substring(
+                second + 1))) {
+      cdcPrintln(
+          "ERR|SAVTHDATA");
+      return;
+    }
+
+    char out[40] = {};
+
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|SAVTHDATA|%lu",
+        static_cast<unsigned long>(
+            saverThumbReceivedBytes));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "SAVTHEND") {
+    if (!finishSaverThumbUpload()) {
+      cdcPrintln(
+          "ERR|SAVTHEND");
+      return;
+    }
+
+    cdcPrintln(
+        "OK|SAVTHEND");
+    return;
+  }
+
+  if (upper.startsWith("SAVTHREAD|")) {
+    int first =
+        command.indexOf('|');
+
+    int second =
+        command.indexOf(
+            '|',
+            first + 1);
+
+    uint32_t offset = 0;
+    uint16_t count = 0;
+
+    if (!littleFsReady ||
+        first < 0 ||
+        second < 0 ||
+        !parseUnsignedLong(
+            command.substring(
+                first + 1,
+                second),
+            SAVER_THUMB_LIMIT_BYTES,
+            offset) ||
+        !parseUnsigned(
+            command.substring(
+                second + 1),
+            512,
+            count) ||
+        count == 0 ||
+        !LittleFS.exists(
+            SAVER_THUMB_PATH)) {
+      cdcPrintln(
+          "ERR|SAVTHREAD");
+      return;
+    }
+
+    File thumb =
+        LittleFS.open(
+            SAVER_THUMB_PATH,
+            "r");
+
+    if (!thumb ||
+        offset >=
+            thumb.size() ||
+        !thumb.seek(
+            offset)) {
+      if (thumb) {
+        thumb.close();
+      }
+
+      cdcPrintln(
+          "ERR|SAVTHREAD");
+      return;
+    }
+
+    uint8_t raw[512] = {};
+
+    size_t toRead =
+        min(
+            static_cast<size_t>(
+                count),
+            static_cast<size_t>(
+                thumb.size() -
+                offset));
+
+    size_t got =
+        thumb.read(
+            raw,
+            toRead);
+
+    thumb.close();
+
+    if (got == 0) {
+      cdcPrintln(
+          "ERR|SAVTHREAD");
+      return;
+    }
+
+    unsigned char encoded[700] = {};
+    size_t encodedLength = 0;
+
+    if (mbedtls_base64_encode(
+            encoded,
+            sizeof(encoded) - 1,
+            &encodedLength,
+            raw,
+            got) != 0) {
+      cdcPrintln(
+          "ERR|SAVTHREAD");
+      return;
+    }
+
+    encoded[
+        encodedLength] = 0;
+
+    String response =
+        "SAVTHDATA|" +
+        String(
+            static_cast<unsigned long>(
+                offset)) +
+        "|" +
+        reinterpret_cast<
+            const char *>(
+            encoded);
+
+    cdcPrintln(
+        response);
+    return;
+  }
+
   if (upper.startsWith("SAVPXBEGIN|")) {
     int sep =
         command.indexOf('|');
