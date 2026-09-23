@@ -3490,7 +3490,7 @@ static bool writeSaverThumbChunk(
     return false;
   }
 
-  uint8_t decoded[800] = {};
+  uint8_t decoded[1100] = {};
   size_t decodedLength = 0;
 
   int result =
