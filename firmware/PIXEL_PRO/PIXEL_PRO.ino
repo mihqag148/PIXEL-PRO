@@ -73,6 +73,9 @@ static constexpr char JPEG_PATH[] = "/screensaver.jpg";
 static constexpr char JPEG_TMP_PATH[] = "/screensaver_jpg.tmp";
 static constexpr char PACKED_PATH[] = "/screensaver.pxq";
 static constexpr char PACKED_TMP_PATH[] = "/screensaver_pxq.tmp";
+static constexpr char SAVER_THUMB_PATH[] = "/screensaver_thumb.jpg";
+static constexpr char SAVER_THUMB_TMP_PATH[] = "/screensaver_thumb.tmp";
+static constexpr uint32_t SAVER_THUMB_LIMIT_BYTES = 96UL * 1024UL;
 
 static constexpr int8_t TFT_RD = 12;
 static constexpr int8_t TFT_WR = 13;
@@ -271,6 +274,10 @@ static File jpegPlaybackFile;
 static File packedUploadFile;
 static File packedPlaybackFile;
 static uint32_t packedUploadExpectedBytes = 0;
+
+static File saverThumbUploadFile;
+static uint32_t saverThumbExpectedBytes = 0;
+static uint32_t saverThumbReceivedBytes = 0;
 static uint16_t packedStorageWidth = 0;
 static uint16_t packedStorageHeight = 0;
 static uint16_t packedFrameCount = 0;
@@ -3359,6 +3366,8 @@ static bool finishGifUpload() {
       "gscalev",
       2);
 
+  clearSaverIdentity();
+
   return true;
 }
 
@@ -3411,6 +3420,192 @@ static void closePackedFiles() {
   if (packedPlaybackFile) {
     packedPlaybackFile.close();
   }
+}
+
+static void closeSaverThumbUpload() {
+  if (saverThumbUploadFile) {
+    saverThumbUploadFile.close();
+  }
+}
+
+static void clearSaverIdentity() {
+  closeSaverThumbUpload();
+
+  if (littleFsReady) {
+    LittleFS.remove(
+        SAVER_THUMB_TMP_PATH);
+
+    LittleFS.remove(
+        SAVER_THUMB_PATH);
+  }
+
+  preferences.remove(
+      "sav_name");
+
+  preferences.remove(
+      "sav_kind");
+
+  saverThumbExpectedBytes = 0;
+  saverThumbReceivedBytes = 0;
+}
+
+static bool beginSaverThumbUpload(
+    uint32_t byteCount) {
+  if (!littleFsReady ||
+      byteCount == 0 ||
+      byteCount >
+          SAVER_THUMB_LIMIT_BYTES) {
+    return false;
+  }
+
+  closeSaverThumbUpload();
+
+  LittleFS.remove(
+      SAVER_THUMB_TMP_PATH);
+
+  saverThumbUploadFile =
+      LittleFS.open(
+          SAVER_THUMB_TMP_PATH,
+          "w");
+
+  if (!saverThumbUploadFile) {
+    return false;
+  }
+
+  saverThumbExpectedBytes =
+      byteCount;
+
+  saverThumbReceivedBytes =
+      0;
+
+  return true;
+}
+
+static bool writeSaverThumbChunk(
+    uint32_t offset,
+    const String &encoded) {
+  if (!saverThumbUploadFile ||
+      offset !=
+          saverThumbReceivedBytes) {
+    return false;
+  }
+
+  uint8_t decoded[800] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded),
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encoded.c_str()),
+          encoded.length());
+
+  if (result != 0 ||
+      decodedLength == 0 ||
+      saverThumbReceivedBytes +
+              decodedLength >
+          saverThumbExpectedBytes) {
+    return false;
+  }
+
+  size_t written =
+      saverThumbUploadFile.write(
+          decoded,
+          decodedLength);
+
+  if (written !=
+      decodedLength) {
+    return false;
+  }
+
+  saverThumbReceivedBytes +=
+      decodedLength;
+
+  return true;
+}
+
+static bool finishSaverThumbUpload() {
+  if (!saverThumbUploadFile ||
+      saverThumbReceivedBytes !=
+          saverThumbExpectedBytes) {
+    closeSaverThumbUpload();
+    return false;
+  }
+
+  saverThumbUploadFile.flush();
+  closeSaverThumbUpload();
+
+  File file =
+      LittleFS.open(
+          SAVER_THUMB_TMP_PATH,
+          "r");
+
+  size_t actual =
+      file
+          ? file.size()
+          : 0;
+
+  if (file) {
+    file.close();
+  }
+
+  if (actual !=
+      saverThumbExpectedBytes) {
+    LittleFS.remove(
+        SAVER_THUMB_TMP_PATH);
+    return false;
+  }
+
+  LittleFS.remove(
+      SAVER_THUMB_PATH);
+
+  if (!LittleFS.rename(
+          SAVER_THUMB_TMP_PATH,
+          SAVER_THUMB_PATH)) {
+    LittleFS.remove(
+        SAVER_THUMB_TMP_PATH);
+    return false;
+  }
+
+  return true;
+}
+
+static bool storeSaverMetadata(
+    const String &kind,
+    const String &encodedName) {
+  uint8_t decoded[128] = {};
+  size_t decodedLength = 0;
+
+  int result =
+      mbedtls_base64_decode(
+          decoded,
+          sizeof(decoded) - 1,
+          &decodedLength,
+          reinterpret_cast<
+              const unsigned char *>(
+              encodedName.c_str()),
+          encodedName.length());
+
+  if (result != 0 ||
+      decodedLength == 0) {
+    return false;
+  }
+
+  decoded[decodedLength] = 0;
+
+  preferences.putString(
+      "sav_name",
+      reinterpret_cast<
+          const char *>(decoded));
+
+  preferences.putString(
+      "sav_kind",
+      kind);
+
+  return true;
 }
 
 static bool readPackedU16(
@@ -3892,6 +4087,8 @@ static bool finishPackedUpload() {
 
   saverBytesReceived =
       actualSize;
+
+  clearSaverIdentity();
 
   return true;
 }
@@ -4697,6 +4894,8 @@ static bool finishJpegUpload() {
       "jpgh",
       actualHeight);
 
+  clearSaverIdentity();
+
   return true;
 }
 
@@ -4769,7 +4968,12 @@ static void clearSaverBuffer() {
     LittleFS.remove(JPEG_PATH);
     LittleFS.remove(PACKED_TMP_PATH);
     LittleFS.remove(PACKED_PATH);
+    LittleFS.remove(SAVER_THUMB_TMP_PATH);
+    LittleFS.remove(SAVER_THUMB_PATH);
   }
+
+  preferences.remove("sav_name");
+  preferences.remove("sav_kind");
 
   if (saverData != nullptr) {
     free(saverData);
