@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.3";
+static constexpr char FW_VERSION[] = "1.8.4";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -42,7 +42,7 @@ static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
 static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
-static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
+static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2000UL * 1024UL;
 
 // PIXEL PRO main-menu artwork. Each keymap profile owns one 2x4 menu,
 // matching the eight physical keys. Backgrounds stay JPEG; icons use a compact
@@ -3678,9 +3678,7 @@ static bool writePackedUploadChunk(
     const String &encoded) {
   if (!saverUploading ||
       saverFormat != SAVER_PACKED ||
-      !packedUploadFile ||
-      offset !=
-          saverBytesReceived) {
+      !packedUploadFile) {
     return false;
   }
 
@@ -3698,7 +3696,23 @@ static bool writePackedUploadChunk(
           encoded.length());
 
   if (result != 0 ||
-      decodedLength == 0 ||
+      decodedLength == 0) {
+    return false;
+  }
+
+  // Upload is ACKed chunk-by-chunk. If the ACK for the immediately previous
+  // chunk is lost on USB CDC, the app retries that same offset. Treat that
+  // exact last-chunk replay as already committed instead of rejecting the
+  // entire ~2 MB transfer.
+  if (offset <
+      saverBytesReceived) {
+    return offset +
+               decodedLength ==
+           saverBytesReceived;
+  }
+
+  if (offset !=
+          saverBytesReceived ||
       saverBytesReceived +
               decodedLength >
           packedUploadExpectedBytes) {
@@ -7190,7 +7204,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0183);
+  USB.firmwareVersion(0x0184);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -7204,7 +7218,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.3");
+  cdcPrintln("BOOT|PIXELPRO|1.8.4");
 }
 
 void loop() {
