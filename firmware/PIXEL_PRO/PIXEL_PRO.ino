@@ -5884,10 +5884,44 @@ static void handleCommand(String command) {
       return;
     }
 
+    if (!littleFsReady) {
+      cdcPrintln(
+          "ERR|FS_NOT_READY");
+      return;
+    }
+
     if (!beginPackedUpload(
             byteCount)) {
-      cdcPrintln(
-          "ERR|SAVPXBEGIN_ALLOC");
+      size_t total =
+          LittleFS.totalBytes();
+
+      size_t used =
+          LittleFS.usedBytes();
+
+      size_t freeBytes =
+          total > used
+              ? total - used
+              : 0;
+
+      if (byteCount + 4096 >
+          freeBytes) {
+        char out[96];
+
+        snprintf(
+            out,
+            sizeof(out),
+            "ERR|NO_SPACE|FREE=%lu|NEED=%lu",
+            static_cast<unsigned long>(
+                freeBytes),
+            static_cast<unsigned long>(
+                byteCount + 4096));
+
+        cdcPrintln(out);
+      } else {
+        cdcPrintln(
+            "ERR|SAVPXBEGIN_ALLOC");
+      }
+
       return;
     }
 
