@@ -1418,13 +1418,11 @@ static void drawDockTile(
     int x,
     int y,
     uint16_t color) {
-  tft->fillRoundRect(
-      x,
-      y,
-      42,
-      36,
-      9,
-      color);
+  // Intentionally frameless. The helpers keep their old coordinate system,
+  // but only the glyph artwork itself is drawn.
+  (void)x;
+  (void)y;
+  (void)color;
 }
 
 static void drawDockWindowsStart(
@@ -1740,38 +1738,15 @@ static void renderMainMenuStatusBar() {
     return;
   }
 
-  const int dockW =
-      286;
-
-  const int dockH =
-      46;
-
-  const int dockX =
-      (TFT_WIDTH -
-       dockW) /
-      2;
-
-  const int dockY =
-      TFT_HEIGHT -
-      dockH -
-      2;
-
-  tft->fillRoundRect(
-      dockX,
-      dockY,
-      dockW,
-      dockH,
-      13,
-      0x18C3);
-
   const int tileY =
-      dockY + 5;
+      TFT_HEIGHT -
+      43;
 
   const int firstX =
-      dockX + 8;
+      99;
 
   const int step =
-      54;
+      80;
 
   uint8_t hostOs =
       menuHostOs >= 1 &&
@@ -1780,7 +1755,7 @@ static void renderMainMenuStatusBar() {
           : 1;
 
   if (hostOs == 2) {
-    // macOS: Launchpad, Finder, Safari, Terminal, Settings.
+    // macOS: Launchpad, Finder, Safari, Settings.
     drawDockMacLaunchpad(
         firstX,
         tileY);
@@ -1790,7 +1765,7 @@ static void renderMainMenuStatusBar() {
         tileY,
         0x4D5F);
   } else if (hostOs == 3) {
-    // Linux: Applications, Files, Browser, Terminal, Settings.
+    // Linux: Applications, Files, Browser, Settings.
     drawDockLinuxApps(
         firstX,
         tileY);
@@ -1800,7 +1775,7 @@ static void renderMainMenuStatusBar() {
         tileY,
         0xE480);
   } else {
-    // Windows: Start, Explorer, Edge, Terminal, Settings.
+    // Windows: Start, Explorer, Edge, Settings.
     drawDockWindowsStart(
         firstX,
         tileY);
@@ -1816,12 +1791,8 @@ static void renderMainMenuStatusBar() {
       tileY,
       hostOs);
 
-  drawDockTerminal(
-      firstX + step * 3,
-      tileY);
-
   drawDockSettings(
-      firstX + step * 4,
+      firstX + step * 3,
       tileY);
 }
 
