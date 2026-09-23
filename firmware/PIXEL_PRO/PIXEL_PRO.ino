@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.7";
+static constexpr char FW_VERSION[] = "1.8.8";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -1414,67 +1414,55 @@ static bool renderMainMenuIcon(
   return result != 0;
 }
 
-static void drawDockTile(
-    int x,
-    int y,
-    uint16_t color) {
-  // Intentionally frameless. The helpers keep their old coordinate system,
-  // but only the glyph artwork itself is drawn.
-  (void)x;
-  (void)y;
-  (void)color;
-}
-
 static void drawDockWindowsStart(
     int x,
     int y) {
-  drawDockTile(
-      x,
-      y,
-      0x24FF);
-
-  const uint16_t white =
-      0xFFFF;
+  const uint16_t blue =
+      0x051F;
 
   tft->fillRect(
-      x + 10,
-      y + 9,
-      9,
-      8,
-      white);
+      x + 3,
+      y + 3,
+      18,
+      18,
+      blue);
 
   tft->fillRect(
-      x + 22,
-      y + 9,
-      10,
-      8,
-      white);
+      x + 27,
+      y + 3,
+      18,
+      18,
+      blue);
 
   tft->fillRect(
-      x + 10,
-      y + 20,
-      9,
-      8,
-      white);
+      x + 3,
+      y + 27,
+      18,
+      18,
+      blue);
 
   tft->fillRect(
-      x + 22,
-      y + 20,
-      10,
-      8,
-      white);
+      x + 27,
+      y + 27,
+      18,
+      18,
+      blue);
 }
 
 static void drawDockMacLaunchpad(
     int x,
     int y) {
-  drawDockTile(
-      x,
-      y,
-      0x632C);
-
-  const uint16_t white =
-      0xFFFF;
+  static const uint16_t colors[9] = {
+      0x4CFF,
+      0x92BF,
+      0xFAEC,
+      0x2E6F,
+      0xFDA6,
+      0x5E7F,
+      0xFB95,
+      0x7BFF,
+      0x65EC
+  };
 
   for (int row = 0;
        row < 3;
@@ -1482,11 +1470,17 @@ static void drawDockMacLaunchpad(
     for (int col = 0;
          col < 3;
          ++col) {
-      tft->fillCircle(
-          x + 14 + col * 7,
-          y + 11 + row * 7,
-          2,
-          white);
+      tft->fillRoundRect(
+          x + 4 +
+              col * 15,
+          y + 4 +
+              row * 15,
+          11,
+          11,
+          3,
+          colors[
+              row * 3 +
+              col]);
     }
   }
 }
@@ -1494,11 +1488,6 @@ static void drawDockMacLaunchpad(
 static void drawDockLinuxApps(
     int x,
     int y) {
-  drawDockTile(
-      x,
-      y,
-      0xEACB);
-
   const uint16_t white =
       0xFFFF;
 
@@ -1509,227 +1498,360 @@ static void drawDockLinuxApps(
          col < 3;
          ++col) {
       tft->fillCircle(
-          x + 14 + col * 7,
-          y + 11 + row * 7,
-          2,
+          x + 8 +
+              col * 16,
+          y + 8 +
+              row * 16,
+          4,
           white);
     }
   }
 }
 
-static void drawDockFolder(
+static void drawDockWindowsFolder(
     int x,
-    int y,
-    uint16_t tileColor) {
-  drawDockTile(
-      x,
-      y,
-      tileColor);
+    int y) {
+  const uint16_t yellow =
+      0xFE66;
 
-  const uint16_t white =
-      0xFFFF;
+  const uint16_t gold =
+      0xFDC0;
+
+  const uint16_t blue =
+      0x4C7F;
 
   tft->fillRoundRect(
-      x + 9,
-      y + 12,
-      24,
-      16,
+      x + 3,
+      y + 17,
+      45,
+      29,
+      5,
+      yellow);
+
+  tft->fillRoundRect(
+      x + 7,
+      y + 10,
+      22,
+      13,
+      4,
+      gold);
+
+  tft->fillRoundRect(
+      x + 28,
+      y + 14,
+      17,
+      7,
       3,
-      white);
+      blue);
+}
+
+static void drawDockMacFinder(
+    int x,
+    int y) {
+  const uint16_t lightBlue =
+      0x5D7F;
+
+  const uint16_t deepBlue =
+      0x2C9F;
+
+  const uint16_t ink =
+      0x09AA;
+
+  tft->fillRoundRect(
+      x + 1,
+      y + 1,
+      48,
+      48,
+      9,
+      lightBlue);
 
   tft->fillRect(
-      x + 11,
-      y + 9,
-      10,
-      6,
-      white);
+      x + 25,
+      y + 1,
+      24,
+      48,
+      deepBlue);
+
+  tft->drawLine(
+      x + 25,
+      y + 5,
+      x + 25,
+      y + 44,
+      ink);
+
+  tft->fillCircle(
+      x + 16,
+      y + 22,
+      2,
+      ink);
+
+  tft->fillCircle(
+      x + 34,
+      y + 22,
+      2,
+      ink);
+
+  tft->drawLine(
+      x + 14,
+      y + 32,
+      x + 22,
+      y + 36,
+      ink);
+
+  tft->drawLine(
+      x + 22,
+      y + 36,
+      x + 34,
+      y + 31,
+      ink);
+}
+
+static void drawDockLinuxFolder(
+    int x,
+    int y) {
+  const uint16_t blue =
+      0x4C7F;
+
+  const uint16_t darkBlue =
+      0x337A;
+
+  tft->fillRoundRect(
+      x + 3,
+      y + 17,
+      45,
+      29,
+      5,
+      blue);
+
+  tft->fillRoundRect(
+      x + 7,
+      y + 10,
+      22,
+      13,
+      4,
+      darkBlue);
 }
 
 static void drawDockBrowser(
     int x,
     int y,
     uint8_t hostOs) {
-  const uint16_t white =
-      0xFFFF;
-
   if (hostOs == 2) {
-    // macOS Safari-style compass.
-    drawDockTile(
-        x,
-        y,
-        0x05DF);
+    const uint16_t blue =
+        0x35FF;
+
+    const uint16_t white =
+        0xFFFF;
+
+    const uint16_t red =
+        0xF249;
+
+    tft->fillCircle(
+        x + 25,
+        y + 25,
+        23,
+        blue);
 
     tft->drawCircle(
-        x + 21,
-        y + 18,
-        11,
+        x + 25,
+        y + 25,
+        20,
         white);
 
     tft->drawCircle(
-        x + 21,
-        y + 18,
-        8,
+        x + 25,
+        y + 25,
+        16,
         white);
 
     tft->drawLine(
-        x + 16,
-        y + 24,
-        x + 25,
-        y + 12,
-        0xF800);
+        x + 20,
+        y + 36,
+        x + 30,
+        y + 13,
+        red);
 
     tft->drawLine(
+        x + 30,
+        y + 13,
+        x + 27,
+        y + 27,
+        white);
+
+    tft->fillCircle(
         x + 25,
-        y + 12,
-        x + 22,
-        y + 20,
+        y + 25,
+        2,
         white);
 
     return;
   }
 
   if (hostOs == 3) {
-    // Linux Firefox/browser-style globe.
-    drawDockTile(
-        x,
-        y,
-        0xEBA0);
+    const uint16_t purple =
+        0x632D;
+
+    const uint16_t orange =
+        0xFB84;
+
+    const uint16_t blue =
+        0x3B9A;
 
     tft->fillCircle(
-        x + 21,
-        y + 18,
-        10,
-        0x159F);
+        x + 25,
+        y + 25,
+        23,
+        purple);
 
-    tft->drawCircle(
-        x + 21,
-        y + 18,
-        11,
-        white);
+    tft->fillCircle(
+        x + 29,
+        y + 22,
+        18,
+        orange);
+
+    tft->fillCircle(
+        x + 25,
+        y + 27,
+        13,
+        blue);
 
     tft->drawLine(
         x + 12,
-        y + 24,
-        x + 30,
         y + 12,
-        0xFFE0);
+        x + 21,
+        y + 7,
+        orange);
 
     return;
   }
 
-  // Windows Edge/browser-style swirl.
-  drawDockTile(
-      x,
-      y,
-      0x059F);
+  const uint16_t teal =
+      0x16D3;
 
-  tft->drawCircle(
-      x + 21,
-      y + 18,
-      10,
-      white);
+  const uint16_t blue =
+      0x04FF;
 
-  tft->drawCircle(
-      x + 21,
-      y + 18,
-      5,
-      white);
+  const uint16_t deepBlue =
+      0x02D2;
 
-  tft->drawLine(
-      x + 12,
-      y + 20,
+  tft->fillCircle(
+      x + 25,
+      y + 25,
+      23,
+      teal);
+
+  tft->fillCircle(
+      x + 29,
+      y + 30,
+      18,
+      blue);
+
+  tft->fillCircle(
       x + 30,
-      y + 20,
-      white);
+      y + 25,
+      10,
+      deepBlue);
 
   tft->drawLine(
-      x + 22,
-      y + 9,
-      x + 14,
-      y + 16,
-      0x07FF);
-}
-
-static void drawDockTerminal(
-    int x,
-    int y) {
-  drawDockTile(
-      x,
-      y,
-      0x3186);
-
-  tft->drawRoundRect(
-      x + 8,
-      y + 8,
-      26,
-      20,
-      4,
+      x + 7,
+      y + 28,
+      x + 43,
+      y + 28,
       0xFFFF);
-
-  tft->setTextSize(1);
-  tft->setTextColor(
-      0xFFFF);
-
-  tft->setCursor(
-      x + 13,
-      y + 15);
-
-  tft->print(">_");
 }
 
 static void drawDockSettings(
     int x,
     int y) {
-  drawDockTile(
-      x,
-      y,
-      0x5ACB);
-
   const int cx =
-      x + 21;
+      x + 25;
 
   const int cy =
-      y + 18;
+      y + 25;
 
-  tft->drawCircle(
-      cx,
-      cy,
-      7,
-      0xFFFF);
+  const uint16_t silver =
+      0x9CF3;
+
+  const uint16_t white =
+      0xFFFF;
 
   tft->fillCircle(
       cx,
       cy,
-      2,
-      0xFFFF);
+      17,
+      silver);
 
-  tft->drawLine(
-      cx - 11,
+  tft->drawCircle(
+      cx,
       cy,
-      cx - 7,
-      cy,
-      0xFFFF);
+      18,
+      white);
 
-  tft->drawLine(
-      cx + 7,
+  tft->fillCircle(
+      cx,
       cy,
-      cx + 11,
-      cy,
-      0xFFFF);
+      7,
+      0x3186);
 
-  tft->drawLine(
-      cx,
-      cy - 11,
-      cx,
-      cy - 7,
-      0xFFFF);
+  for (int i = 0;
+       i < 8;
+       ++i) {
+    int dx = 0;
+    int dy = 0;
 
-  tft->drawLine(
-      cx,
-      cy + 7,
-      cx,
-      cy + 11,
-      0xFFFF);
+    switch (i) {
+      case 0:
+        dx = 0;
+        dy = -23;
+        break;
+
+      case 1:
+        dx = 16;
+        dy = -16;
+        break;
+
+      case 2:
+        dx = 23;
+        dy = 0;
+        break;
+
+      case 3:
+        dx = 16;
+        dy = 16;
+        break;
+
+      case 4:
+        dx = 0;
+        dy = 23;
+        break;
+
+      case 5:
+        dx = -16;
+        dy = 16;
+        break;
+
+      case 6:
+        dx = -23;
+        dy = 0;
+        break;
+
+      default:
+        dx = -16;
+        dy = -16;
+        break;
+    }
+
+    tft->drawLine(
+        cx +
+            dx * 13 /
+                23,
+        cy +
+            dy * 13 /
+                23,
+        cx + dx,
+        cy + dy,
+        silver);
+  }
 }
 
 static void renderMainMenuStatusBar() {
@@ -1740,13 +1862,13 @@ static void renderMainMenuStatusBar() {
 
   const int tileY =
       TFT_HEIGHT -
-      43;
+      50;
 
   const int firstX =
-      99;
+      24;
 
   const int step =
-      80;
+      120;
 
   uint8_t hostOs =
       menuHostOs >= 1 &&
@@ -1760,30 +1882,27 @@ static void renderMainMenuStatusBar() {
         firstX,
         tileY);
 
-    drawDockFolder(
+    drawDockMacFinder(
         firstX + step,
-        tileY,
-        0x4D5F);
+        tileY);
   } else if (hostOs == 3) {
-    // Linux: Applications, Files, Browser, Settings.
+    // Linux/GNOME: Applications, Files, Browser, Settings.
     drawDockLinuxApps(
         firstX,
         tileY);
 
-    drawDockFolder(
+    drawDockLinuxFolder(
         firstX + step,
-        tileY,
-        0xE480);
+        tileY);
   } else {
     // Windows: Start, Explorer, Edge, Settings.
     drawDockWindowsStart(
         firstX,
         tileY);
 
-    drawDockFolder(
+    drawDockWindowsFolder(
         firstX + step,
-        tileY,
-        0xD520);
+        tileY);
   }
 
   drawDockBrowser(
@@ -7808,7 +7927,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0187);
+  USB.firmwareVersion(0x0188);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -7822,7 +7941,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.7");
+  cdcPrintln("BOOT|PIXELPRO|1.8.8");
 }
 
 void loop() {
