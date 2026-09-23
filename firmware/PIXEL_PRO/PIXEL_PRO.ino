@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.4";
+static constexpr char FW_VERSION[] = "1.8.5";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -1420,6 +1420,98 @@ static void drawDockTile(
       color);
 }
 
+static void drawDockWindowsStart(
+    int x,
+    int y) {
+  drawDockTile(
+      x,
+      y,
+      0x24FF);
+
+  const uint16_t white =
+      0xFFFF;
+
+  tft->fillRect(
+      x + 10,
+      y + 9,
+      9,
+      8,
+      white);
+
+  tft->fillRect(
+      x + 22,
+      y + 9,
+      10,
+      8,
+      white);
+
+  tft->fillRect(
+      x + 10,
+      y + 20,
+      9,
+      8,
+      white);
+
+  tft->fillRect(
+      x + 22,
+      y + 20,
+      10,
+      8,
+      white);
+}
+
+static void drawDockMacLaunchpad(
+    int x,
+    int y) {
+  drawDockTile(
+      x,
+      y,
+      0x632C);
+
+  const uint16_t white =
+      0xFFFF;
+
+  for (int row = 0;
+       row < 3;
+       ++row) {
+    for (int col = 0;
+         col < 3;
+         ++col) {
+      tft->fillCircle(
+          x + 14 + col * 7,
+          y + 11 + row * 7,
+          2,
+          white);
+    }
+  }
+}
+
+static void drawDockLinuxApps(
+    int x,
+    int y) {
+  drawDockTile(
+      x,
+      y,
+      0xEACB);
+
+  const uint16_t white =
+      0xFFFF;
+
+  for (int row = 0;
+       row < 3;
+       ++row) {
+    for (int col = 0;
+         col < 3;
+         ++col) {
+      tft->fillCircle(
+          x + 14 + col * 7,
+          y + 11 + row * 7,
+          2,
+          white);
+    }
+  }
+}
+
 static void drawDockFolder(
     int x,
     int y,
@@ -1451,14 +1543,80 @@ static void drawDockFolder(
 static void drawDockBrowser(
     int x,
     int y,
-    uint16_t tileColor) {
+    uint8_t hostOs) {
+  const uint16_t white =
+      0xFFFF;
+
+  if (hostOs == 2) {
+    // macOS Safari-style compass.
+    drawDockTile(
+        x,
+        y,
+        0x05DF);
+
+    tft->drawCircle(
+        x + 21,
+        y + 18,
+        11,
+        white);
+
+    tft->drawCircle(
+        x + 21,
+        y + 18,
+        8,
+        white);
+
+    tft->drawLine(
+        x + 16,
+        y + 24,
+        x + 25,
+        y + 12,
+        0xF800);
+
+    tft->drawLine(
+        x + 25,
+        y + 12,
+        x + 22,
+        y + 20,
+        white);
+
+    return;
+  }
+
+  if (hostOs == 3) {
+    // Linux Firefox/browser-style globe.
+    drawDockTile(
+        x,
+        y,
+        0xEBA0);
+
+    tft->fillCircle(
+        x + 21,
+        y + 18,
+        10,
+        0x159F);
+
+    tft->drawCircle(
+        x + 21,
+        y + 18,
+        11,
+        white);
+
+    tft->drawLine(
+        x + 12,
+        y + 24,
+        x + 30,
+        y + 12,
+        0xFFE0);
+
+    return;
+  }
+
+  // Windows Edge/browser-style swirl.
   drawDockTile(
       x,
       y,
-      tileColor);
-
-  const uint16_t white =
-      0xFFFF;
+      0x059F);
 
   tft->drawCircle(
       x + 21,
@@ -1474,10 +1632,17 @@ static void drawDockBrowser(
 
   tft->drawLine(
       x + 12,
-      y + 18,
+      y + 20,
       x + 30,
-      y + 18,
+      y + 20,
       white);
+
+  tft->drawLine(
+      x + 22,
+      y + 9,
+      x + 14,
+      y + 16,
+      0x07FF);
 }
 
 static void drawDockTerminal(
@@ -1562,113 +1727,6 @@ static void drawDockSettings(
       0xFFFF);
 }
 
-static void drawHostOsBadge(
-    int x,
-    int y) {
-  drawDockTile(
-      x,
-      y,
-      0x2124);
-
-  if (menuHostOs == 2) {
-    // macOS: simple Finder-like split face, no app-name text.
-    tft->fillRoundRect(
-        x + 10,
-        y + 8,
-        22,
-        20,
-        5,
-        0x5DFF);
-
-    tft->drawLine(
-        x + 21,
-        y + 8,
-        x + 21,
-        y + 28,
-        0xFFFF);
-
-    tft->fillCircle(
-        x + 16,
-        y + 16,
-        1,
-        0xFFFF);
-
-    tft->fillCircle(
-        x + 26,
-        y + 16,
-        1,
-        0xFFFF);
-
-    tft->drawLine(
-        x + 15,
-        y + 23,
-        x + 27,
-        y + 23,
-        0xFFFF);
-
-    return;
-  }
-
-  if (menuHostOs == 3) {
-    // Linux: compact penguin-style mark.
-    tft->fillCircle(
-        x + 21,
-        y + 18,
-        10,
-        0xFFFF);
-
-    tft->fillCircle(
-        x + 17,
-        y + 15,
-        2,
-        0x0000);
-
-    tft->fillCircle(
-        x + 25,
-        y + 15,
-        2,
-        0x0000);
-
-    tft->fillRect(
-        x + 19,
-        y + 19,
-        5,
-        3,
-        0xFD20);
-
-    return;
-  }
-
-  // Windows / unknown: four-pane mark.
-  tft->fillRect(
-      x + 10,
-      y + 9,
-      9,
-      8,
-      0xFFFF);
-
-  tft->fillRect(
-      x + 22,
-      y + 9,
-      10,
-      8,
-      0xFFFF);
-
-  tft->fillRect(
-      x + 10,
-      y + 20,
-      9,
-      8,
-      0xFFFF);
-
-  tft->fillRect(
-      x + 22,
-      y + 20,
-      10,
-      8,
-      0xFFFF);
-}
-
 static void renderMainMenuStatusBar() {
   if (!displayReady ||
       saverActive) {
@@ -1708,33 +1766,48 @@ static void renderMainMenuStatusBar() {
   const int step =
       54;
 
-  drawHostOsBadge(
-      firstX,
-      tileY);
+  uint8_t hostOs =
+      menuHostOs >= 1 &&
+      menuHostOs <= 3
+          ? menuHostOs
+          : 1;
 
-  uint16_t folderColor =
-      menuHostOs == 2
-          ? 0x5DFF
-          : menuHostOs == 3
-              ? 0xFD20
-              : 0x2B7F;
+  if (hostOs == 2) {
+    // macOS: Launchpad, Finder, Safari, Terminal, Settings.
+    drawDockMacLaunchpad(
+        firstX,
+        tileY);
 
-  uint16_t browserColor =
-      menuHostOs == 2
-          ? 0x04FF
-          : menuHostOs == 3
-              ? 0xFBA0
-              : 0x1595;
+    drawDockFolder(
+        firstX + step,
+        tileY,
+        0x4D5F);
+  } else if (hostOs == 3) {
+    // Linux: Applications, Files, Browser, Terminal, Settings.
+    drawDockLinuxApps(
+        firstX,
+        tileY);
 
-  drawDockFolder(
-      firstX + step,
-      tileY,
-      folderColor);
+    drawDockFolder(
+        firstX + step,
+        tileY,
+        0xE480);
+  } else {
+    // Windows: Start, Explorer, Edge, Terminal, Settings.
+    drawDockWindowsStart(
+        firstX,
+        tileY);
+
+    drawDockFolder(
+        firstX + step,
+        tileY,
+        0xD520);
+  }
 
   drawDockBrowser(
       firstX + step * 2,
       tileY,
-      browserColor);
+      hostOs);
 
   drawDockTerminal(
       firstX + step * 3,
@@ -5354,6 +5427,10 @@ static void handleCommand(String command) {
       return;
     }
 
+    preferences.putUChar(
+        "host_os",
+        menuHostOs);
+
     if (!saverActive) {
       renderMainMenuStatusBar();
     }
@@ -7209,6 +7286,16 @@ void setup() {
   loadRgbProfiles();
   loadMainMenuConfig();
 
+  menuHostOs =
+      preferences.getUChar(
+          "host_os",
+          1);
+
+  if (menuHostOs < 1 ||
+      menuHostOs > 3) {
+    menuHostOs = 1;
+  }
+
   rgbStrip.begin();
   rgbStrip.clear();
   applyRgbProfile();
@@ -7238,7 +7325,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0184);
+  USB.firmwareVersion(0x0185);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -7252,7 +7339,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.4");
+  cdcPrintln("BOOT|PIXELPRO|1.8.5");
 }
 
 void loop() {
