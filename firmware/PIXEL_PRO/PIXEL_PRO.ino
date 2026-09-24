@@ -3,6 +3,8 @@
 #include <Arduino_GFX_Library.h>
 #include <AnimatedGIF.h>
 #include <LittleFS.h>
+#include <SPI.h>
+#include <SD.h>
 #include <JPEGDEC.h>
 #include <Adafruit_NeoPixel.h>
 #include <mbedtls/base64.h>
@@ -17,7 +19,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.9.2";
+static constexpr char FW_VERSION[] = "1.9.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -85,7 +87,10 @@ static constexpr char SAVER_THUMB_PATH[] = "/screensaver_thumb.jpg";
 static constexpr char SAVER_THUMB_TMP_PATH[] = "/screensaver_thumb.tmp";
 static constexpr uint32_t SAVER_THUMB_LIMIT_BYTES = 96UL * 1024UL;
 
-static constexpr int8_t TFT_RD = 12;
+// LCD_RD is not driven by the MCU. Arduino_GFX does not require RD for
+// write-only parallel displays; wire the shield's LCD_RD directly to 3V3.
+// This frees D12 for the microSD bus.
+static constexpr int8_t TFT_RD = GFX_NOT_DEFINED;
 static constexpr int8_t TFT_WR = 13;
 static constexpr int8_t TFT_DC = 14;
 static constexpr int8_t TFT_CS = 16;
@@ -139,6 +144,16 @@ static constexpr uint8_t MATRIX_COL_PINS[MATRIX_COL_COUNT] = {3, 4, 5, 6};
 static constexpr uint8_t ROLLER_A_PIN = 7;
 static constexpr uint8_t ROLLER_B_PIN = 8;
 static constexpr uint8_t ROLLER_SW_PIN = 21;
+
+// TFT-shield microSD. Keeping SD_SCK/DO/DI/SS on consecutive D9..D12 makes
+// hand-wiring to the WEMOS S2 Mini simple and leaves the display/data groups
+// physically tidy. ESP32-S2 routes hardware SPI through the GPIO matrix.
+static constexpr uint8_t SD_SCK_PIN = 9;
+static constexpr uint8_t SD_MISO_PIN = 10;  // shield SD_DO
+static constexpr uint8_t SD_MOSI_PIN = 11;  // shield SD_DI
+static constexpr uint8_t SD_CS_PIN = 12;    // shield SD_SS
+static constexpr uint32_t SD_SPI_HZ = 20000000UL;
+
 static constexpr int8_t ROLLER_TRANSITIONS_PER_DETENT = 4;
 static constexpr uint16_t ROLLER_CW_CONSUMER = 0x00E9;    // Volume increment
 static constexpr uint16_t ROLLER_CCW_CONSUMER = 0x00EA;   // Volume decrement
@@ -337,6 +352,8 @@ static uint32_t lastUserActivityAt = 0;
 static uint32_t saverDelayMs = 60000;
 
 static bool littleFsReady = false;
+static bool sdReady = false;
+static uint8_t sdCardType = CARD_NONE;
 static File gifUploadFile;
 static uint32_t gifUploadExpectedBytes = 0;
 static uint16_t gifUploadWidth = 0;
@@ -396,6 +413,182 @@ static void closePackedFiles();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
+}
+
+static const char *sdCardTypeName(
+    uint8_t type) {
+  switch (type) {
+    case CARD_MMC:
+      return "MMC";
+    case CARD_SD:
+      return "SDSC";
+    case CARD_SDHC:
+      return "SDHC";
+    case CARD_NONE:
+      return "NONE";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+static void unmountSdCard() {
+  if (sdReady) {
+    SD.end();
+  }
+
+  SPI.end();
+
+  sdReady = false;
+  sdCardType = CARD_NONE;
+
+  // Leave CS high between mount attempts so the card stays deselected.
+  pinMode(
+      SD_CS_PIN,
+      OUTPUT);
+  digitalWrite(
+      SD_CS_PIN,
+      HIGH);
+}
+
+static bool mountSdCard() {
+  unmountSdCard();
+
+  pinMode(
+      SD_CS_PIN,
+      OUTPUT);
+  digitalWrite(
+      SD_CS_PIN,
+      HIGH);
+
+  SPI.begin(
+      SD_SCK_PIN,
+      SD_MISO_PIN,
+      SD_MOSI_PIN,
+      SD_CS_PIN);
+
+  if (!SD.begin(
+          SD_CS_PIN,
+          SPI,
+          SD_SPI_HZ)) {
+    SPI.end();
+    return false;
+  }
+
+  sdCardType =
+      SD.cardType();
+
+  if (sdCardType ==
+      CARD_NONE) {
+    SD.end();
+    SPI.end();
+    sdCardType =
+        CARD_NONE;
+    return false;
+  }
+
+  sdReady = true;
+  return true;
+}
+
+static void sendSdInfo() {
+  if (!sdReady) {
+    cdcPrintln(
+        "SDINFO|ABSENT");
+    return;
+  }
+
+  char out[160];
+
+  snprintf(
+      out,
+      sizeof(out),
+      "SDINFO|READY|TYPE=%s|CARD=%llu|TOTAL=%llu|USED=%llu|HZ=%lu",
+      sdCardTypeName(sdCardType),
+      static_cast<unsigned long long>(
+          SD.cardSize()),
+      static_cast<unsigned long long>(
+          SD.totalBytes()),
+      static_cast<unsigned long long>(
+          SD.usedBytes()),
+      static_cast<unsigned long>(
+          SD_SPI_HZ));
+
+  cdcPrintln(
+      out);
+}
+
+static bool runSdSelfTest() {
+  if (!sdReady &&
+      !mountSdCard()) {
+    return false;
+  }
+
+  static constexpr char TEST_PATH[] =
+      "/pixelpro_sd_test.tmp";
+
+  static constexpr char TEST_PAYLOAD[] =
+      "PIXELPRO-SD-1.9.3";
+
+  SD.remove(
+      TEST_PATH);
+
+  File file =
+      SD.open(
+          TEST_PATH,
+          FILE_WRITE);
+
+  if (!file) {
+    return false;
+  }
+
+  const size_t expected =
+      strlen(
+          TEST_PAYLOAD);
+
+  const size_t written =
+      file.write(
+          reinterpret_cast<const uint8_t *>(
+              TEST_PAYLOAD),
+          expected);
+
+  file.flush();
+  file.close();
+
+  if (written !=
+      expected) {
+    SD.remove(
+        TEST_PATH);
+    return false;
+  }
+
+  file =
+      SD.open(
+          TEST_PATH,
+          FILE_READ);
+
+  if (!file) {
+    SD.remove(
+        TEST_PATH);
+    return false;
+  }
+
+  char buffer[
+      sizeof(TEST_PAYLOAD)] = {};
+
+  const size_t read =
+      file.readBytes(
+          buffer,
+          expected);
+
+  file.close();
+  SD.remove(
+      TEST_PATH);
+
+  return read == expected &&
+         memcmp(
+             buffer,
+             TEST_PAYLOAD,
+             expected) == 0;
 }
 
 static KeyBinding disabledBinding() {
@@ -6261,7 +6454,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -6409,6 +6602,36 @@ static void handleCommand(String command) {
 
   if (upper == "GET_KEYS") {
     sendKeyState();
+    return;
+  }
+
+  if (upper == "SDINFO" ||
+      upper == "GET_SD") {
+    sendSdInfo();
+    return;
+  }
+
+  if (upper == "SDREMOUNT") {
+    if (mountSdCard()) {
+      cdcPrintln(
+          "OK|SD_MOUNTED");
+    } else {
+      cdcPrintln(
+          "ERR|SD_NOT_FOUND");
+    }
+
+    return;
+  }
+
+  if (upper == "SDTEST") {
+    if (runSdSelfTest()) {
+      cdcPrintln(
+          "SDTEST|OK");
+    } else {
+      cdcPrintln(
+          "SDTEST|FAIL");
+    }
+
     return;
   }
 
@@ -8900,13 +9123,6 @@ static void restoreTouchSharedPins() {
       LOW);
 
   pinMode(
-      TFT_RD,
-      OUTPUT);
-  digitalWrite(
-      TFT_RD,
-      HIGH);
-
-  pinMode(
       TFT_CS,
       OUTPUT);
   digitalWrite(
@@ -8952,12 +9168,7 @@ static bool readTouchRaw(
       TFT_CS,
       HIGH);
 
-  pinMode(
-      TFT_RD,
-      OUTPUT);
-  digitalWrite(
-      TFT_RD,
-      HIGH);
+  // LCD_RD is hard-wired high to 3V3, so no MCU pin is needed here.
 
   // Pressure: XP=0, YM=1, measure the two ADC-capable shared electrodes.
   pinMode(
@@ -9487,6 +9698,7 @@ void setup() {
   initRoller();
   initDisplay();
   initTouch();
+  mountSdCard();
 
   littleFsReady = LittleFS.begin(true);
   if (littleFsReady) {
@@ -9513,7 +9725,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0192);
+  USB.firmwareVersion(0x0193);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -9527,7 +9739,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.2");
+  cdcPrintln("BOOT|PIXELPRO|1.9.3");
 }
 
 void loop() {

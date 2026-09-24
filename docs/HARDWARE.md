@@ -2,23 +2,28 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.9.2**.
+Firmware: **1.9.3**.
 
-This is the final pin plan used by the Arduino firmware. Pin names below use the
-board silk-screen convention **Dxx**.
+This pin plan is arranged for easy hand-wiring on the S2 Mini: low-numbered pins
+are grouped by function on the left-side headers, while the 8-bit LCD data bus is
+kept on D33..D40 on the right-side headers.
+
+All names below use the S2 Mini silk-screen style **Dxx**.
 
 ## Native USB
 
-The ESP32-S2 native USB connection uses **D19 (USB D-)** and **D20 (USB D+)**
-through the board USB-C connector.
+Native USB remains untouched:
 
-Do not reuse D19 or D20 for keys, encoder, RGB, display, or touch.
+| Function | S2 Mini |
+|---|---|
+| USB D- | D19 |
+| USB D+ | D20 |
+
+Do not use D19/D20 for anything else.
 
 ## 8-key matrix
 
-PIXEL PRO uses a **2 × 4 diode matrix** instead of eight direct GPIO inputs.
-
-| Matrix signal | ESP32-S2 Mini |
+| Matrix signal | S2 Mini |
 |---|---|
 | ROW1 | D1 |
 | ROW2 | D2 |
@@ -27,7 +32,7 @@ PIXEL PRO uses a **2 × 4 diode matrix** instead of eight direct GPIO inputs.
 | COL3 | D5 |
 | COL4 | D6 |
 
-Logical key layout:
+Logical layout:
 
 | | COL1 D3 | COL2 D4 | COL3 D5 | COL4 D6 |
 |---|---|---|---|---|
@@ -38,120 +43,117 @@ Each switch uses one diode:
 
 `COL -> switch -> diode -> ROW`
 
-The diode stripe / cathode points toward the **ROW** side. Firmware scans one row
-low at a time while all columns use internal pull-ups. Unselected rows are left
-high-impedance to avoid cross-row current.
+The diode stripe/cathode points toward ROW.
 
-## Low-profile roller encoder (EVQWGD001 style)
+## Horizontal roller encoder
 
-PIXEL PRO does **not** use an EC11 knob encoder. The production control is the
-low-profile horizontal thumb/roller encoder shown in the hardware reference,
-EVQWGD001-style.
+PIXEL PRO uses the low-profile EVQWGD001-style horizontal roller.
 
-Electrically it is still a 2-bit quadrature encoder plus a momentary push switch,
-so the firmware keeps the same robust Gray-code state-machine decoder.
-
-| Roller signal | ESP32-S2 Mini |
+| Roller signal | S2 Mini |
 |---|---|
 | A | D7 |
 | B | D8 |
 | Push switch | D21 |
 | Encoder common | GND |
-| Other push-switch contact | GND |
+| Other switch contact | GND |
 | NC pad, if present | leave open |
 
-Firmware enables internal pull-ups on D7, D8 and D21.
-
-On genuine EVQWGD001-style parts the encoder section has A/B/common contacts and
-the push section is a separate momentary switch. Some clone/vendor drawings swap
-pad labels, so confirm the three encoder contacts with continuity mode before
-soldering the final PCB.
-
-Default standalone behavior:
+Default behavior:
 
 - roll clockwise: Volume Up
 - roll counter-clockwise: Volume Down
-- press roller: Mute
+- press: Mute
 
-The decoder ignores invalid two-bit jumps to reject most mechanical contact bounce
-without blocking the main loop.
+D7/D8/D21 use internal pull-ups.
 
-## Reserved profile navigation
+## microSD on the TFT shield
 
-D9, D10, and D11 remain reserved for the physical profile-navigation control.
-They are not consumed by the matrix, encoder, LCD, touch, RGB, or native USB.
+Firmware 1.9.3 enables the TFT shield's microSD slot using dedicated hardware SPI.
 
-## PIXEL PRO display
+The four labels printed on the TFT PCB wire directly in order:
 
-Panel: **3.5-inch ILI9486, 480 × 320 landscape**.
-
-Interface: **i8080 / 8080-style 8-bit parallel**.
-
-| Shield signal | Common UNO shield pin | ESP32-S2 Mini |
+| TFT shield SD pin | Function | S2 Mini |
 |---|---|---|
-| LCD_D0 | D8 | D33 |
-| LCD_D1 | D9 | D34 |
-| LCD_D2 | D2 | D35 |
-| LCD_D3 | D3 | D36 |
-| LCD_D4 | D4 | D37 |
-| LCD_D5 | D5 | D38 |
-| LCD_D6 | D6 | D39 |
-| LCD_D7 | D7 | D40 |
-| LCD_RD | A0 | D12 |
-| LCD_WR | A1 | D13 |
-| LCD_RS / DC | A2 | D14 |
-| LCD_CS | A3 | D16 |
-| LCD_RST | A4 | D17 |
-| 5V | 5V | 5V |
-| GND | GND | GND |
+| SD_SCK | SPI clock | D9 |
+| SD_DO | MISO | D10 |
+| SD_DI | MOSI | D11 |
+| SD_SS | chip select | D12 |
 
-The firmware uses Arduino_GFX with `Arduino_ESP32PAR8` and
-`Arduino_ILI9486`, rotation 1, giving a logical 480 × 320 landscape canvas.
+This D9 -> D12 sequential mapping is intentional so the four SD wires remain
+together and easy to identify.
 
-## 4-wire resistive touch
+Firmware starts the card at 20 MHz and exposes:
 
-The shield in PIXEL PRO uses a **4-wire resistive touch panel with no separate
-XPT2046 controller**. Four touch electrodes are shared with LCD signals.
+- `SDINFO` or `GET_SD`
+- `SDREMOUNT`
+- `SDTEST`
 
-| Touch electrode | Shared shield signal | ESP32-S2 Mini |
+`SDTEST` writes, reads, verifies, and deletes a small temporary file. It is useful
+for checking the soldered SD wiring.
+
+The card is optional: PIXEL PRO still boots normally if no card is inserted.
+
+Current screensaver/Main Menu storage remains LittleFS. The SD volume is mounted
+and available to firmware, but existing LumiPad media commands are not silently
+moved to the card in 1.9.3.
+
+## 3.5-inch ILI9486 8-bit display
+
+Panel: **ILI9486 480 x 320**, landscape, i8080 8-bit.
+
+| TFT shield signal | S2 Mini |
+|---|---|
+| LCD_D0 | D33 |
+| LCD_D1 | D34 |
+| LCD_D2 | D35 |
+| LCD_D3 | D36 |
+| LCD_D4 | D37 |
+| LCD_D5 | D38 |
+| LCD_D6 | D39 |
+| LCD_D7 | D40 |
+| LCD_WR | D13 |
+| LCD_RS / DC | D14 |
+| LCD_CS | D16 |
+| LCD_RST | D17 |
+| LCD_RD | **3V3, not a GPIO** |
+| 5V | 5V / VBUS |
+| GND | GND |
+
+### Why LCD_RD is tied high
+
+PIXEL PRO only writes display pixels; Arduino_GFX does not need RD for this
+write-only parallel path. LCD_RD is therefore tied permanently HIGH to the S2
+Mini **3V3** rail.
+
+This frees D12 for SD_SS without losing display functionality.
+
+Do **not** connect LCD_RD to D12 in firmware 1.9.3.
+
+## Resistive touch
+
+The 4-wire resistive touch shares existing LCD wires:
+
+| Touch electrode | Shared LCD signal | S2 Mini |
 |---|---|---|
-| YP / Y+ | LCD_WR / A1 | D13 |
-| XM / X- | LCD_RS / A2 | D14 |
-| XP / X+ | LCD_D6 / D6 | D39 |
-| YM / Y- | LCD_D7 / D7 | D40 |
+| YP / Y+ | LCD_WR | D13 |
+| XM / X- | LCD_RS/DC | D14 |
+| XP / X+ | LCD_D6 | D39 |
+| YM / Y- | LCD_D7 | D40 |
 
-No additional touch wires are required beyond the LCD wiring.
+No extra touch wires are required.
 
-D13 and D14 are ADC-capable on ESP32-S2. During a touch sample firmware first
-drives **LCD_CS high** to deselect the ILI9486, temporarily changes the four shared
-pins into the resistive measurement network, samples the ADC, then restores the
-pins to the 8080 LCD bus. This prevents touch reads from becoming accidental LCD
-write cycles.
-
-Touch is sampled about every 24 ms. The first touch while the screensaver is
-active only wakes the display; it does not trigger an action. On the Main Menu,
-a normal touch on one of the eight icon cells emits the corresponding Lumi Action.
-
-Default calibration is suitable as a starting point for the common shield and can
-be changed over CDC:
-
-- `GET_TOUCH_CAL`
-- `SET_TOUCH_CAL|xMin|xMax|yMin|yMax|flags`
-- `RESET_TOUCH_CAL`
-
-Flags:
-
-- bit 0 / 1: swap X/Y
-- bit 1 / 2: invert X
-- bit 2 / 4: invert Y
-
-The factory default is swap X/Y + invert Y, matching ILI9486 rotation 1.
+During touch sampling firmware deselects the LCD, samples the resistive network,
+then restores the LCD bus. LCD_RD is already held HIGH in hardware.
 
 ## RGB
 
-Per-key WS2812/SK6812 data is on **D18**.
+| Function | S2 Mini |
+|---|---|
+| WS2812/SK6812 data | D18 |
+| LED supply | 5V |
+| LED ground | GND |
 
-Physical LED order:
+Logical/physical order:
 
 - LED1 -> K1
 - LED2 -> K2
@@ -164,32 +166,14 @@ Physical LED order:
 
 ## Onboard status LED
 
-The LOLIN/WEMOS ESP32-S2 Mini onboard blue LED is **D15**.
+D15 remains the S2 Mini onboard blue status LED.
 
 - USB HID ready: solid ON
 - USB not enumerated: blink every 500 ms
 
-## microSD on the TFT shield
+## Final pin allocation
 
-The TFT shield also exposes:
-
-- SD_SCK
-- SD_DO
-- SD_DI
-- SD_SS
-
-The shield **can use a microSD card**: SD_SCK, SD_DO, SD_DI and SD_SS are a
-normal SPI-style card interface exposed by the TFT PCB.
-
-PIXEL PRO firmware 1.9.2 does **not yet mount the card**. Screensaver and Main
-Menu media still use ESP32 LittleFS, so the four SD pins should remain unconnected
-for the current build. Enabling SD later requires four MCU signals (SCK, MISO,
-MOSI, CS); the current final pin plan deliberately does not steal the reserved
-profile-control pins or the USB/status/RGB pins.
-
-## Complete ESP32-S2 Mini allocation
-
-| Pin | PIXEL PRO function |
+| S2 Mini | Function |
 |---|---|
 | D1 | Matrix ROW1 |
 | D2 | Matrix ROW2 |
@@ -197,21 +181,21 @@ profile-control pins or the USB/status/RGB pins.
 | D4 | Matrix COL2 |
 | D5 | Matrix COL3 |
 | D6 | Matrix COL4 |
-| D7 | Roller encoder A |
-| D8 | Roller encoder B |
-| D9 | Reserved profile control |
-| D10 | Reserved profile control |
-| D11 | Reserved profile control |
-| D12 | LCD_RD |
+| D7 | Roller A |
+| D8 | Roller B |
+| D9 | SD_SCK |
+| D10 | SD_DO / MISO |
+| D11 | SD_DI / MOSI |
+| D12 | SD_SS / CS |
 | D13 | LCD_WR + Touch YP |
 | D14 | LCD_RS/DC + Touch XM |
-| D15 | Onboard USB status LED |
+| D15 | onboard status LED |
 | D16 | LCD_CS |
 | D17 | LCD_RST |
-| D18 | WS2812/SK6812 DATA |
-| D19 | Native USB D- |
-| D20 | Native USB D+ |
-| D21 | Roller push switch |
+| D18 | RGB DATA |
+| D19 | USB D- |
+| D20 | USB D+ |
+| D21 | Roller push |
 | D33 | LCD_D0 |
 | D34 | LCD_D1 |
 | D35 | LCD_D2 |
@@ -220,3 +204,18 @@ profile-control pins or the USB/status/RGB pins.
 | D38 | LCD_D5 |
 | D39 | LCD_D6 + Touch XP |
 | D40 | LCD_D7 + Touch YM |
+| 3V3 | LCD_RD permanently HIGH |
+| 5V/VBUS | TFT + RGB supply |
+| GND | common ground |
+
+## Wiring groups for hand assembly
+
+For the cleanest harness, make four groups:
+
+1. **Keys:** D1-D6
+2. **Roller + SD:** D7, D8, D9-D12, with D21 as the separate roller-push wire
+3. **LCD control:** D13, D14, D16, D17 plus LCD_RD -> 3V3
+4. **LCD data:** D33-D40
+
+This leaves USB D19/D20 untouched and keeps the TFT's four SD wires on one
+consecutive D9-D12 block.
