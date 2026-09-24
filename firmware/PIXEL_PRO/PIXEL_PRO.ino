@@ -19,6 +19,14 @@
 #define PIXEL_DIAG_TOUCH_OFF 0
 #endif
 
+#ifndef PIXEL_DIAG_SAFE_PAR8
+#define PIXEL_DIAG_SAFE_PAR8 0
+#endif
+
+#if PIXEL_DIAG_SAFE_PAR8
+#include "PixelSafePAR8.h"
+#endif
+
 #if ARDUINO_USB_CDC_ON_BOOT
 #error PIXEL PRO composite firmware requires USB CDC On Boot disabled
 #else
@@ -466,6 +474,22 @@ USBHIDKeyboard Keyboard;
 USBHIDConsumerControl ConsumerControl;
 Preferences preferences;
 
+#if PIXEL_DIAG_SAFE_PAR8
+Arduino_DataBus *tftBus =
+    new PixelSafePAR8(
+        TFT_DC,
+        TFT_CS,
+        TFT_WR,
+        TFT_RD,
+        TFT_D0,
+        TFT_D1,
+        TFT_D2,
+        TFT_D3,
+        TFT_D4,
+        TFT_D5,
+        TFT_D6,
+        TFT_D7);
+#else
 Arduino_DataBus *tftBus =
     new Arduino_ESP32PAR8(
         TFT_DC,
@@ -480,6 +504,7 @@ Arduino_DataBus *tftBus =
         TFT_D5,
         TFT_D6,
         TFT_D7);
+#endif
 
 Arduino_GFX *tft =
     new PixelHX8357BMcufriend(
