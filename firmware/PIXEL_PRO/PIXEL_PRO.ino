@@ -34,7 +34,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.9.4";
+static constexpr char FW_VERSION[] = "1.9.5";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -7157,6 +7157,72 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("MENUBGSTATE|")) {
+    int sep = command.indexOf('|');
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln("ERR|MENUBGSTATE");
+      return;
+    }
+
+    char path[24] = {};
+    menuBackgroundPath(
+        static_cast<uint8_t>(profile),
+        false,
+        path,
+        sizeof(path));
+
+    bool custom =
+        littleFsReady &&
+        LittleFS.exists(path);
+
+    size_t bytes =
+        PIXEL_FACTORY_MENU_JPEG_SIZE;
+
+    if (custom) {
+      File file =
+          LittleFS.open(
+              path,
+              "r");
+
+      if (file) {
+        bytes =
+            file.size();
+
+        file.close();
+      } else {
+        custom = false;
+        bytes =
+            PIXEL_FACTORY_MENU_JPEG_SIZE;
+      }
+    }
+
+    char out[180] = {};
+
+    snprintf(
+        out,
+        sizeof(out),
+        "MENUBGSTATE|PROFILE=%u|STATE=%s|ASSET=%s|BYTES=%lu|W=%u|H=%u",
+        static_cast<unsigned>(profile),
+        custom
+            ? "CUSTOM"
+            : "FACTORY",
+        custom
+            ? "USER_JPEG"
+            : "DUNE_RED_ORANGE",
+        static_cast<unsigned long>(bytes),
+        static_cast<unsigned>(TFT_WIDTH),
+        static_cast<unsigned>(TFT_HEIGHT));
+
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper.startsWith("MENUBGBEGIN|")) {
     int p1 = command.indexOf('|');
     int p2 = command.indexOf('|', p1 + 1);
@@ -9846,7 +9912,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0194);
+  USB.firmwareVersion(0x0195);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -9860,7 +9926,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.4");
+  cdcPrintln("BOOT|PIXELPRO|1.9.5");
 }
 
 void loop() {

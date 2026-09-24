@@ -1,11 +1,11 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.9.4 keeps native USB HID + CDC, 20 keymap profiles, the ILI9486 480×320 i8080 display, the 2×4 key matrix, EVQWGD001-style roller, shared-pin resistive touch, and an optional SPI microSD card.
+Firmware 1.9.5 keeps native USB HID + CDC, 20 keymap profiles, the ILI9486 480×320 i8080 display, the 2×4 key matrix, EVQWGD001-style roller, shared-pin resistive touch, and an optional SPI microSD card.
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.9.4|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.9.5|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -479,7 +479,20 @@ different menu.
 - `MENUCFG|<profile>|<actionsCSV>|<labelsCSV>` stores 12 Lumi Action IDs and
   12 short labels for one keymap profile.
 - `GET_MENUCFG|<profile>` returns that profile's menu configuration.
-- `MENUBGBEGIN|<profile>|<bytes>`, `MENUBGDATA`, and `MENUBGEND` upload
+- `
+Read the background that is actually active on the device for one profile:
+
+`MENUBGSTATE|<profile 0-19>`
+
+Response when the firmware factory dune is active:
+
+`MENUBGSTATE|PROFILE=<profile>|STATE=FACTORY|ASSET=DUNE_RED_ORANGE|BYTES=18055|W=480|H=320`
+
+Response when a user JPEG is stored on the device:
+
+`MENUBGSTATE|PROFILE=<profile>|STATE=CUSTOM|ASSET=USER_JPEG|BYTES=<bytes>|W=480|H=320`
+
+MENUBGBEGIN|<profile>|<bytes>`, `MENUBGDATA`, and `MENUBGEND` upload
   one 480x320 JPEG background for a profile.
 - `MENUBGCLEAR|<profile>` removes that profile's background.
 - `MENUICONBEGIN|<profile>|<slot>|3200`, `MENUICONDATA`, and
