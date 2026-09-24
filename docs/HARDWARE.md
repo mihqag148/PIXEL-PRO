@@ -123,7 +123,8 @@ Firmware 1.9.7 uses an **R61581-compatible 320x480 controller initialization**
 and rotates it to 480x320 landscape. The shop sketch supplied with this panel
 does not hard-code ILI9341: it calls `tft.readID()` and then `tft.begin(ID)`.
 The `//ID=0x9341` text beside the touch-pin constants is only a copied
-calibration comment, not the display initialization.
+calibration comment, not the display initialization. The supplied sketch's
+actual controller path is `readID()` -> `begin(ID)`.
 
 | TFT shield signal | S2 Mini |
 |---|---|
