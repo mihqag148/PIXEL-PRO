@@ -5,6 +5,7 @@
 #include <LittleFS.h>
 #include <SPI.h>
 #include <SD.h>
+#include <Wire.h>
 #include <JPEGDEC.h>
 #include <Adafruit_NeoPixel.h>
 #include <mbedtls/base64.h>
@@ -34,7 +35,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.9.5";
+static constexpr char FW_VERSION[] = "1.9.6";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -109,7 +110,9 @@ static constexpr int8_t TFT_RD = GFX_NOT_DEFINED;
 static constexpr int8_t TFT_WR = 13;
 static constexpr int8_t TFT_DC = 14;
 static constexpr int8_t TFT_CS = 16;
-static constexpr int8_t TFT_RST = 17;
+// LCD_RST is tied to the WEMOS S2 Mini EN pin so the panel resets whenever
+// the ESP32-S2 resets. No dedicated GPIO is consumed by LCD reset.
+static constexpr int8_t TFT_RST = GFX_NOT_DEFINED;
 static constexpr int8_t TFT_D0 = 33;
 static constexpr int8_t TFT_D1 = 34;
 static constexpr int8_t TFT_D2 = 35;
@@ -119,14 +122,30 @@ static constexpr int8_t TFT_D5 = 38;
 static constexpr int8_t TFT_D6 = 39;
 static constexpr int8_t TFT_D7 = 40;
 
-static constexpr uint8_t RGB_PIN = 18;
+// D15 is also connected to the WEMOS S2 Mini onboard LED through a 2 kOhm
+// resistor. It is intentionally used for the push-pull WS2812/SK6812 data
+// stream, which frees clean D17/D18 pins for the module I2C bus.
+static constexpr uint8_t RGB_PIN = 15;
 static constexpr uint8_t RGB_LED_COUNT = 8;
 static constexpr uint8_t RGB_STORAGE_VERSION = 1;
 
-// LOLIN/WEMOS ESP32-S2 Mini onboard blue status LED.
-// GPIO15 is active-high and is independent from the per-key WS2812 strip.
-static constexpr uint8_t STATUS_LED_PIN = 15;
-static constexpr uint32_t STATUS_LED_BLINK_MS = 500;
+// Magnetic expansion-module bus.
+// D18/D17 are a dedicated I2C pair feeding a PCA9546A 4-channel switch.
+// Channels 0..2 are physical module ports 1..3; channel 3 is spare.
+// Every module can therefore use the same I2C address while PIXEL PRO knows
+// its physical connector from the selected PCA9546A channel.
+static constexpr uint8_t MODULE_SDA_PIN = 18;
+static constexpr uint8_t MODULE_SCL_PIN = 17;
+static constexpr uint8_t MODULE_MUX_ADDRESS = 0x70;
+static constexpr uint8_t MODULE_DEVICE_ADDRESS = 0x42;
+static constexpr uint8_t MODULE_PORT_COUNT = 3;
+static constexpr uint8_t MODULE_FRAME_SIZE = 16;
+static constexpr uint8_t MODULE_PROTOCOL_VERSION = 1;
+static constexpr uint8_t MODULE_FRAME_MAGIC = 0xA5;
+static constexpr uint8_t MODULE_MISS_LIMIT = 3;
+static constexpr uint8_t MODULE_MAX_TX_BYTES = 24;
+static constexpr uint32_t MODULE_I2C_HZ = 400000UL;
+static constexpr uint32_t MODULE_POLL_INTERVAL_MS = 2;
 // Physical LED order requested by PIXEL PRO layout:
 // LED1=K1, LED2=K2, LED3=K3, LED4=K4,
 // LED5=K8, LED6=K7, LED7=K6, LED8=K5.
@@ -196,6 +215,33 @@ static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
 // ILI9486 is mounted portrait but firmware rotates it to landscape (rotation 1).
 static constexpr uint8_t TOUCH_DEFAULT_FLAGS =
     TOUCH_FLAG_SWAP_XY | TOUCH_FLAG_INVERT_Y;
+
+struct __attribute__((packed)) ModuleFrame {
+  uint8_t magic;
+  uint8_t version;
+  uint8_t type;
+  uint8_t sequence;
+  uint16_t buttons;
+  int8_t encoder1;
+  int8_t encoder2;
+  uint16_t slider1;
+  uint16_t slider2;
+  uint16_t moduleId;
+  uint8_t flags;
+  uint8_t crc;
+};
+
+static_assert(
+    sizeof(ModuleFrame) == MODULE_FRAME_SIZE,
+    "ModuleFrame must stay 16 bytes");
+
+struct ModulePortState {
+  bool connected;
+  bool hasFrame;
+  uint8_t missCount;
+  uint8_t lastSequence;
+  ModuleFrame frame;
+};
 
 struct __attribute__((packed)) KeyBinding {
   uint8_t type;
@@ -324,9 +370,10 @@ static int8_t momentaryLayer = -1;
 static uint8_t toggledLayerMask = 0;
 static String cdcLine;
 
-static bool statusLedState = false;
-static bool statusLedUsbReady = false;
-static uint32_t statusLedLastToggleAt = 0;
+static ModulePortState modulePorts[MODULE_PORT_COUNT] = {};
+static bool moduleMuxReady = false;
+static uint8_t moduleNextPort = 0;
+static uint32_t moduleLastPollAt = 0;
 
 enum SaverPixelFormat : uint8_t {
   SAVER_NONE = 0,
@@ -6571,11 +6618,11 @@ static bool finishSaverUpload() {
 }
 
 static String deviceHello() {
-  char out[320];
+  char out[448];
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -6753,6 +6800,80 @@ static void handleCommand(String command) {
           "SDTEST|FAIL");
     }
 
+    return;
+  }
+
+  if (upper == "GET_MODULES") {
+    sendModuleSummary();
+    return;
+  }
+
+  if (upper == "MODULE_SCAN") {
+    moduleMuxReady =
+        moduleMuxDisable();
+
+    for (uint8_t port = 0;
+         port < MODULE_PORT_COUNT;
+         ++port) {
+      pollModulePort(
+          port);
+    }
+
+    sendModuleSummary();
+    return;
+  }
+
+  if (upper.startsWith("MODULE_TX|")) {
+    const int p1 =
+        command.indexOf('|');
+
+    const int p2 =
+        command.indexOf(
+            '|',
+            p1 + 1);
+
+    uint16_t portNumber = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        !parseUnsigned(
+            command.substring(
+                p1 + 1,
+                p2),
+            MODULE_PORT_COUNT,
+            portNumber) ||
+        portNumber < 1) {
+      cdcPrintln(
+          "ERR|BAD_MODULE_PORT");
+      return;
+    }
+
+    uint8_t payload[
+        MODULE_MAX_TX_BYTES] = {};
+
+    uint8_t payloadLength = 0;
+
+    if (!parseModuleHex(
+            command.substring(
+                p2 + 1),
+            payload,
+            payloadLength)) {
+      cdcPrintln(
+          "ERR|BAD_MODULE_HEX");
+      return;
+    }
+
+    const bool ok =
+        moduleSendRaw(
+            static_cast<uint8_t>(
+                portNumber - 1),
+            payload,
+            payloadLength);
+
+    cdcPrintln(
+        ok
+            ? "OK|MODULE_TX"
+            : "ERR|MODULE_TX");
     return;
   }
 
@@ -8979,6 +9100,493 @@ static void pollCdc() {
   }
 }
 
+
+static uint8_t moduleCrc8(
+    const uint8_t *data,
+    size_t length) {
+  uint8_t crc = 0;
+
+  for (size_t i = 0;
+       i < length;
+       ++i) {
+    crc ^= data[i];
+
+    for (uint8_t bit = 0;
+         bit < 8;
+         ++bit) {
+      crc =
+          (crc & 0x80U) != 0
+              ? static_cast<uint8_t>(
+                    (crc << 1) ^ 0x07U)
+              : static_cast<uint8_t>(
+                    crc << 1);
+    }
+  }
+
+  return crc;
+}
+
+static bool moduleMuxSelect(
+    uint8_t port) {
+  if (port >= MODULE_PORT_COUNT) {
+    return false;
+  }
+
+  Wire.beginTransmission(
+      MODULE_MUX_ADDRESS);
+
+  Wire.write(
+      static_cast<uint8_t>(
+          1U << port));
+
+  return Wire.endTransmission(true) == 0;
+}
+
+static bool moduleMuxDisable() {
+  Wire.beginTransmission(
+      MODULE_MUX_ADDRESS);
+
+  Wire.write(
+      static_cast<uint8_t>(0));
+
+  return Wire.endTransmission(true) == 0;
+}
+
+static bool moduleProbeSelectedPort() {
+  Wire.beginTransmission(
+      MODULE_DEVICE_ADDRESS);
+
+  return Wire.endTransmission(true) == 0;
+}
+
+static bool moduleReadSelectedFrame(
+    ModuleFrame &frame) {
+  uint8_t *bytes =
+      reinterpret_cast<uint8_t *>(
+          &frame);
+
+  const uint8_t received =
+      Wire.requestFrom(
+          MODULE_DEVICE_ADDRESS,
+          MODULE_FRAME_SIZE);
+
+  if (received !=
+      MODULE_FRAME_SIZE) {
+    while (Wire.available()) {
+      (void)Wire.read();
+    }
+
+    return false;
+  }
+
+  for (uint8_t i = 0;
+       i < MODULE_FRAME_SIZE;
+       ++i) {
+    if (!Wire.available()) {
+      return false;
+    }
+
+    bytes[i] =
+        static_cast<uint8_t>(
+            Wire.read());
+  }
+
+  if (frame.magic !=
+          MODULE_FRAME_MAGIC ||
+      frame.version !=
+          MODULE_PROTOCOL_VERSION) {
+    return false;
+  }
+
+  const uint8_t expected =
+      moduleCrc8(
+          bytes,
+          MODULE_FRAME_SIZE - 1);
+
+  return frame.crc == expected;
+}
+
+static void emitModuleConnected(
+    uint8_t port) {
+  char out[48];
+
+  snprintf(
+      out,
+      sizeof(out),
+      "MODULE|PORT=%u|CONNECTED",
+      static_cast<unsigned>(
+          port + 1));
+
+  cdcPrintln(
+      out);
+}
+
+static void emitModuleDisconnected(
+    uint8_t port) {
+  char out[52];
+
+  snprintf(
+      out,
+      sizeof(out),
+      "MODULE|PORT=%u|DISCONNECTED",
+      static_cast<unsigned>(
+          port + 1));
+
+  cdcPrintln(
+      out);
+}
+
+static void emitModuleFrame(
+    uint8_t port,
+    const ModuleFrame &frame) {
+  char out[196];
+
+  snprintf(
+      out,
+      sizeof(out),
+      "MODULE_DATA|PORT=%u|TYPE=%u|ID=%u|SEQ=%u|BTN=%04X|E1=%d|E2=%d|S1=%u|S2=%u|FLAGS=%02X",
+      static_cast<unsigned>(
+          port + 1),
+      static_cast<unsigned>(
+          frame.type),
+      static_cast<unsigned>(
+          frame.moduleId),
+      static_cast<unsigned>(
+          frame.sequence),
+      static_cast<unsigned>(
+          frame.buttons),
+      static_cast<int>(
+          frame.encoder1),
+      static_cast<int>(
+          frame.encoder2),
+      static_cast<unsigned>(
+          frame.slider1),
+      static_cast<unsigned>(
+          frame.slider2),
+      static_cast<unsigned>(
+          frame.flags));
+
+  cdcPrintln(
+      out);
+}
+
+static void clearModulePort(
+    uint8_t port,
+    bool emitDisconnect) {
+  if (port >= MODULE_PORT_COUNT) {
+    return;
+  }
+
+  ModulePortState &state =
+      modulePorts[port];
+
+  const bool wasConnected =
+      state.connected;
+
+  state = {};
+
+  if (emitDisconnect &&
+      wasConnected) {
+    emitModuleDisconnected(
+        port);
+  }
+}
+
+static void pollModulePort(
+    uint8_t port) {
+  if (port >= MODULE_PORT_COUNT) {
+    return;
+  }
+
+  ModulePortState &state =
+      modulePorts[port];
+
+  if (!moduleMuxReady) {
+    clearModulePort(
+        port,
+        true);
+    return;
+  }
+
+  if (!moduleMuxSelect(port)) {
+    moduleMuxReady = false;
+    clearModulePort(
+        port,
+        true);
+    return;
+  }
+
+  const bool present =
+      moduleProbeSelectedPort();
+
+  if (!present) {
+    (void)moduleMuxDisable();
+
+    if (state.missCount <
+        0xFF) {
+      ++state.missCount;
+    }
+
+    if (state.connected &&
+        state.missCount >=
+            MODULE_MISS_LIMIT) {
+      clearModulePort(
+          port,
+          true);
+    }
+
+    return;
+  }
+
+  state.missCount = 0;
+
+  if (!state.connected) {
+    state.connected = true;
+    state.hasFrame = false;
+    emitModuleConnected(
+        port);
+  }
+
+  ModuleFrame frame = {};
+
+  const bool validFrame =
+      moduleReadSelectedFrame(
+          frame);
+
+  (void)moduleMuxDisable();
+
+  if (!validFrame) {
+    return;
+  }
+
+  const bool newFrame =
+      !state.hasFrame ||
+      frame.sequence !=
+          state.lastSequence;
+
+  state.frame = frame;
+  state.lastSequence =
+      frame.sequence;
+  state.hasFrame = true;
+
+  if (newFrame) {
+    emitModuleFrame(
+        port,
+        frame);
+  }
+}
+
+static void initModuleBus() {
+  Wire.begin(
+      MODULE_SDA_PIN,
+      MODULE_SCL_PIN,
+      MODULE_I2C_HZ);
+
+  Wire.setTimeOut(5);
+
+  moduleMuxReady =
+      moduleMuxDisable();
+
+  moduleNextPort = 0;
+  moduleLastPollAt =
+      millis();
+
+  for (uint8_t port = 0;
+       port < MODULE_PORT_COUNT;
+       ++port) {
+    modulePorts[port] = {};
+  }
+}
+
+static void pollModuleBus() {
+  const uint32_t now =
+      millis();
+
+  if (now -
+          moduleLastPollAt <
+      MODULE_POLL_INTERVAL_MS) {
+    return;
+  }
+
+  moduleLastPollAt = now;
+
+  if (!moduleMuxReady) {
+    static uint32_t lastMuxRetryAt = 0;
+
+    if (now -
+            lastMuxRetryAt >=
+        1000UL) {
+      lastMuxRetryAt = now;
+      moduleMuxReady =
+          moduleMuxDisable();
+    }
+
+    return;
+  }
+
+  pollModulePort(
+      moduleNextPort);
+
+  moduleNextPort =
+      static_cast<uint8_t>(
+          (moduleNextPort + 1U) %
+          MODULE_PORT_COUNT);
+}
+
+static void sendModuleSummary() {
+  char out[196];
+
+  snprintf(
+      out,
+      sizeof(out),
+      "MODULES|MUX=%u|PORTS=%u",
+      moduleMuxReady ? 1U : 0U,
+      static_cast<unsigned>(
+          MODULE_PORT_COUNT));
+
+  cdcPrintln(
+      out);
+
+  for (uint8_t port = 0;
+       port < MODULE_PORT_COUNT;
+       ++port) {
+    const ModulePortState &state =
+        modulePorts[port];
+
+    if (!state.connected) {
+      snprintf(
+          out,
+          sizeof(out),
+          "MODULE_PORT|%u|CONNECTED=0",
+          static_cast<unsigned>(
+              port + 1));
+
+      cdcPrintln(
+          out);
+      continue;
+    }
+
+    if (!state.hasFrame) {
+      snprintf(
+          out,
+          sizeof(out),
+          "MODULE_PORT|%u|CONNECTED=1|FRAME=0",
+          static_cast<unsigned>(
+              port + 1));
+
+      cdcPrintln(
+          out);
+      continue;
+    }
+
+    const ModuleFrame &frame =
+        state.frame;
+
+    snprintf(
+        out,
+        sizeof(out),
+        "MODULE_PORT|%u|CONNECTED=1|FRAME=1|TYPE=%u|ID=%u|SEQ=%u|BTN=%04X|E1=%d|E2=%d|S1=%u|S2=%u|FLAGS=%02X",
+        static_cast<unsigned>(
+            port + 1),
+        static_cast<unsigned>(
+            frame.type),
+        static_cast<unsigned>(
+            frame.moduleId),
+        static_cast<unsigned>(
+            frame.sequence),
+        static_cast<unsigned>(
+            frame.buttons),
+        static_cast<int>(
+            frame.encoder1),
+        static_cast<int>(
+            frame.encoder2),
+        static_cast<unsigned>(
+            frame.slider1),
+        static_cast<unsigned>(
+            frame.slider2),
+        static_cast<unsigned>(
+            frame.flags));
+
+    cdcPrintln(
+        out);
+  }
+}
+
+static bool moduleSendRaw(
+    uint8_t port,
+    const uint8_t *data,
+    uint8_t length) {
+  if (!moduleMuxReady ||
+      port >= MODULE_PORT_COUNT ||
+      data == nullptr ||
+      length == 0 ||
+      length > MODULE_MAX_TX_BYTES) {
+    return false;
+  }
+
+  if (!moduleMuxSelect(port)) {
+    moduleMuxReady = false;
+    return false;
+  }
+
+  Wire.beginTransmission(
+      MODULE_DEVICE_ADDRESS);
+
+  const size_t written =
+      Wire.write(
+          data,
+          length);
+
+  const uint8_t result =
+      Wire.endTransmission(true);
+
+  (void)moduleMuxDisable();
+
+  return written == length &&
+         result == 0;
+}
+
+static bool parseModuleHex(
+    const String &hex,
+    uint8_t *data,
+    uint8_t &length) {
+  if (data == nullptr ||
+      hex.length() == 0 ||
+      (hex.length() % 2U) != 0 ||
+      hex.length() >
+          static_cast<size_t>(
+              MODULE_MAX_TX_BYTES * 2U)) {
+    return false;
+  }
+
+  length =
+      static_cast<uint8_t>(
+          hex.length() / 2U);
+
+  for (uint8_t i = 0;
+       i < length;
+       ++i) {
+    const int8_t hi =
+        hexNibble(
+            hex[i * 2U]);
+
+    const int8_t lo =
+        hexNibble(
+            hex[i * 2U + 1U]);
+
+    if (hi < 0 ||
+        lo < 0) {
+      return false;
+    }
+
+    data[i] =
+        static_cast<uint8_t>(
+            (hi << 4) | lo);
+  }
+
+  return true;
+}
+
 static void emitKeyEvent(uint8_t index, bool pressed) {
   if (pressed) {
     lastUserActivityAt = millis();
@@ -9762,64 +10370,9 @@ static void pollTouch() {
   }
 }
 
-static void initStatusLed() {
-  pinMode(
-      STATUS_LED_PIN,
-      OUTPUT);
-
-  statusLedState = false;
-  statusLedUsbReady = false;
-  statusLedLastToggleAt = millis();
-
-  digitalWrite(
-      STATUS_LED_PIN,
-      LOW);
-}
-
-static void pollStatusLed() {
-  const bool usbReady =
-      HID.ready();
-
-  const uint32_t now =
-      millis();
-
-  if (usbReady) {
-    if (!statusLedUsbReady ||
-        !statusLedState) {
-      statusLedState = true;
-      digitalWrite(
-          STATUS_LED_PIN,
-          HIGH);
-    }
-
-    statusLedUsbReady = true;
-    return;
-  }
-
-  if (statusLedUsbReady) {
-    statusLedUsbReady = false;
-    statusLedState = false;
-    statusLedLastToggleAt = now;
-
-    digitalWrite(
-        STATUS_LED_PIN,
-        LOW);
-
-    return;
-  }
-
-  if (now - statusLedLastToggleAt >=
-      STATUS_LED_BLINK_MS) {
-    statusLedLastToggleAt = now;
-    statusLedState = !statusLedState;
-
-    digitalWrite(
-        STATUS_LED_PIN,
-        statusLedState
-            ? HIGH
-            : LOW);
-  }
-}
+// D15 now carries WS2812/SK6812 data. The WEMOS onboard LED remains
+// electrically attached through its 2 kOhm resistor, but firmware no longer
+// drives it as a separate status indicator.
 
 static void pollKeys() {
   const uint32_t now =
@@ -9880,12 +10433,12 @@ void setup() {
   rgbStrip.clear();
   applyRgbProfile();
 
-  initStatusLed();
   initKeys();
   initRoller();
   initDisplay();
   initTouch();
   mountSdCard();
+  initModuleBus();
 
   littleFsReady = LittleFS.begin(true);
   if (littleFsReady) {
@@ -9912,7 +10465,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0195);
+  USB.firmwareVersion(0x0196);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -9926,7 +10479,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.5");
+  cdcPrintln("BOOT|PIXELPRO|1.9.6");
 }
 
 void loop() {
@@ -9936,7 +10489,7 @@ void loop() {
   pollRgbEffect();
   pollSaver();
   pollTouch();
-  pollStatusLed();
+  pollModuleBus();
 
   if (bootloaderArmed &&
       static_cast<int32_t>(
