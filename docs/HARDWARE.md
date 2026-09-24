@@ -164,7 +164,7 @@ PIXEL PRO uses a write-only parallel display path. Connect **LCD_RD directly to
 ## Resistive touch
 
 No additional touch pins are required. Touch shares four LCD wires. Firmware
-1.9.9 now reproduces the shop sketch's TouchScreen.h electrical sequence,
+1.10.0 reproduces the shop sketch's TouchScreen.h electrical sequence,
 300-ohm plate-pressure calculation and supplied calibration values:
 
 | Touch electrode | Shared signal | S2 Mini |
@@ -182,12 +182,14 @@ Shop calibration reproduced in firmware:
 - pressure window = 200..1000
 - X-plate resistance = 300 ohm
 
+Existing v1.9.9 touch calibration is automatically reset because v1.10.0 bumps the touch calibration storage version after correcting the raw-axis assignment.
+
 Firmware deselects the LCD before every touch measurement, samples the resistive
 panel, then restores the 8-bit LCD bus.
 
 ## RGB
 
-RGB data stays on **D15** in firmware 1.9.8.
+RGB data stays on **D15** in firmware 1.10.0.
 
 | RGB connection | S2 Mini |
 |---|---|
