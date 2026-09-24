@@ -1,11 +1,11 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.9.5 keeps native USB HID + CDC, 20 keymap profiles, the ILI9486 480×320 i8080 display, the 2×4 key matrix, EVQWGD001-style roller, shared-pin resistive touch, and an optional SPI microSD card.
+Firmware 1.9.6 keeps native USB HID + CDC, the ILI9486 480×320 i8080 display, 2×4 key matrix, horizontal roller, resistive touch, SPI microSD, and a three-port PCA9546A magnetic module bus.
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.9.5|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.9.6|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -93,7 +93,7 @@ GET_LAYER returns active profile/layer state.
 
 ## Physical input subsystem
 
-Firmware 1.9.3 scans the eight keys as a 2 × 4 diode matrix. Logical key event
+Firmware 1.9.6 scans the eight keys as a 2 × 4 diode matrix. Logical key event
 messages remain unchanged, so existing LumiPad keymap handling stays compatible.
 
 The EVQWGD001-style horizontal roller is handled directly by firmware. It is
@@ -171,6 +171,39 @@ Mounted card:
 Existing screensaver and Main Menu upload commands continue to use LittleFS in
 1.9.3; SD support is intentionally additive and does not change existing media
 persistence semantics.
+
+## Magnetic expansion modules
+
+Firmware 1.9.6 uses:
+
+- D18 = module SDA
+- D17 = module SCL
+- PCA9546A address 0x70
+- physical PORT 1/2/3 = PCA9546A channel 0/1/2
+- module address 0x42 on every isolated channel
+- 400 kHz I2C
+
+LCD_RST is no longer on D17; wire LCD_RST to S2 Mini EN. RGB data moves from D18
+to D15.
+
+Connection events:
+
+`MODULE|PORT=<1-3>|CONNECTED`
+
+`MODULE|PORT=<1-3>|DISCONNECTED`
+
+New valid module frame:
+
+`MODULE_DATA|PORT=<1-3>|TYPE=<type>|ID=<id>|SEQ=<seq>|BTN=<hex16>|E1=<delta>|E2=<delta>|S1=<0-65535>|S2=<0-65535>|FLAGS=<hex8>`
+
+Commands:
+
+- `GET_MODULES`
+- `MODULE_SCAN`
+- `MODULE_TX|<port 1-3>|<hex payload>`
+
+The fixed 16-byte module frame and CRC definition are documented in
+`docs/MODULE_BUS.md`.
 
 ## Panel information
 
