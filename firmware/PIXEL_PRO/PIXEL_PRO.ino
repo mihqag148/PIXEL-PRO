@@ -36,7 +36,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.0";
+static constexpr char FW_VERSION[] = "1.10.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -301,6 +301,162 @@ struct __attribute__((packed)) LegacyMainMenuConfigV3 {
  // REG 0xBF returned 00 01 62 83 57 FF, i.e. MCUFRIEND ID 0x8357.
  // Use Arduino_GFX's native HX8357-B driver instead of a guessed custom init.
 
+
+class PixelHX8357BMcufriend : public Arduino_TFT {
+ public:
+  PixelHX8357BMcufriend(
+      Arduino_DataBus *bus,
+      int8_t rst = GFX_NOT_DEFINED,
+      uint8_t rotation = 0)
+      : Arduino_TFT(
+            bus,
+            rst,
+            rotation,
+            false,
+            320,
+            480,
+            0,
+            0,
+            0,
+            0) {}
+
+  bool begin(
+      int32_t speed =
+          GFX_NOT_DEFINED) override {
+    const bool ok =
+        Arduino_TFT::begin(
+            speed);
+
+    if (ok) {
+      // MCUFRIEND_kbv marks ID 0x8357 with REV_SCREEN. Its
+      // begin(ID) therefore finishes by enabling inversion for normal image
+      // polarity on this specific shield family.
+      invertDisplay(false);
+    }
+
+    return ok;
+  }
+
+  void writeAddrWindow(
+      int16_t x,
+      int16_t y,
+      uint16_t w,
+      uint16_t h) override {
+    if ((x != _currentX) ||
+        (w != _currentW)) {
+      _currentX = x;
+      _currentW = w;
+      x += _xStart;
+
+      _bus->writeC8D16D16(
+          0x2A,
+          static_cast<uint16_t>(x),
+          static_cast<uint16_t>(
+              x + w - 1));
+    }
+
+    if ((y != _currentY) ||
+        (h != _currentH)) {
+      _currentY = y;
+      _currentH = h;
+      y += _yStart;
+
+      _bus->writeC8D16D16(
+          0x2B,
+          static_cast<uint16_t>(y),
+          static_cast<uint16_t>(
+              y + h - 1));
+    }
+
+    _bus->writeCommand(0x2C);
+  }
+
+  void setRotation(
+      uint8_t rotation) override {
+    Arduino_TFT::setRotation(
+        rotation);
+
+    uint8_t madctl = 0x48;
+
+    switch (_rotation) {
+      case 1:
+        madctl = 0x28;
+        break;
+
+      case 2:
+        madctl = 0x98;
+        break;
+
+      case 3:
+        madctl = 0xF8;
+        break;
+
+      default:
+        madctl = 0x48;
+        break;
+    }
+
+    _bus->beginWrite();
+    _bus->writeCommand(0x36);
+    _bus->write(madctl);
+    _bus->endWrite();
+  }
+
+  void invertDisplay(
+      bool invert) override {
+    // MCUFRIEND: _lcd_rev = REV_SCREEN ^ invert.
+    // ID 0x8357 has REV_SCREEN set, so invert=false => command 0x21.
+    _bus->sendCommand(
+        invert
+            ? 0x20
+            : 0x21);
+  }
+
+  void displayOn() override {
+    _bus->sendCommand(0x29);
+  }
+
+  void displayOff() override {
+    _bus->sendCommand(0x28);
+  }
+
+ protected:
+  void tftInit() override {
+    // Mirror MCUFRIEND_kbv's actual ID 0x8357 path instead of Arduino_GFX's
+    // HX8357B power/timing table. MCUFRIEND intentionally uses only the
+    // generic reset_off/wake_on sequence for 0x8357; forcing the native
+    // Arduino_HX8357B voltage/timing registers caused the user's panel to
+    // remain dark and flicker.
+    //
+    // The shield's LCD_RST is tied to S2 Mini EN, so a hardware reset already
+    // occurred when the ESP32-S2 booted. MCUFRIEND also writes B0=0 during
+    // reset/readID, so reproduce that harmless unlock before reset_off.
+    _bus->beginWrite();
+    _bus->writeCommand(0xB0);
+    _bus->write(0x00);
+    _bus->write(0x00);
+    _bus->endWrite();
+
+    _bus->sendCommand(0x01);
+    delay(150);
+
+    _bus->sendCommand(0x28);
+
+    _bus->beginWrite();
+    _bus->writeCommand(0x3A);
+    _bus->write(0x55);
+    _bus->endWrite();
+
+    delay(1);
+
+    _bus->sendCommand(0x11);
+    delay(150);
+
+    _bus->sendCommand(0x29);
+    delay(20);
+  }
+};
+
 USBHID HID;
 USBHIDKeyboard Keyboard;
 USBHIDConsumerControl ConsumerControl;
@@ -322,11 +478,10 @@ Arduino_DataBus *tftBus =
         TFT_D7);
 
 Arduino_GFX *tft =
-    new Arduino_HX8357B(
+    new PixelHX8357BMcufriend(
         tftBus,
         TFT_RST,
-        1,
-        true);
+        1);
 
 static KeyState keyState[KEY_COUNT] = {};
 static KeyState rollerSwitchState = {};
@@ -6195,9 +6350,9 @@ static void initDisplay() {
 
   tft->setRotation(1);
 
-  // Arduino_HX8357B performs the controller-specific power/timing/gamma
-  // initialization. ips=true matches MCUFRIEND's REV_SCREEN behavior for
-  // controller ID 0x8357.
+  // PixelHX8357BMcufriend intentionally mirrors MCUFRIEND_kbv's minimal
+  // ID 0x8357 initialization. The native Arduino_HX8357B power/timing table
+  // is not used on this shield revision.
 
   tft->fillScreen(RGB565_BLACK);
 
@@ -6628,7 +6783,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B-MCUFRIEND,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -6987,7 +7142,7 @@ static void handleCommand(String command) {
   }
 
   if (upper == "PANEL") {
-    cdcPrintln("PANEL|HX8357B|60|0|60");
+    cdcPrintln("PANEL|HX8357B-MCUFRIEND|60|0|60");
     return;
   }
 
@@ -10433,7 +10588,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x01A0);
+  USB.firmwareVersion(0x01A1);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -10447,7 +10602,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.10.0");
+  cdcPrintln("BOOT|PIXELPRO|1.10.1");
 }
 
 void loop() {
