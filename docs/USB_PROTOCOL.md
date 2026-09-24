@@ -1,11 +1,11 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.9.1 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings, the ILI9486 480×320 i8080 display, a 2×4 key matrix, EC11 encoder, and shared-pin 4-wire resistive touch. GIF files stay compressed and are decoded on-device.\n
+Firmware 1.9.2 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings, the ILI9486 480×320 i8080 display, a 2×4 key matrix, EVQWGD001-style horizontal roller encoder, and shared-pin 4-wire resistive touch. GIF files stay compressed and are decoded on-device.\n
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.9.1|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,TOUCH_RESISTIVE,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.9.2|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -93,13 +93,14 @@ GET_LAYER returns active profile/layer state.
 
 ## Physical input subsystem
 
-Firmware 1.9.0 scans the eight keys as a 2 × 4 diode matrix. Logical key event
+Firmware 1.9.2 scans the eight keys as a 2 × 4 diode matrix. Logical key event
 messages remain unchanged, so existing LumiPad keymap handling stays compatible.
 
-The EC11 encoder is handled directly by firmware:
+The EVQWGD001-style horizontal roller is handled directly by firmware. It is
+electrically a quadrature encoder plus a momentary push switch:
 
-- clockwise -> USB Consumer Volume Increment
-- counter-clockwise -> USB Consumer Volume Decrement
+- roll clockwise -> USB Consumer Volume Increment
+- roll counter-clockwise -> USB Consumer Volume Decrement
 - press -> USB Consumer Mute
 
 Diagnostic CDC events are also emitted:

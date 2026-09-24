@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.9.1";
+static constexpr char FW_VERSION[] = "1.9.2";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -131,14 +131,18 @@ static constexpr uint8_t MATRIX_COL_COUNT = 4;
 static constexpr uint8_t MATRIX_ROW_PINS[MATRIX_ROW_COUNT] = {1, 2};
 static constexpr uint8_t MATRIX_COL_PINS[MATRIX_COL_COUNT] = {3, 4, 5, 6};
 
-// EC11 encoder. Rotation is standalone USB media volume; push is mute.
-static constexpr uint8_t ENCODER_A_PIN = 7;
-static constexpr uint8_t ENCODER_B_PIN = 8;
-static constexpr uint8_t ENCODER_SW_PIN = 21;
-static constexpr int8_t ENCODER_TRANSITIONS_PER_DETENT = 4;
-static constexpr uint16_t ENCODER_CW_CONSUMER = 0x00E9;   // Volume increment
-static constexpr uint16_t ENCODER_CCW_CONSUMER = 0x00EA;  // Volume decrement
-static constexpr uint16_t ENCODER_SW_CONSUMER = 0x00E2;   // Mute
+// Low-profile horizontal roller encoder, EVQWGD001-style (the part used by
+// PIXEL PRO). Electrically it is still a 2-bit quadrature rotary encoder with
+// a momentary push switch, but its footprint/pinout differs from an EC11.
+// A/B use internal pull-ups; encoder common and one switch contact go to GND.
+// The fourth encoder-side pad on genuine EVQWGD001 parts is NC.
+static constexpr uint8_t ROLLER_A_PIN = 7;
+static constexpr uint8_t ROLLER_B_PIN = 8;
+static constexpr uint8_t ROLLER_SW_PIN = 21;
+static constexpr int8_t ROLLER_TRANSITIONS_PER_DETENT = 4;
+static constexpr uint16_t ROLLER_CW_CONSUMER = 0x00E9;    // Volume increment
+static constexpr uint16_t ROLLER_CCW_CONSUMER = 0x00EA;   // Volume decrement
+static constexpr uint16_t ROLLER_SW_CONSUMER = 0x00E2;    // Mute
 
 // 4-wire resistive touch shares four ILI9486 shield signals.
 // YP=A1/LCD_WR, XM=A2/LCD_RS, XP=D6/LCD_D6, YM=D7/LCD_D7.
@@ -230,9 +234,9 @@ Arduino_GFX *tft =
         false);
 
 static KeyState keyState[KEY_COUNT] = {};
-static KeyState encoderSwitchState = {};
-static uint8_t encoderLastAB = 0;
-static int8_t encoderTransitionAccumulator = 0;
+static KeyState rollerSwitchState = {};
+static uint8_t rollerLastAB = 0;
+static int8_t rollerTransitionAccumulator = 0;
 
 static TouchCalibration touchCalibration = {};
 static bool touchRawPressed = false;
@@ -6257,7 +6261,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,TOUCH_RESISTIVE,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -8735,15 +8739,15 @@ static void sendConsumerTap(
   }
 }
 
-static void emitEncoderStep(
+static void emitRollerStep(
     bool clockwise) {
   lastUserActivityAt = millis();
   stopSaver();
 
   sendConsumerTap(
       clockwise
-          ? ENCODER_CW_CONSUMER
-          : ENCODER_CCW_CONSUMER);
+          ? ROLLER_CW_CONSUMER
+          : ROLLER_CCW_CONSUMER);
 
   cdcPrintln(
       clockwise
@@ -8751,52 +8755,52 @@ static void emitEncoderStep(
           : "ENCODER|CCW");
 }
 
-static void emitEncoderSwitchPress() {
+static void emitRollerSwitchPress() {
   lastUserActivityAt = millis();
   stopSaver();
 
   sendConsumerTap(
-      ENCODER_SW_CONSUMER);
+      ROLLER_SW_CONSUMER);
 
   cdcPrintln(
       "ENCODER|PRESS");
 }
 
-static void initEncoder() {
+static void initRoller() {
   pinMode(
-      ENCODER_A_PIN,
+      ROLLER_A_PIN,
       INPUT_PULLUP);
   pinMode(
-      ENCODER_B_PIN,
+      ROLLER_B_PIN,
       INPUT_PULLUP);
   pinMode(
-      ENCODER_SW_PIN,
+      ROLLER_SW_PIN,
       INPUT_PULLUP);
 
-  encoderLastAB =
+  rollerLastAB =
       static_cast<uint8_t>(
-          (digitalRead(ENCODER_A_PIN) == HIGH
+          (digitalRead(ROLLER_A_PIN) == HIGH
                ? 2U
                : 0U) |
-          (digitalRead(ENCODER_B_PIN) == HIGH
+          (digitalRead(ROLLER_B_PIN) == HIGH
                ? 1U
                : 0U));
 
-  encoderTransitionAccumulator = 0;
+  rollerTransitionAccumulator = 0;
 
   const bool switchPressed =
       digitalRead(
-          ENCODER_SW_PIN) == LOW;
+          ROLLER_SW_PIN) == LOW;
 
-  encoderSwitchState.rawPressed =
+  rollerSwitchState.rawPressed =
       switchPressed;
-  encoderSwitchState.stablePressed =
+  rollerSwitchState.stablePressed =
       switchPressed;
-  encoderSwitchState.changedAt =
+  rollerSwitchState.changedAt =
       millis();
 }
 
-static void pollEncoder() {
+static void pollRoller() {
   // Gray-code transition table. Invalid two-bit jumps are ignored, which
   // removes most mechanical bounce without delaying the main loop.
   static const int8_t TRANSITION[16] = {
@@ -8807,32 +8811,32 @@ static void pollEncoder() {
 
   const uint8_t currentAB =
       static_cast<uint8_t>(
-          (digitalRead(ENCODER_A_PIN) == HIGH
+          (digitalRead(ROLLER_A_PIN) == HIGH
                ? 2U
                : 0U) |
-          (digitalRead(ENCODER_B_PIN) == HIGH
+          (digitalRead(ROLLER_B_PIN) == HIGH
                ? 1U
                : 0U));
 
   const uint8_t transitionIndex =
       static_cast<uint8_t>(
-          (encoderLastAB << 2) |
+          (rollerLastAB << 2) |
           currentAB);
 
-  encoderLastAB =
+  rollerLastAB =
       currentAB;
 
-  encoderTransitionAccumulator +=
+  rollerTransitionAccumulator +=
       TRANSITION[transitionIndex];
 
-  if (encoderTransitionAccumulator >=
-      ENCODER_TRANSITIONS_PER_DETENT) {
-    encoderTransitionAccumulator = 0;
-    emitEncoderStep(true);
-  } else if (encoderTransitionAccumulator <=
-             -ENCODER_TRANSITIONS_PER_DETENT) {
-    encoderTransitionAccumulator = 0;
-    emitEncoderStep(false);
+  if (rollerTransitionAccumulator >=
+      ROLLER_TRANSITIONS_PER_DETENT) {
+    rollerTransitionAccumulator = 0;
+    emitRollerStep(true);
+  } else if (rollerTransitionAccumulator <=
+             -ROLLER_TRANSITIONS_PER_DETENT) {
+    rollerTransitionAccumulator = 0;
+    emitRollerStep(false);
   }
 
   const uint32_t now =
@@ -8840,26 +8844,26 @@ static void pollEncoder() {
 
   const bool switchPressed =
       digitalRead(
-          ENCODER_SW_PIN) == LOW;
+          ROLLER_SW_PIN) == LOW;
 
   if (switchPressed !=
-      encoderSwitchState.rawPressed) {
-    encoderSwitchState.rawPressed =
+      rollerSwitchState.rawPressed) {
+    rollerSwitchState.rawPressed =
         switchPressed;
-    encoderSwitchState.changedAt =
+    rollerSwitchState.changedAt =
         now;
   }
 
   if (switchPressed !=
-          encoderSwitchState.stablePressed &&
+          rollerSwitchState.stablePressed &&
       now -
-              encoderSwitchState.changedAt >=
+              rollerSwitchState.changedAt >=
           DEBOUNCE_MS) {
-    encoderSwitchState.stablePressed =
+    rollerSwitchState.stablePressed =
         switchPressed;
 
     if (switchPressed) {
-      emitEncoderSwitchPress();
+      emitRollerSwitchPress();
     }
   }
 }
@@ -9480,7 +9484,7 @@ void setup() {
 
   initStatusLed();
   initKeys();
-  initEncoder();
+  initRoller();
   initDisplay();
   initTouch();
 
@@ -9509,7 +9513,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0191);
+  USB.firmwareVersion(0x0192);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -9523,12 +9527,12 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.1");
+  cdcPrintln("BOOT|PIXELPRO|1.9.2");
 }
 
 void loop() {
   pollKeys();
-  pollEncoder();
+  pollRoller();
   pollCdc();
   pollRgbEffect();
   pollSaver();

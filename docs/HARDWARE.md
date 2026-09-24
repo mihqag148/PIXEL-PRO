@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.9.0**.
+Firmware: **1.9.2**.
 
 This is the final pin plan used by the Arduino firmware. Pin names below use the
 board silk-screen convention **Dxx**.
@@ -42,25 +42,39 @@ The diode stripe / cathode points toward the **ROW** side. Firmware scans one ro
 low at a time while all columns use internal pull-ups. Unselected rows are left
 high-impedance to avoid cross-row current.
 
-## EC11 encoder
+## Low-profile roller encoder (EVQWGD001 style)
 
-| Encoder signal | ESP32-S2 Mini |
+PIXEL PRO does **not** use an EC11 knob encoder. The production control is the
+low-profile horizontal thumb/roller encoder shown in the hardware reference,
+EVQWGD001-style.
+
+Electrically it is still a 2-bit quadrature encoder plus a momentary push switch,
+so the firmware keeps the same robust Gray-code state-machine decoder.
+
+| Roller signal | ESP32-S2 Mini |
 |---|---|
-| A / CLK | D7 |
-| B / DT | D8 |
-| SW | D21 |
-| Common | GND |
+| A | D7 |
+| B | D8 |
+| Push switch | D21 |
+| Encoder common | GND |
+| Other push-switch contact | GND |
+| NC pad, if present | leave open |
 
-Firmware uses internal pull-ups.
+Firmware enables internal pull-ups on D7, D8 and D21.
+
+On genuine EVQWGD001-style parts the encoder section has A/B/common contacts and
+the push section is a separate momentary switch. Some clone/vendor drawings swap
+pad labels, so confirm the three encoder contacts with continuity mode before
+soldering the final PCB.
 
 Default standalone behavior:
 
-- clockwise: Volume Up
-- counter-clockwise: Volume Down
-- press: Mute
+- roll clockwise: Volume Up
+- roll counter-clockwise: Volume Down
+- press roller: Mute
 
-The decoder uses a Gray-code transition table and ignores invalid two-bit jumps,
-which reduces mechanical bounce without blocking the main loop.
+The decoder ignores invalid two-bit jumps to reject most mechanical contact bounce
+without blocking the main loop.
 
 ## Reserved profile navigation
 
@@ -164,9 +178,14 @@ The TFT shield also exposes:
 - SD_DI
 - SD_SS
 
-PIXEL PRO firmware 1.9.0 does **not** use the shield microSD slot. Screensaver and
-Main Menu media remain in ESP32 LittleFS. Leave the four SD pins unconnected unless
-a later firmware revision explicitly enables external SD storage.
+The shield **can use a microSD card**: SD_SCK, SD_DO, SD_DI and SD_SS are a
+normal SPI-style card interface exposed by the TFT PCB.
+
+PIXEL PRO firmware 1.9.2 does **not yet mount the card**. Screensaver and Main
+Menu media still use ESP32 LittleFS, so the four SD pins should remain unconnected
+for the current build. Enabling SD later requires four MCU signals (SCK, MISO,
+MOSI, CS); the current final pin plan deliberately does not steal the reserved
+profile-control pins or the USB/status/RGB pins.
 
 ## Complete ESP32-S2 Mini allocation
 
@@ -178,8 +197,8 @@ a later firmware revision explicitly enables external SD storage.
 | D4 | Matrix COL2 |
 | D5 | Matrix COL3 |
 | D6 | Matrix COL4 |
-| D7 | Encoder A |
-| D8 | Encoder B |
+| D7 | Roller encoder A |
+| D8 | Roller encoder B |
 | D9 | Reserved profile control |
 | D10 | Reserved profile control |
 | D11 | Reserved profile control |
@@ -192,7 +211,7 @@ a later firmware revision explicitly enables external SD storage.
 | D18 | WS2812/SK6812 DATA |
 | D19 | Native USB D- |
 | D20 | Native USB D+ |
-| D21 | Encoder SW |
+| D21 | Roller push switch |
 | D33 | LCD_D0 |
 | D34 | LCD_D1 |
 | D35 | LCD_D2 |
