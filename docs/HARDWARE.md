@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.9.9**.
+Firmware: **1.10.0**.
 
 All controller pins below use the board silk-screen names **Dxx**. Do not convert
 this document to raw ESP32 pin naming when wiring.
@@ -115,16 +115,17 @@ CDC test commands:
 - `SDREMOUNT`
 - `SDTEST`
 
-## 3.5-inch 480x320 MCUFRIEND display
+## 3.5-inch 480x320 HX8357-B display
 
 Panel: **3.5-inch 480 x 320 MCUFRIEND-style shield**, landscape, i8080 8-bit.
 
-Firmware 1.9.9 mirrors the **MCUFRIEND_kbv controller-ID 0x1581 / R61581**
-initialization used by the shop example's `readID() -> begin(ID)` path, then
-rotates the 320x480 controller memory to 480x320 landscape. This adds the missing
-frame/interface/timing setup and explicitly forces normal (non-inverted) display
-polarity. The shop sketch's `//ID=0x9341` text is only a touch calibration
-comment; it is not the panel driver selection.
+Firmware 1.10.0 uses the controller ID measured directly from the user's panel.
+The diagnostic read returned `00 01 62 83 57 FF` from register `0xBF`, which
+MCUFRIEND identifies as **0x8357 = HX8357-B**.
+
+PIXEL PRO therefore uses Arduino_GFX's native **Arduino_HX8357B** driver. The
+driver runs the panel's own HX8357-B power/timing/gamma sequence and uses the
+same reversed-screen polarity behavior MCUFRIEND applies to ID 0x8357.
 
 | TFT shield signal | S2 Mini |
 |---|---|
@@ -144,8 +145,8 @@ comment; it is not the panel driver selection.
 | 5V | 5V / VBUS |
 | GND | GND |
 
-**No display rewiring is required when moving from v1.9.6/v1.9.7 to v1.9.8.**
-Keep LCD_RST on EN and LCD_RD on 3V3.
+**Final wiring after the ID test:** move LCD_RD back from D15 to **3V3**, and
+reconnect RGB DATA to **D15**. All other display wires stay unchanged.
 
 ### LCD_RST wiring
 
@@ -163,7 +164,7 @@ PIXEL PRO uses a write-only parallel display path. Connect **LCD_RD directly to
 ## Resistive touch
 
 No additional touch pins are required. Touch shares four LCD wires. Firmware
-1.9.9 now reproduces the shop sketch's TouchScreen.h electrical sequence,
+1.10.0 reproduces the shop sketch's TouchScreen.h electrical sequence,
 300-ohm plate-pressure calculation and supplied calibration values:
 
 | Touch electrode | Shared signal | S2 Mini |
@@ -175,19 +176,20 @@ No additional touch pins are required. Touch shares four LCD wires. Firmware
 
 Shop calibration reproduced in firmware:
 
-- TS_LEFT = 907
-- TS_RT = 136
-- TS_TOP = 942
-- TS_BOT = 139
+- tp.y: TS_RT = 136, TS_LEFT = 907
+- tp.x: TS_BOT = 139, TS_TOP = 942
+- landscape mapping inverts both axes after X/Y swap
 - pressure window = 200..1000
 - X-plate resistance = 300 ohm
+
+Existing v1.9.9 touch calibration is automatically reset because v1.10.0 bumps the touch calibration storage version after correcting the raw-axis assignment.
 
 Firmware deselects the LCD before every touch measurement, samples the resistive
 panel, then restores the 8-bit LCD bus.
 
 ## RGB
 
-RGB data stays on **D15** in firmware 1.9.8.
+RGB data stays on **D15** in firmware 1.10.0.
 
 | RGB connection | S2 Mini |
 |---|---|

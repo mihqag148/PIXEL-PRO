@@ -36,7 +36,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.9.9";
+static constexpr char FW_VERSION[] = "1.10.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -47,7 +47,7 @@ static constexpr uint8_t ACTION_COUNT = 32;
 static constexpr uint8_t MACRO_MAX_LEN = 80;
 static constexpr uint32_t DEBOUNCE_MS = 8;
 
-// PIXEL PRO display: MCUFRIEND-style 3.5" 480x320 shield, R61581-class controller, i8080 8-bit.
+// PIXEL PRO display: MCUFRIEND-style 3.5" 480x320 shield, HX8357-B controller, i8080 8-bit.
 // The physical shield follows the common UNO/Mega2560 8-bit shield signal
 // layout; HARDWARE.md maps those shield pins to these ESP32-S2 pins.
 static constexpr uint16_t TFT_WIDTH = 480;
@@ -209,22 +209,26 @@ static constexpr uint16_t TOUCH_ADC_MAX = 1023;
 static constexpr uint16_t TOUCH_PRESSURE_MIN = 200;
 static constexpr uint16_t TOUCH_PRESSURE_MAX = 1000;
 static constexpr uint16_t TOUCH_RXPLATE_OHMS = 300;
-static constexpr uint16_t TOUCH_X_MIN_DEFAULT = 136;  // shop TS_RT
-static constexpr uint16_t TOUCH_X_MAX_DEFAULT = 907;  // shop TS_LEFT
-static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 139;  // shop TS_BOT
-static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // shop TS_TOP
+static constexpr uint16_t TOUCH_X_MIN_DEFAULT = 139;  // tp.x shop TS_BOT
+static constexpr uint16_t TOUCH_X_MAX_DEFAULT = 942;  // tp.x shop TS_TOP
+static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 136;  // tp.y shop TS_RT
+static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 907;  // tp.y shop TS_LEFT
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
 static constexpr uint32_t TOUCH_POLL_MS = 24;
 static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
-static constexpr uint8_t TOUCH_CAL_VERSION = 2;
+static constexpr uint8_t TOUCH_CAL_VERSION = 3;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
-// The 320x480 controller memory is rotated to 480x320 landscape (rotation 1).
-// Shop sketch Orientation=1 maps tp.y high->low across screen X, while
-// tp.x grows top->bottom. That is SWAP_XY + INVERT_X in our mapper.
+// HX8357-B native memory is 320x480 and is rotated to 480x320 landscape (rotation 1).
+// Shop sketch Orientation=1 maps:
+ //   screen X = map(tp.y, TS_LEFT=907, TS_RT=136, 0, 480)
+ //   screen Y = map(tp.x, TS_TOP=942, TS_BOT=139, 0, 320)
+ // Both raw axes therefore run opposite to screen direction after swapping.
 static constexpr uint8_t TOUCH_DEFAULT_FLAGS =
-    TOUCH_FLAG_SWAP_XY | TOUCH_FLAG_INVERT_X;
+    TOUCH_FLAG_SWAP_XY |
+    TOUCH_FLAG_INVERT_X |
+    TOUCH_FLAG_INVERT_Y;
 
 struct __attribute__((packed)) ModuleFrame {
   uint8_t magic;
@@ -293,203 +297,9 @@ struct __attribute__((packed)) LegacyMainMenuConfigV3 {
 };
 
 
-class PixelR61581 : public Arduino_TFT {
- public:
-  PixelR61581(
-      Arduino_DataBus *bus,
-      int8_t rst = GFX_NOT_DEFINED,
-      uint8_t rotation = 0)
-      : Arduino_TFT(
-            bus,
-            rst,
-            rotation,
-            false,
-            320,
-            480,
-            0,
-            0,
-            0,
-            0) {}
-
-  bool begin(
-      int32_t speed =
-          GFX_NOT_DEFINED) override {
-    return Arduino_TFT::begin(
-        speed);
-  }
-
-  void writeAddrWindow(
-      int16_t x,
-      int16_t y,
-      uint16_t w,
-      uint16_t h) override {
-    if ((x != _currentX) ||
-        (w != _currentW)) {
-      _currentX = x;
-      _currentW = w;
-      x += _xStart;
-      _bus->writeC8D16D16Split(
-          0x2A,
-          static_cast<uint16_t>(x),
-          static_cast<uint16_t>(
-              x + w - 1));
-    }
-
-    if ((y != _currentY) ||
-        (h != _currentH)) {
-      _currentY = y;
-      _currentH = h;
-      y += _yStart;
-      _bus->writeC8D16D16Split(
-          0x2B,
-          static_cast<uint16_t>(y),
-          static_cast<uint16_t>(
-              y + h - 1));
-    }
-
-    _bus->writeCommand(0x2C);
-  }
-
-  void setRotation(
-      uint8_t rotation) override {
-    Arduino_TFT::setRotation(
-        rotation);
-
-    uint8_t madctl = 0x48;
-    switch (_rotation) {
-      case 1:
-        madctl = 0x28;
-        break;
-      case 2:
-        madctl = 0x09;
-        break;
-      case 3:
-        madctl = 0x69;
-        break;
-      default:
-        madctl = 0x48;
-        break;
-    }
-
-    _bus->beginWrite();
-    _bus->writeCommand(0x36);
-    _bus->write(madctl);
-    _bus->endWrite();
-  }
-
-  void invertDisplay(
-      bool invert) override {
-    _bus->sendCommand(
-        invert ? 0x21 : 0x20);
-  }
-
-  void displayOn() override {
-    _bus->sendCommand(0x29);
-  }
-
-  void displayOff() override {
-    _bus->sendCommand(0x28);
-  }
-
- protected:
-  void tftInit() override {
-    // Match the MCUFRIEND_kbv path for controller ID 0x1581 exactly.
-    // The shop sketch does readID() -> begin(ID); its //ID=0x9341 text is
-    // only a touch-calibration comment. v1.9.8 used a shorter R61581 init,
-    // which can produce dim/flickering output and incorrect colour on this
-    // shield revision.
-    if (_rst != GFX_NOT_DEFINED) {
-      pinMode(_rst, OUTPUT);
-      digitalWrite(_rst, HIGH);
-      delay(50);
-      digitalWrite(_rst, LOW);
-      delay(100);
-      digitalWrite(_rst, HIGH);
-      delay(100);
-    }
-
-    // MCUFRIEND reset_off[]
-    send(0x01, nullptr, 0);
-    delay(150);
-    send(0x28, nullptr, 0);
-
-    const uint8_t pixelFormat[] = {0x55};
-    send(0x3A, pixelFormat, sizeof(pixelFormat));
-
-    // MCUFRIEND case 0x1581 -> common_9481.
-    const uint8_t b0[] = {0x00};
-    send(0xB0, b0, sizeof(b0));
-
-    const uint8_t b3[] = {0x02, 0x00, 0x00, 0x00};
-    send(0xB3, b3, sizeof(b3));
-
-    const uint8_t b4[] = {0x00};
-    send(0xB4, b4, sizeof(b4));
-
-    const uint8_t d0[] = {0x07, 0x42, 0x18};
-    send(0xD0, d0, sizeof(d0));
-
-    const uint8_t d1[] = {0x00, 0x07, 0x10};
-    send(0xD1, d1, sizeof(d1));
-
-    const uint8_t d2[] = {0x01, 0x02};
-    send(0xD2, d2, sizeof(d2));
-
-    const uint8_t d3[] = {0x01, 0x02};
-    send(0xD3, d3, sizeof(d3));
-
-    const uint8_t d4[] = {0x01, 0x02};
-    send(0xD4, d4, sizeof(d4));
-
-    const uint8_t c0[] = {0x12, 0x3B, 0x00, 0x02, 0x11};
-    send(0xC0, c0, sizeof(c0));
-
-    const uint8_t c1[] = {0x10, 0x10, 0x88};
-    send(0xC1, c1, sizeof(c1));
-
-    const uint8_t c5[] = {0x03};
-    send(0xC5, c5, sizeof(c5));
-
-    const uint8_t c6[] = {0x02};
-    send(0xC6, c6, sizeof(c6));
-
-    const uint8_t c8[] = {
-        0x00, 0x32, 0x36, 0x45,
-        0x06, 0x16, 0x37, 0x75,
-        0x77, 0x54, 0x0C, 0x00};
-    send(0xC8, c8, sizeof(c8));
-
-    const uint8_t cc[] = {0x00};
-    send(0xCC, cc, sizeof(cc));
-
-    // MCUFRIEND wake_on[]
-    send(0x11, nullptr, 0);
-    delay(150);
-    send(0x29, nullptr, 0);
-
-    // begin(ID) finishes with invertDisplay(false). Explicitly force
-    // normal (non-negative) polarity before Arduino_TFT applies rotation.
-    send(0x20, nullptr, 0);
-    delay(20);
-  }
-
- private:
-  void send(
-      uint8_t command,
-      const uint8_t *data,
-      size_t length) {
-    _bus->beginWrite();
-    _bus->writeCommand(command);
-
-    for (size_t i = 0;
-         i < length;
-         ++i) {
-      _bus->write(data[i]);
-    }
-
-    _bus->endWrite();
-  }
-};
+// Controller ID was measured on the user's actual shield over LCD_RD:
+ // REG 0xBF returned 00 01 62 83 57 FF, i.e. MCUFRIEND ID 0x8357.
+ // Use Arduino_GFX's native HX8357-B driver instead of a guessed custom init.
 
 USBHID HID;
 USBHIDKeyboard Keyboard;
@@ -512,10 +322,11 @@ Arduino_DataBus *tftBus =
         TFT_D7);
 
 Arduino_GFX *tft =
-    new PixelR61581(
+    new Arduino_HX8357B(
         tftBus,
         TFT_RST,
-        1);
+        1,
+        true);
 
 static KeyState keyState[KEY_COUNT] = {};
 static KeyState rollerSwitchState = {};
@@ -6384,8 +6195,9 @@ static void initDisplay() {
 
   tft->setRotation(1);
 
-  // R61581 timing is configured by the controller-specific initialization
-  // sequence above. Do not send the old ILI9486 FRMCTR1 command here.
+  // Arduino_HX8357B performs the controller-specific power/timing/gamma
+  // initialization. ips=true matches MCUFRIEND's REV_SCREEN behavior for
+  // controller ID 0x8357.
 
   tft->fillScreen(RGB565_BLACK);
 
@@ -6816,7 +6628,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=R61581,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -7175,7 +6987,7 @@ static void handleCommand(String command) {
   }
 
   if (upper == "PANEL") {
-    cdcPrintln("PANEL|R61581|60|0|60");
+    cdcPrintln("PANEL|HX8357B|60|0|60");
     return;
   }
 
@@ -10621,7 +10433,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0199);
+  USB.firmwareVersion(0x01A0);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -10635,7 +10447,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.9");
+  cdcPrintln("BOOT|PIXELPRO|1.10.0");
 }
 
 void loop() {

@@ -1,11 +1,11 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.9.9 keeps native USB HID + CDC, the 3.5-inch 480×320 MCUFRIEND-style R61581-compatible i8080 display, 2×4 key matrix, horizontal roller, resistive touch, SPI microSD, and a three-port PCA9546A magnetic module bus.
+Firmware 1.10.0 keeps native USB HID + CDC, the verified HX8357-B 3.5-inch 480×320 i8080 display, 2×4 key matrix, horizontal roller, resistive touch, SPI microSD, and a three-port PCA9546A magnetic module bus.
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.9.9|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=R61581,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.10.0|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -93,9 +93,11 @@ GET_LAYER returns active profile/layer state.
 
 ## Display controller compatibility
 
-Firmware 1.9.9 mirrors MCUFRIEND_kbv's controller-ID 0x1581/R61581
-initialization, including its display timing/interface registers, 16-bit pixel
-format, wake sequence and explicit normal/non-inverted display command.
+Firmware 1.10.0 uses the measured panel ID **0x8357 (HX8357-B)**. The ID
+diagnostic read register 0xBF as `00 01 62 83 57 FF`, matching MCUFRIEND's
+HX8357-B signature. The display now uses Arduino_GFX's native Arduino_HX8357B
+driver with reversed-screen polarity enabled to match MCUFRIEND's REV_SCREEN
+behavior for ID 0x8357.
 
 The shop sketch supplied for this panel uses `MCUFRIEND_kbv`, calls
 `tft.readID()`, and passes the returned value to `tft.begin(ID)`. Its
@@ -134,11 +136,10 @@ Diagnostic CDC events are also emitted:
 The 4-wire touch panel shares LCD_WR, LCD_RS, LCD_D6 and LCD_D7. Firmware
 deselects the LCD before every touch sample and restores the 8080 bus afterward.
 
-Firmware 1.9.9 reproduces the supplied shop sketch's TouchScreen.h acquisition:
-XP=D39, XM=D14, YP=D13, YM=D40, 300-ohm X plate, pressure 200..1000 and
-10-bit-equivalent calibration TS_LEFT=907, TS_RT=136, TS_TOP=942, TS_BOT=139.
-Existing older touch calibration is automatically reset by a calibration-version
-bump.
+Firmware 1.10.0 reproduces the supplied shop sketch's TouchScreen.h acquisition:
+XP=D39, XM=D14, YP=D13, YM=D40, 300-ohm X plate and pressure 200..1000.
+Calibration is applied on the correct raw axes: tp.x uses 139..942, tp.y uses
+136..907, then landscape mapping swaps X/Y and inverts both axes.
 
 Touch diagnostic events:
 
@@ -239,7 +240,7 @@ PANEL
 
 Response:
 
-PANEL|R61581|60|0|60
+PANEL|HX8357B|60|0|60
 
 Fields are panel name, PIXEL PRO refresh cap in Hz, legacy SPI-Hz field (0 for
 i8080 parallel), and maximum media FPS.
