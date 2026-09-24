@@ -19,7 +19,22 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.9.3";
+extern const char PIXEL_FACTORY_MENU_B64_0[];
+extern const char PIXEL_FACTORY_MENU_B64_1[];
+extern const char PIXEL_FACTORY_MENU_B64_2[];
+extern const char PIXEL_FACTORY_MENU_B64_3[];
+extern const char PIXEL_FACTORY_MENU_B64_4[];
+extern const char PIXEL_FACTORY_MENU_B64_5[];
+extern const size_t PIXEL_FACTORY_MENU_B64_0_LEN;
+extern const size_t PIXEL_FACTORY_MENU_B64_1_LEN;
+extern const size_t PIXEL_FACTORY_MENU_B64_2_LEN;
+extern const size_t PIXEL_FACTORY_MENU_B64_3_LEN;
+extern const size_t PIXEL_FACTORY_MENU_B64_4_LEN;
+extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
+
+static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
+
+static constexpr char FW_VERSION[] = "1.9.4";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -2053,6 +2068,120 @@ static void renderDefaultVisual(
   }
 }
 
+static bool renderFactoryMenuJpeg() {
+  if (!displayReady) {
+    return false;
+  }
+
+  const char *chunks[] = {
+      PIXEL_FACTORY_MENU_B64_0,
+      PIXEL_FACTORY_MENU_B64_1,
+      PIXEL_FACTORY_MENU_B64_2,
+      PIXEL_FACTORY_MENU_B64_3,
+      PIXEL_FACTORY_MENU_B64_4,
+      PIXEL_FACTORY_MENU_B64_5
+  };
+
+  const size_t chunkLengths[] = {
+      PIXEL_FACTORY_MENU_B64_0_LEN,
+      PIXEL_FACTORY_MENU_B64_1_LEN,
+      PIXEL_FACTORY_MENU_B64_2_LEN,
+      PIXEL_FACTORY_MENU_B64_3_LEN,
+      PIXEL_FACTORY_MENU_B64_4_LEN,
+      PIXEL_FACTORY_MENU_B64_5_LEN
+  };
+
+  size_t encodedSize = 0;
+  for (size_t i = 0;
+       i < sizeof(chunkLengths) / sizeof(chunkLengths[0]);
+       ++i) {
+    encodedSize += chunkLengths[i];
+  }
+
+  char *encoded =
+      static_cast<char *>(
+          malloc(encodedSize));
+
+  uint8_t *jpegBytes =
+      static_cast<uint8_t *>(
+          malloc(PIXEL_FACTORY_MENU_JPEG_SIZE));
+
+  if (encoded == nullptr ||
+      jpegBytes == nullptr) {
+    free(encoded);
+    free(jpegBytes);
+    return false;
+  }
+
+  size_t encodedOffset = 0;
+  for (size_t i = 0;
+       i < sizeof(chunkLengths) / sizeof(chunkLengths[0]);
+       ++i) {
+    memcpy(
+        encoded + encodedOffset,
+        chunks[i],
+        chunkLengths[i]);
+
+    encodedOffset +=
+        chunkLengths[i];
+  }
+
+  size_t decodedSize = 0;
+  int decodeStatus =
+      mbedtls_base64_decode(
+          jpegBytes,
+          PIXEL_FACTORY_MENU_JPEG_SIZE,
+          &decodedSize,
+          reinterpret_cast<const unsigned char *>(
+              encoded),
+          encodedSize);
+
+  free(encoded);
+
+  if (decodeStatus != 0 ||
+      decodedSize != PIXEL_FACTORY_MENU_JPEG_SIZE) {
+    free(jpegBytes);
+    return false;
+  }
+
+  JPEGDEC decoder;
+
+  if (!decoder.openRAM(
+          jpegBytes,
+          static_cast<int>(
+              decodedSize),
+          mainMenuJpegDraw) ||
+      decoder.getWidth() != TFT_WIDTH ||
+      decoder.getHeight() != TFT_HEIGHT) {
+    decoder.close();
+    free(jpegBytes);
+    return false;
+  }
+
+  tft->fillScreen(
+      RGB565_BLACK);
+
+  int result =
+      decoder.decode(
+          0,
+          0,
+          0);
+
+  decoder.close();
+  free(jpegBytes);
+
+  return result != 0;
+}
+
+static void renderFactoryMenuFallback() {
+  if (!renderFactoryMenuJpeg()) {
+    // Keep the procedural visual as a final emergency fallback only.
+    renderDefaultVisual(
+        0,
+        false);
+  }
+}
+
 static bool renderMainMenuBackground(
     uint8_t profile) {
   if (profile >= PROFILE_COUNT) {
@@ -2068,9 +2197,7 @@ static bool renderMainMenuBackground(
 
   if (!littleFsReady ||
       !LittleFS.exists(path)) {
-    renderDefaultVisual(
-        0,
-        false);
+    renderFactoryMenuFallback();
     return true;
   }
 
@@ -2080,9 +2207,7 @@ static bool renderMainMenuBackground(
           "r");
 
   if (!file) {
-    renderDefaultVisual(
-        0,
-        false);
+    renderFactoryMenuFallback();
     return true;
   }
 
@@ -2094,9 +2219,7 @@ static bool renderMainMenuBackground(
       decoder.getHeight() != TFT_HEIGHT) {
     decoder.close();
     file.close();
-    renderDefaultVisual(
-        0,
-        false);
+    renderFactoryMenuFallback();
     return true;
   }
 
@@ -2112,9 +2235,7 @@ static bool renderMainMenuBackground(
   file.close();
 
   if (result == 0) {
-    renderDefaultVisual(
-        0,
-        false);
+    renderFactoryMenuFallback();
     return true;
   }
 
@@ -9725,7 +9846,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0193);
+  USB.firmwareVersion(0x0194);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -9739,7 +9860,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.3");
+  cdcPrintln("BOOT|PIXELPRO|1.9.4");
 }
 
 void loop() {
