@@ -1,101 +1,203 @@
 # PIXEL PRO hardware map
 
-Controller: LOLIN/WEMOS ESP32-S2 Mini.
+Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-## Phase 1 inputs
+Firmware: **1.9.0**.
 
-| Control | GPIO | Default HID key |
-|---|---:|---|
-| K1 | 1 | A |
-| K2 | 2 | B |
-| K3 | 3 | C |
-| K4 | 4 | D |
-| K5 | 5 | E |
-| K6 | 6 | F |
-| K7 | 7 | G |
-| K8 | 8 | H |
-
-Each switch connects its GPIO directly to GND. Firmware uses INPUT_PULLUP, so no
-external pull resistor or diode is required for this direct-key layout.
+This is the final pin plan used by the Arduino firmware. Pin names below use the
+board silk-screen convention **Dxx**.
 
 ## Native USB
 
-ESP32-S2 native USB uses GPIO19 (D-) and GPIO20 (D+) through the board USB-C connector.
-Do not use GPIO19/GPIO20 for keys.
+The ESP32-S2 native USB connection uses **D19 (USB D-)** and **D20 (USB D+)**
+through the board USB-C connector.
+
+Do not reuse D19 or D20 for keys, encoder, RGB, display, or touch.
+
+## 8-key matrix
+
+PIXEL PRO uses a **2 × 4 diode matrix** instead of eight direct GPIO inputs.
+
+| Matrix signal | ESP32-S2 Mini |
+|---|---|
+| ROW1 | D1 |
+| ROW2 | D2 |
+| COL1 | D3 |
+| COL2 | D4 |
+| COL3 | D5 |
+| COL4 | D6 |
+
+Logical key layout:
+
+| | COL1 D3 | COL2 D4 | COL3 D5 | COL4 D6 |
+|---|---|---|---|---|
+| ROW1 D1 | K1 | K2 | K3 | K4 |
+| ROW2 D2 | K5 | K6 | K7 | K8 |
+
+Each switch uses one diode:
+
+`COL -> switch -> diode -> ROW`
+
+The diode stripe / cathode points toward the **ROW** side. Firmware scans one row
+low at a time while all columns use internal pull-ups. Unselected rows are left
+high-impedance to avoid cross-row current.
+
+## EC11 encoder
+
+| Encoder signal | ESP32-S2 Mini |
+|---|---|
+| A / CLK | D7 |
+| B / DT | D8 |
+| SW | D21 |
+| Common | GND |
+
+Firmware uses internal pull-ups.
+
+Default standalone behavior:
+
+- clockwise: Volume Up
+- counter-clockwise: Volume Down
+- press: Mute
+
+The decoder uses a Gray-code transition table and ignores invalid two-bit jumps,
+which reduces mechanical bounce without blocking the main loop.
+
+## Reserved profile navigation
+
+D9, D10, and D11 remain reserved for the physical profile-navigation control.
+They are not consumed by the matrix, encoder, LCD, touch, RGB, or native USB.
 
 ## PIXEL PRO display
 
-Panel: **ILI9486 3.5-inch, 480×320 landscape**.
+Panel: **3.5-inch ILI9486, 480 × 320 landscape**.
 
 Interface: **i8080 / 8080-style 8-bit parallel**.
 
-The shield is the common UNO/Mega2560 8-bit TFT pinout. Its logical LCD bus maps to
-the ESP32-S2 Mini as follows:
-
-| LCD signal | UNO/Mega2560 shield pin | ESP32-S2 Mini |
+| Shield signal | Common UNO shield pin | ESP32-S2 Mini |
 |---|---|---|
-| D0 | D8 | D33 |
-| D1 | D9 | D34 |
-| D2 | D2 | D35 |
-| D3 | D3 | D36 |
-| D4 | D4 | D37 |
-| D5 | D5 | D38 |
-| D6 | D6 | D39 |
-| D7 | D7 | D40 |
-| RD | A0 | D12 |
-| WR | A1 | D13 |
-| RS / DC | A2 | D14 |
-| CS | A3 | D16 |
-| RST | A4 | D17 |
+| LCD_D0 | D8 | D33 |
+| LCD_D1 | D9 | D34 |
+| LCD_D2 | D2 | D35 |
+| LCD_D3 | D3 | D36 |
+| LCD_D4 | D4 | D37 |
+| LCD_D5 | D5 | D38 |
+| LCD_D6 | D6 | D39 |
+| LCD_D7 | D7 | D40 |
+| LCD_RD | A0 | D12 |
+| LCD_WR | A1 | D13 |
+| LCD_RS / DC | A2 | D14 |
+| LCD_CS | A3 | D16 |
+| LCD_RST | A4 | D17 |
+| 5V | 5V | 5V |
+| GND | GND | GND |
 
-The shield's 5V/GND/backlight wiring remains on the shield power pins. The display
-logic is driven by the ESP32-S2 through the mappings above.
+The firmware uses Arduino_GFX with `Arduino_ESP32PAR8` and
+`Arduino_ILI9486`, rotation 1, giving a logical 480 × 320 landscape canvas.
 
-The firmware uses Arduino_GFX with the ILI9486 driver and an 8-bit parallel bus.
-The panel is rotated to 480×320 landscape. ILI9486 frame-rate control is set to the
-controller step nearest 60 Hz, while PIXEL PRO caps rendered media at 60 FPS.
+## 4-wire resistive touch
 
-PIXEL PRO GIF screensavers are no longer expanded from a reduced raw-frame format.
-The Windows app sends the original LZW-compressed GIF file and firmware stores that
-file in LittleFS, then decodes it on-device with AnimatedGIF.
+The shield in PIXEL PRO uses a **4-wire resistive touch panel with no separate
+XPT2046 controller**. Four touch electrodes are shared with LCD signals.
 
-GIF files are stored in their original compressed form. Firmware accepts GIF canvases
-from 1×1 through 1024×1024 and applies Fill, Fit, Stretch, Center or Span scaling while
-decoding. GIF orientation is preserved exactly as stored in the file. A 320×480 portrait GIF
-remains portrait; with Fit it is centered inside the 480×320 landscape panel with
-letterboxing instead of being auto-rotated or cropped. No 240×160 raw-frame
-conversion or fixed 2× upscaling is required.
+| Touch electrode | Shared shield signal | ESP32-S2 Mini |
+|---|---|---|
+| YP / Y+ | LCD_WR / A1 | D13 |
+| XM / X- | LCD_RS / A2 | D14 |
+| XP / X+ | LCD_D6 / D6 | D39 |
+| YM / Y- | LCD_D7 / D7 | D40 |
 
-Frame timing is respected but clamped to a maximum playback rate of 60 FPS
-(minimum 17 ms per frame). Static images remain full 480×320 RGB565. Actual
-full-screen GIF FPS depends on decode complexity and the 8-bit i8080 bus throughput.
+No additional touch wires are required beyond the LCD wiring.
 
-Additional reserved PIXEL PRO pins:
+D13 and D14 are ADC-capable on ESP32-S2. During a touch sample firmware first
+drives **LCD_CS high** to deselect the ILI9486, temporarily changes the four shared
+pins into the resistive measurement network, samples the ADC, then restores the
+pins to the 8080 LCD bus. This prevents touch reads from becoming accidental LCD
+write cycles.
 
-- D9..D11: three-way profile navigation switch.
-- D15: onboard blue USB status LED on LOLIN/WEMOS ESP32-S2 Mini.
-- D18: addressable RGB data.
+Touch is sampled about every 24 ms. The first touch while the screensaver is
+active only wakes the display; it does not trigger an action. On the Main Menu,
+a normal touch on one of the eight icon cells emits the corresponding Lumi Action.
 
-### Onboard USB status LED
+Default calibration is suitable as a starting point for the common shield and can
+be changed over CDC:
 
-The board's onboard blue LED is driven from **D15 / GPIO15** and is separate
-from the 8-key WS2812 strip on D18.
+- `GET_TOUCH_CAL`
+- `SET_TOUCH_CAL|xMin|xMax|yMin|yMax|flags`
+- `RESET_TOUCH_CAL`
 
-- PC/USB HID connection ready: LED stays **ON** continuously.
-- USB not enumerated / PC not connected: LED **blinks every 500 ms**.
+Flags:
 
+- bit 0 / 1: swap X/Y
+- bit 1 / 2: invert X
+- bit 2 / 4: invert Y
 
-## PIXEL PRO per-key RGB
+The factory default is swap X/Y + invert Y, matching ILI9486 rotation 1.
 
-WS2812/NeoPixel data is on **D18**. The logical key-to-physical-LED mapping is fixed to the product layout:
+## RGB
 
-- LED1 → K1
-- LED2 → K2
-- LED3 → K3
-- LED4 → K4
-- LED5 → K8
-- LED6 → K7
-- LED7 → K6
-- LED8 → K5
+Per-key WS2812/SK6812 data is on **D18**.
 
-RGB colors are stored independently for all 20 keymap profiles.
+Physical LED order:
+
+- LED1 -> K1
+- LED2 -> K2
+- LED3 -> K3
+- LED4 -> K4
+- LED5 -> K8
+- LED6 -> K7
+- LED7 -> K6
+- LED8 -> K5
+
+## Onboard status LED
+
+The LOLIN/WEMOS ESP32-S2 Mini onboard blue LED is **D15**.
+
+- USB HID ready: solid ON
+- USB not enumerated: blink every 500 ms
+
+## microSD on the TFT shield
+
+The TFT shield also exposes:
+
+- SD_SCK
+- SD_DO
+- SD_DI
+- SD_SS
+
+PIXEL PRO firmware 1.9.0 does **not** use the shield microSD slot. Screensaver and
+Main Menu media remain in ESP32 LittleFS. Leave the four SD pins unconnected unless
+a later firmware revision explicitly enables external SD storage.
+
+## Complete ESP32-S2 Mini allocation
+
+| Pin | PIXEL PRO function |
+|---|---|
+| D1 | Matrix ROW1 |
+| D2 | Matrix ROW2 |
+| D3 | Matrix COL1 |
+| D4 | Matrix COL2 |
+| D5 | Matrix COL3 |
+| D6 | Matrix COL4 |
+| D7 | Encoder A |
+| D8 | Encoder B |
+| D9 | Reserved profile control |
+| D10 | Reserved profile control |
+| D11 | Reserved profile control |
+| D12 | LCD_RD |
+| D13 | LCD_WR + Touch YP |
+| D14 | LCD_RS/DC + Touch XM |
+| D15 | Onboard USB status LED |
+| D16 | LCD_CS |
+| D17 | LCD_RST |
+| D18 | WS2812/SK6812 DATA |
+| D19 | Native USB D- |
+| D20 | Native USB D+ |
+| D21 | Encoder SW |
+| D33 | LCD_D0 |
+| D34 | LCD_D1 |
+| D35 | LCD_D2 |
+| D36 | LCD_D3 |
+| D37 | LCD_D4 |
+| D38 | LCD_D5 |
+| D39 | LCD_D6 + Touch XP |
+| D40 | LCD_D7 + Touch YM |
