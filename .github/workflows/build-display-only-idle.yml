@@ -100,7 +100,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PIXEL-PRO-DISPLAY-ONLY-IDLE
-          path: dist/*
+          path: |
+            dist/PIXEL_PRO_DISPLAY_ONLY_IDLE_*.bin
+            dist/README-DISPLAY-ONLY-IDLE.txt
           if-no-files-found: error
 
   pr-checks:
@@ -130,11 +132,14 @@ jobs:
         run: |
           TAG="tft-display-only-idle-v1"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              dist/PIXEL_PRO_DISPLAY_ONLY_IDLE_*.bin \
+              dist/README-DISPLAY-ONLY-IDLE.txt
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "PIXEL PRO Display-Only Idle Test v1" \
               --notes "Exact production display init, safe PAR8, then one 0xFFFF fill and complete idle." \
-              dist/*
+              dist/PIXEL_PRO_DISPLAY_ONLY_IDLE_*.bin \
+              dist/README-DISPLAY-ONLY-IDLE.txt
           fi
