@@ -15,6 +15,10 @@
 #include "USBHIDKeyboard.h"
 #include "USBHIDConsumerControl.h"
 
+#ifndef PIXEL_DIAG_TOUCH_OFF
+#define PIXEL_DIAG_TOUCH_OFF 0
+#endif
+
 #if ARDUINO_USB_CDC_ON_BOOT
 #error PIXEL PRO composite firmware requires USB CDC On Boot disabled
 #else
@@ -10559,7 +10563,9 @@ void setup() {
   initKeys();
   initRoller();
   initDisplay();
-  initTouch();
+  if (!PIXEL_DIAG_TOUCH_OFF) {
+    initTouch();
+  }
   mountSdCard();
   initModuleBus();
 
@@ -10611,7 +10617,9 @@ void loop() {
   pollCdc();
   pollRgbEffect();
   pollSaver();
-  pollTouch();
+  if (!PIXEL_DIAG_TOUCH_OFF) {
+    pollTouch();
+  }
   pollModuleBus();
 
   if (bootloaderArmed &&
