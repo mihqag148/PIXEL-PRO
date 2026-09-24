@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.9.0";
+static constexpr char FW_VERSION[] = "1.9.1";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -60,10 +60,11 @@ static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 50;
 
-// Firmware-resident fallback visuals. These are generated from drawing
-// primitives, so they consume no LittleFS space and cannot be deleted by
-// user media-management commands. User uploads always take precedence.
-static constexpr uint8_t DEFAULT_SAVER_FPS = 12;
+// Firmware-resident fallback visuals. The default art is rendered directly
+// from smooth scanlines inspired by the user's aqua/teal reference image, so
+// it consumes no LittleFS space and cannot be deleted by media commands.
+// User uploads always take precedence.
+static constexpr uint8_t DEFAULT_SAVER_FPS = 20;
 static constexpr uint32_t DEFAULT_SAVER_FRAME_MS =
     1000UL / DEFAULT_SAVER_FPS;
 
@@ -173,6 +174,12 @@ struct KeyState {
   bool rawPressed;
   bool stablePressed;
   uint32_t changedAt;
+};
+
+struct DefaultVisualRgb {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
 };
 
 struct __attribute__((packed)) TouchCalibration {
@@ -1361,129 +1368,66 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
 }
 
 static uint16_t defaultVisualRgb565(
-    uint8_t r,
-    uint8_t g,
-    uint8_t b) {
+    const DefaultVisualRgb &color) {
   return static_cast<uint16_t>(
-      ((static_cast<uint16_t>(r) & 0xF8) << 8) |
-      ((static_cast<uint16_t>(g) & 0xFC) << 3) |
-      (static_cast<uint16_t>(b) >> 3));
+      ((static_cast<uint16_t>(color.r) & 0xF8) << 8) |
+      ((static_cast<uint16_t>(color.g) & 0xFC) << 3) |
+      (static_cast<uint16_t>(color.b) >> 3));
 }
 
-static uint8_t defaultVisualLerp(
-    uint8_t a,
-    uint8_t b,
-    float amount) {
-  amount = max(
-      0.0f,
-      min(
-          1.0f,
-          amount));
+static DefaultVisualRgb defaultVisualMix(
+    const DefaultVisualRgb &a,
+    const DefaultVisualRgb &b,
+    uint16_t amount) {
+  amount =
+      amount > 255
+          ? 255
+          : amount;
 
-  return static_cast<uint8_t>(
-      a +
-      (static_cast<float>(b) - a) *
-          amount);
+  uint16_t inverse =
+      static_cast<uint16_t>(
+          255 - amount);
+
+  DefaultVisualRgb out = {
+      static_cast<uint8_t>(
+          (static_cast<uint16_t>(a.r) * inverse +
+           static_cast<uint16_t>(b.r) * amount +
+           127) /
+          255),
+      static_cast<uint8_t>(
+          (static_cast<uint16_t>(a.g) * inverse +
+           static_cast<uint16_t>(b.g) * amount +
+           127) /
+          255),
+      static_cast<uint8_t>(
+          (static_cast<uint16_t>(a.b) * inverse +
+           static_cast<uint16_t>(b.b) * amount +
+           127) /
+          255)
+  };
+
+  return out;
 }
 
-static void drawDefaultWave(
-    int baseY,
-    int amplitude,
-    int thickness,
-    float phase,
-    float frequency,
-    uint16_t color,
-    uint16_t highlight) {
-  static constexpr int STEP = 30;
-
-  for (int x = 0;
-       x < TFT_WIDTH - 1;
-       x += STEP) {
-    int x1 =
-        min(
-            x + STEP,
-            static_cast<int>(
-                TFT_WIDTH - 1));
-
-    int y0 =
-        baseY +
-        static_cast<int>(
-            sinf(
-                static_cast<float>(x) *
-                    frequency +
-                phase) *
-            amplitude);
-
-    int y1 =
-        baseY +
-        static_cast<int>(
-            sinf(
-                static_cast<float>(x1) *
-                    frequency +
-                phase) *
-            amplitude);
-
-    tft->fillTriangle(
-        x,
-        y0,
-        x1,
-        y1,
-        x,
-        y0 + thickness,
-        color);
-
-    tft->fillTriangle(
-        x1,
-        y1,
-        x1,
-        y1 + thickness,
-        x,
-        y0 + thickness,
-        color);
-
-    tft->drawLine(
-        x,
-        y0,
-        x1,
-        y1,
-        highlight);
+static uint8_t defaultVisualEdgeGlow(
+    int distance) {
+  if (distance <= 0) {
+    return 188;
   }
-}
 
-static void drawDefaultOrb(
-    int cx,
-    int cy,
-    int radius,
-    uint16_t outer,
-    uint16_t inner,
-    uint16_t shine) {
-  tft->fillCircle(
-      cx,
-      cy,
-      radius,
-      outer);
+  if (distance == 1) {
+    return 146;
+  }
 
-  tft->fillCircle(
-      cx - radius / 6,
-      cy - radius / 6,
-      max(
-          2,
-          radius * 3 / 4),
-      inner);
+  if (distance == 2) {
+    return 92;
+  }
 
-  tft->drawCircle(
-      cx,
-      cy,
-      radius,
-      shine);
+  if (distance == 3) {
+    return 42;
+  }
 
-  tft->fillCircle(
-      cx - radius / 3,
-      cy - radius / 3,
-      max(
-          2,
-          radius / 8),
-      shine);
+  return 0;
 }
 
 static void renderDefaultVisual(
@@ -1493,223 +1437,423 @@ static void renderDefaultVisual(
     return;
   }
 
-  static constexpr uint8_t PALETTE[][3] = {
-      {176, 220, 255},
-      {77, 177, 255},
-      {29, 132, 246},
-      {66, 89, 238},
-      {123, 76, 238},
-      {226, 94, 205}
+  // This palette and composition are based on the user's aqua/blue reference:
+  // bright cyan sky, translucent turquoise mid-layers, and deep navy foreground.
+  static constexpr DefaultVisualRgb SKY_TOP = {
+      8,
+      99,
+      165
   };
 
-  static constexpr int BAND_COUNT = 32;
-  static constexpr int COLOR_COUNT =
-      sizeof(PALETTE) /
-      sizeof(PALETTE[0]);
+  static constexpr DefaultVisualRgb SKY_BOTTOM = {
+      102,
+      211,
+      231
+  };
+
+  static constexpr DefaultVisualRgb SKY_GLOW = {
+      235,
+      254,
+      250
+  };
+
+  static constexpr DefaultVisualRgb AQUA_TOP = {
+      75,
+      196,
+      222
+  };
+
+  static constexpr DefaultVisualRgb AQUA_BOTTOM = {
+      180,
+      241,
+      235
+  };
+
+  static constexpr DefaultVisualRgb TEAL_TOP = {
+      0,
+      79,
+      117
+  };
+
+  static constexpr DefaultVisualRgb TEAL_BOTTOM = {
+      24,
+      211,
+      181
+  };
+
+  static constexpr DefaultVisualRgb CYAN_TOP = {
+      0,
+      95,
+      170
+  };
+
+  static constexpr DefaultVisualRgb CYAN_BOTTOM = {
+      31,
+      191,
+      220
+  };
+
+  static constexpr DefaultVisualRgb NAVY_TOP = {
+      1,
+      62,
+      122
+  };
+
+  static constexpr DefaultVisualRgb NAVY_BOTTOM = {
+      0,
+      32,
+      79
+  };
+
+  static constexpr DefaultVisualRgb EDGE = {
+      205,
+      255,
+      249
+  };
+
+  static constexpr DefaultVisualRgb TEAL_GLOW = {
+      87,
+      245,
+      211
+  };
+
+  static int16_t curve0[TFT_WIDTH] = {};
+  static int16_t curve1[TFT_WIDTH] = {};
+  static int16_t curve2[TFT_WIDTH] = {};
+  static int16_t curve3[TFT_WIDTH] = {};
+  static uint16_t line[TFT_WIDTH] = {};
 
   float phase =
       animated
           ? static_cast<float>(now) *
-                0.00115f
-          : 0.35f;
+                0.00105f
+          : 0.62f;
 
-  for (int band = 0;
-       band < BAND_COUNT;
-       ++band) {
-    int y0 =
-        band *
-        TFT_HEIGHT /
-        BAND_COUNT;
+  // The four boundaries deliberately move at different speeds. Their minimum
+  // separation is enforced below, keeping every frame smooth and avoiding the
+  // self-intersections that made the old fallback look like flat polygons.
+  for (int x = 0;
+       x < TFT_WIDTH;
+       ++x) {
+    float fx =
+        static_cast<float>(x);
 
-    int y1 =
-        (band + 1) *
-        TFT_HEIGHT /
-        BAND_COUNT;
+    int c0 =
+        132 +
+        static_cast<int>(
+            sinf(
+                fx * 0.0104f +
+                phase * 0.42f) *
+            27.0f) +
+        static_cast<int>(
+            sinf(
+                fx * 0.0217f -
+                phase * 0.24f +
+                1.15f) *
+            11.0f);
 
-    float position =
-        static_cast<float>(band) /
-        (BAND_COUNT - 1) *
-        (COLOR_COUNT - 1);
+    int c1 =
+        181 +
+        static_cast<int>(
+            sinf(
+                fx * 0.0092f -
+                phase * 0.55f +
+                1.55f) *
+            29.0f) +
+        static_cast<int>(
+            sinf(
+                fx * 0.0172f +
+                phase * 0.31f +
+                0.45f) *
+            10.0f);
 
-    int index =
-        min(
-            static_cast<int>(
-                position),
-            COLOR_COUNT - 2);
+    int c2 =
+        225 +
+        static_cast<int>(
+            sinf(
+                fx * 0.0112f +
+                phase * 0.66f +
+                2.18f) *
+            25.0f) +
+        static_cast<int>(
+            sinf(
+                fx * 0.0190f -
+                phase * 0.28f) *
+            9.0f);
 
-    float local =
-        position -
-        index;
+    int c3 =
+        272 +
+        static_cast<int>(
+            sinf(
+                fx * 0.0087f -
+                phase * 0.48f +
+                0.28f) *
+            29.0f) +
+        static_cast<int>(
+            sinf(
+                fx * 0.0158f +
+                phase * 0.35f +
+                2.8f) *
+            11.0f);
 
-    uint8_t r =
-        defaultVisualLerp(
-            PALETTE[index][0],
-            PALETTE[index + 1][0],
-            local);
+    c0 =
+        constrain(
+            c0,
+            92,
+            174);
 
-    uint8_t g =
-        defaultVisualLerp(
-            PALETTE[index][1],
-            PALETTE[index + 1][1],
-            local);
+    c1 =
+        constrain(
+            max(
+                c1,
+                c0 + 32),
+            c0 + 32,
+            225);
 
-    uint8_t b =
-        defaultVisualLerp(
-            PALETTE[index][2],
-            PALETTE[index + 1][2],
-            local);
+    c2 =
+        constrain(
+            max(
+                c2,
+                c1 + 30),
+            c1 + 30,
+            278);
 
-    tft->fillRect(
-        0,
-        y0,
-        TFT_WIDTH,
-        max(
-            1,
-            y1 - y0),
-        defaultVisualRgb565(
-            r,
-            g,
-            b));
+    c3 =
+        constrain(
+            max(
+                c3,
+                c2 + 30),
+            c2 + 30,
+            316);
+
+    curve0[x] =
+        static_cast<int16_t>(c0);
+    curve1[x] =
+        static_cast<int16_t>(c1);
+    curve2[x] =
+        static_cast<int16_t>(c2);
+    curve3[x] =
+        static_cast<int16_t>(c3);
   }
 
-  // Warm left glow plus translucent-looking ribbons, inspired by the
-  // macOS/iOS blue-cyan-purple-pink wallpaper family.
-  drawDefaultOrb(
-      34 +
-          static_cast<int>(
-              sinf(
-                  phase * 0.45f) *
-              7.0f),
-      91,
-      70,
-      defaultVisualRgb565(
-          255,
-          155,
-          126),
-      defaultVisualRgb565(
-          255,
-          188,
-          154),
-      defaultVisualRgb565(
-          255,
-          226,
-          207));
-
-  drawDefaultWave(
-      112,
-      26,
-      52,
-      phase * 0.75f,
-      0.015f,
-      defaultVisualRgb565(
-          255,
-          128,
-          178),
-      defaultVisualRgb565(
-          255,
-          209,
-          229));
-
-  drawDefaultWave(
-      165,
-      32,
-      54,
-      phase * 0.95f + 1.35f,
-      0.018f,
-      defaultVisualRgb565(
-          179,
-          73,
-          238),
-      defaultVisualRgb565(
-          230,
-          190,
-          255));
-
-  drawDefaultWave(
-      218,
-      29,
-      58,
-      phase * 1.10f + 2.25f,
-      0.014f,
-      defaultVisualRgb565(
-          36,
-          104,
-          244),
-      defaultVisualRgb565(
-          151,
-          203,
-          255));
-
-  drawDefaultWave(
-      266,
-      20,
-      50,
-      phase * 0.85f + 0.75f,
-      0.021f,
-      defaultVisualRgb565(
-          54,
-          205,
-          238),
-      defaultVisualRgb565(
-          195,
-          246,
-          255));
-
-  int orbX =
-      385 +
+  int movingGlowX =
+      318 +
       static_cast<int>(
           sinf(
-              phase * 0.55f) *
-          14.0f);
+              phase * 0.58f) *
+          54.0f);
 
-  int orbY =
-      72 +
-      static_cast<int>(
-          cosf(
-              phase * 0.48f) *
-          10.0f);
+  for (int y = 0;
+       y < TFT_HEIGHT;
+       ++y) {
+    for (int x = 0;
+         x < TFT_WIDTH;
+         ++x) {
+      int c0 = curve0[x];
+      int c1 = curve1[x];
+      int c2 = curve2[x];
+      int c3 = curve3[x];
 
-  drawDefaultOrb(
-      orbX,
-      orbY,
-      42,
-      defaultVisualRgb565(
-          77,
-          140,
-          250),
-      defaultVisualRgb565(
-          117,
-          193,
-          255),
-      defaultVisualRgb565(
-          219,
-          243,
-          255));
+      DefaultVisualRgb color;
 
-  drawDefaultOrb(
-      320 +
-          static_cast<int>(
-              cosf(
-                  phase * 0.68f) *
-              10.0f),
-      252 +
-          static_cast<int>(
-              sinf(
-                  phase * 0.60f) *
-              7.0f),
-      24,
-      defaultVisualRgb565(
-          112,
-          105,
-          245),
-      defaultVisualRgb565(
-          137,
-          205,
-          255),
-      defaultVisualRgb565(
-          232,
-          246,
-          255));
+      if (y < c0) {
+        uint16_t amount =
+            static_cast<uint16_t>(
+                constrain(
+                    (y * 255) /
+                        max(
+                            1,
+                            c0),
+                    0,
+                    255));
+
+        color =
+            defaultVisualMix(
+                SKY_TOP,
+                SKY_BOTTOM,
+                amount);
+
+        // Wide soft light in the upper-right reproduces the luminous area of
+        // the reference without expensive alpha blending.
+        int dx =
+            abs(
+                x - 380);
+
+        int dy =
+            abs(
+                y - 72);
+
+        int light =
+            210 -
+            dx / 2 -
+            dy;
+
+        if (light > 0) {
+          color =
+              defaultVisualMix(
+                  color,
+                  SKY_GLOW,
+                  static_cast<uint16_t>(
+                      min(
+                          light,
+                          176)));
+        }
+      } else if (y < c1) {
+        uint16_t amount =
+            static_cast<uint16_t>(
+                constrain(
+                    ((y - c0) * 255) /
+                        max(
+                            1,
+                            c1 - c0),
+                    0,
+                    255));
+
+        color =
+            defaultVisualMix(
+                AQUA_TOP,
+                AQUA_BOTTOM,
+                amount);
+      } else if (y < c2) {
+        uint16_t amount =
+            static_cast<uint16_t>(
+                constrain(
+                    ((y - c1) * 255) /
+                        max(
+                            1,
+                            c2 - c1),
+                    0,
+                    255));
+
+        color =
+            defaultVisualMix(
+                TEAL_TOP,
+                TEAL_BOTTOM,
+                amount);
+
+        int glow =
+            72 -
+            abs(
+                x -
+                movingGlowX) /
+                3;
+
+        if (glow > 0) {
+          color =
+              defaultVisualMix(
+                  color,
+                  TEAL_GLOW,
+                  static_cast<uint16_t>(
+                      min(
+                          glow,
+                          58)));
+        }
+      } else if (y < c3) {
+        uint16_t amount =
+            static_cast<uint16_t>(
+                constrain(
+                    ((y - c2) * 255) /
+                        max(
+                            1,
+                            c3 - c2),
+                    0,
+                    255));
+
+        color =
+            defaultVisualMix(
+                CYAN_TOP,
+                CYAN_BOTTOM,
+                amount);
+      } else {
+        uint16_t amount =
+            static_cast<uint16_t>(
+                constrain(
+                    ((y - c3) * 255) /
+                        max(
+                            1,
+                            TFT_HEIGHT - c3 - 1),
+                    0,
+                    255));
+
+        color =
+            defaultVisualMix(
+                NAVY_TOP,
+                NAVY_BOTTOM,
+                amount);
+
+        int glow =
+            64 -
+            abs(
+                x -
+                (movingGlowX - 110)) /
+                4;
+
+        if (glow > 0) {
+          color =
+              defaultVisualMix(
+                  color,
+                  TEAL_TOP,
+                  static_cast<uint16_t>(
+                      min(
+                          glow,
+                          46)));
+        }
+      }
+
+      uint8_t edgeGlow = 0;
+
+      edgeGlow =
+          max(
+              edgeGlow,
+              defaultVisualEdgeGlow(
+                  abs(
+                      y -
+                      c0)));
+
+      edgeGlow =
+          max(
+              edgeGlow,
+              defaultVisualEdgeGlow(
+                  abs(
+                      y -
+                      c1)));
+
+      edgeGlow =
+          max(
+              edgeGlow,
+              defaultVisualEdgeGlow(
+                  abs(
+                      y -
+                      c2)));
+
+      edgeGlow =
+          max(
+              edgeGlow,
+              defaultVisualEdgeGlow(
+                  abs(
+                      y -
+                      c3)));
+
+      if (edgeGlow > 0) {
+        color =
+            defaultVisualMix(
+                color,
+                EDGE,
+                edgeGlow);
+      }
+
+      line[x] =
+          defaultVisualRgb565(
+              color);
+    }
+
+    tft->draw16bitRGBBitmap(
+        0,
+        y,
+        line,
+        TFT_WIDTH,
+        1);
+  }
 }
 
 static bool renderMainMenuBackground(
@@ -9365,7 +9509,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0190);
+  USB.firmwareVersion(0x0191);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -9379,7 +9523,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.0");
+  cdcPrintln("BOOT|PIXELPRO|1.9.1");
 }
 
 void loop() {
