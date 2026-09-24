@@ -10220,9 +10220,9 @@ static bool readTouchRaw(
 
     pressure =
         static_cast<uint16_t>(
-            min<uint64_t>(
-                rtouch,
-                65535U));
+            rtouch > 65535U
+                ? 65535U
+                : rtouch);
   }
 
   restoreTouchSharedPins();
