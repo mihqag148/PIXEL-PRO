@@ -1243,14 +1243,14 @@ static void drawDefaultWave(
     uint16_t highlight) {
   static constexpr int STEP = 30;
 
-  for (int x = -STEP;
-       x < TFT_WIDTH;
+  for (int x = 0;
+       x < TFT_WIDTH - 1;
        x += STEP) {
     int x1 =
         min(
             x + STEP,
             static_cast<int>(
-                TFT_WIDTH));
+                TFT_WIDTH - 1));
 
     int y0 =
         baseY +
@@ -7099,6 +7099,8 @@ static void handleCommand(String command) {
 
   if (upper == "SAVPXEND") {
     if (!finishPackedUpload()) {
+      // Failed user media must not leave PIXEL PRO without a screensaver.
+      clearSaverBuffer();
       cdcPrintln(
           "ERR|SAVPXEND");
       return;
@@ -7220,6 +7222,8 @@ static void handleCommand(String command) {
 
   if (upper == "SAVJPGEND") {
     if (!finishJpegUpload()) {
+      // Failed user media must not leave PIXEL PRO without a screensaver.
+      clearSaverBuffer();
       cdcPrintln(
           "ERR|SAVJPGEND");
       return;
@@ -7365,7 +7369,10 @@ static void handleCommand(String command) {
 
   if (upper == "SAVGIFEND") {
     if (!finishGifUpload()) {
-      cdcPrintln("ERR|SAVGIFEND");
+      // Failed user media must not leave PIXEL PRO without a screensaver.
+      clearSaverBuffer();
+      cdcPrintln(
+          "ERR|SAVGIFEND");
       return;
     }
 
@@ -7536,7 +7543,10 @@ static void handleCommand(String command) {
 
   if (upper == "SAVEND") {
     if (!finishSaverUpload()) {
-      cdcPrintln("ERR|SAVEND_INCOMPLETE");
+      // Failed user media must not leave PIXEL PRO without a screensaver.
+      clearSaverBuffer();
+      cdcPrintln(
+          "ERR|SAVEND_INCOMPLETE");
       return;
     }
 
