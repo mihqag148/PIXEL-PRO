@@ -1227,9 +1227,9 @@ static DefaultVisualRgb defaultVisualMix(
     const DefaultVisualRgb &b,
     uint16_t amount) {
   amount =
-      min<uint16_t>(
-          255,
-          amount);
+      amount > 255
+          ? 255
+          : amount;
 
   uint16_t inverse =
       static_cast<uint16_t>(
