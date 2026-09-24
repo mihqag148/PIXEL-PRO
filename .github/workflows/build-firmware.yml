@@ -108,6 +108,7 @@ jobs:
           cp docs/FLASH.md dist/FLASH.md
           cp docs/HARDWARE.md dist/HARDWARE.md
           cp docs/USB_PROTOCOL.md dist/USB_PROTOCOL.md
+          cp docs/MODULE_BUS.md dist/MODULE_BUS.md
           VERSION="$(cat VERSION | tr -d '\r\n')"
           printf 'PIXEL PRO native USB %s\nCommit: %s\nRun: %s\nCore: arduino-esp32 3.3.12\n'             "$VERSION" "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/BUILD-INFO.txt
           sha256sum dist/PIXEL_PRO_merged.bin dist/PIXEL_PRO_app.bin > dist/SHA256SUMS
@@ -127,6 +128,7 @@ jobs:
             dist/FLASH.md
             dist/HARDWARE.md
             dist/USB_PROTOCOL.md
+            dist/MODULE_BUS.md
             dist/BUILD-INFO.txt
             dist/SHA256SUMS
             dist/firmware-manifest.json
