@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.8";
+static constexpr char FW_VERSION[] = "1.8.9";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -59,6 +59,13 @@ static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 50;
+
+// Firmware-resident fallback visuals. These are generated from drawing
+// primitives, so they consume no LittleFS space and cannot be deleted by
+// user media-management commands. User uploads always take precedence.
+static constexpr uint8_t DEFAULT_SAVER_FPS = 12;
+static constexpr uint32_t DEFAULT_SAVER_FRAME_MS =
+    1000UL / DEFAULT_SAVER_FPS;
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -307,6 +314,9 @@ static float gifScaleX = 1.0f;
 static float gifScaleY = 1.0f;
 static float gifOffsetX = 0.0f;
 static float gifOffsetY = 0.0f;
+
+static bool saverUsingDefault = false;
+static uint32_t defaultSaverNextFrameAt = 0;
 
 static void stopSaver();
 static void clearSaverBuffer();
@@ -1197,6 +1207,358 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
   return 1;
 }
 
+static uint16_t defaultVisualRgb565(
+    uint8_t r,
+    uint8_t g,
+    uint8_t b) {
+  return static_cast<uint16_t>(
+      ((static_cast<uint16_t>(r) & 0xF8) << 8) |
+      ((static_cast<uint16_t>(g) & 0xFC) << 3) |
+      (static_cast<uint16_t>(b) >> 3));
+}
+
+static uint8_t defaultVisualLerp(
+    uint8_t a,
+    uint8_t b,
+    float amount) {
+  amount = max(
+      0.0f,
+      min(
+          1.0f,
+          amount));
+
+  return static_cast<uint8_t>(
+      a +
+      (static_cast<float>(b) - a) *
+          amount);
+}
+
+static void drawDefaultWave(
+    int baseY,
+    int amplitude,
+    int thickness,
+    float phase,
+    float frequency,
+    uint16_t color,
+    uint16_t highlight) {
+  static constexpr int STEP = 30;
+
+  for (int x = -STEP;
+       x < TFT_WIDTH;
+       x += STEP) {
+    int x1 =
+        min(
+            x + STEP,
+            static_cast<int>(
+                TFT_WIDTH));
+
+    int y0 =
+        baseY +
+        static_cast<int>(
+            sinf(
+                static_cast<float>(x) *
+                    frequency +
+                phase) *
+            amplitude);
+
+    int y1 =
+        baseY +
+        static_cast<int>(
+            sinf(
+                static_cast<float>(x1) *
+                    frequency +
+                phase) *
+            amplitude);
+
+    tft->fillTriangle(
+        x,
+        y0,
+        x1,
+        y1,
+        x,
+        y0 + thickness,
+        color);
+
+    tft->fillTriangle(
+        x1,
+        y1,
+        x1,
+        y1 + thickness,
+        x,
+        y0 + thickness,
+        color);
+
+    tft->drawLine(
+        x,
+        y0,
+        x1,
+        y1,
+        highlight);
+  }
+}
+
+static void drawDefaultOrb(
+    int cx,
+    int cy,
+    int radius,
+    uint16_t outer,
+    uint16_t inner,
+    uint16_t shine) {
+  tft->fillCircle(
+      cx,
+      cy,
+      radius,
+      outer);
+
+  tft->fillCircle(
+      cx - radius / 6,
+      cy - radius / 6,
+      max(
+          2,
+          radius * 3 / 4),
+      inner);
+
+  tft->drawCircle(
+      cx,
+      cy,
+      radius,
+      shine);
+
+  tft->fillCircle(
+      cx - radius / 3,
+      cy - radius / 3,
+      max(
+          2,
+          radius / 8),
+      shine);
+}
+
+static void renderDefaultVisual(
+    uint32_t now,
+    bool animated) {
+  if (!displayReady) {
+    return;
+  }
+
+  static constexpr uint8_t PALETTE[][3] = {
+      {176, 220, 255},
+      {77, 177, 255},
+      {29, 132, 246},
+      {66, 89, 238},
+      {123, 76, 238},
+      {226, 94, 205}
+  };
+
+  static constexpr int BAND_COUNT = 32;
+  static constexpr int COLOR_COUNT =
+      sizeof(PALETTE) /
+      sizeof(PALETTE[0]);
+
+  float phase =
+      animated
+          ? static_cast<float>(now) *
+                0.00115f
+          : 0.35f;
+
+  for (int band = 0;
+       band < BAND_COUNT;
+       ++band) {
+    int y0 =
+        band *
+        TFT_HEIGHT /
+        BAND_COUNT;
+
+    int y1 =
+        (band + 1) *
+        TFT_HEIGHT /
+        BAND_COUNT;
+
+    float position =
+        static_cast<float>(band) /
+        (BAND_COUNT - 1) *
+        (COLOR_COUNT - 1);
+
+    int index =
+        min(
+            static_cast<int>(
+                position),
+            COLOR_COUNT - 2);
+
+    float local =
+        position -
+        index;
+
+    uint8_t r =
+        defaultVisualLerp(
+            PALETTE[index][0],
+            PALETTE[index + 1][0],
+            local);
+
+    uint8_t g =
+        defaultVisualLerp(
+            PALETTE[index][1],
+            PALETTE[index + 1][1],
+            local);
+
+    uint8_t b =
+        defaultVisualLerp(
+            PALETTE[index][2],
+            PALETTE[index + 1][2],
+            local);
+
+    tft->fillRect(
+        0,
+        y0,
+        TFT_WIDTH,
+        max(
+            1,
+            y1 - y0),
+        defaultVisualRgb565(
+            r,
+            g,
+            b));
+  }
+
+  // Warm left glow plus translucent-looking ribbons, inspired by the
+  // macOS/iOS blue-cyan-purple-pink wallpaper family.
+  drawDefaultOrb(
+      34 +
+          static_cast<int>(
+              sinf(
+                  phase * 0.45f) *
+              7.0f),
+      91,
+      70,
+      defaultVisualRgb565(
+          255,
+          155,
+          126),
+      defaultVisualRgb565(
+          255,
+          188,
+          154),
+      defaultVisualRgb565(
+          255,
+          226,
+          207));
+
+  drawDefaultWave(
+      112,
+      26,
+      52,
+      phase * 0.75f,
+      0.015f,
+      defaultVisualRgb565(
+          255,
+          128,
+          178),
+      defaultVisualRgb565(
+          255,
+          209,
+          229));
+
+  drawDefaultWave(
+      165,
+      32,
+      54,
+      phase * 0.95f + 1.35f,
+      0.018f,
+      defaultVisualRgb565(
+          179,
+          73,
+          238),
+      defaultVisualRgb565(
+          230,
+          190,
+          255));
+
+  drawDefaultWave(
+      218,
+      29,
+      58,
+      phase * 1.10f + 2.25f,
+      0.014f,
+      defaultVisualRgb565(
+          36,
+          104,
+          244),
+      defaultVisualRgb565(
+          151,
+          203,
+          255));
+
+  drawDefaultWave(
+      266,
+      20,
+      50,
+      phase * 0.85f + 0.75f,
+      0.021f,
+      defaultVisualRgb565(
+          54,
+          205,
+          238),
+      defaultVisualRgb565(
+          195,
+          246,
+          255));
+
+  int orbX =
+      385 +
+      static_cast<int>(
+          sinf(
+              phase * 0.55f) *
+          14.0f);
+
+  int orbY =
+      72 +
+      static_cast<int>(
+          cosf(
+              phase * 0.48f) *
+          10.0f);
+
+  drawDefaultOrb(
+      orbX,
+      orbY,
+      42,
+      defaultVisualRgb565(
+          77,
+          140,
+          250),
+      defaultVisualRgb565(
+          117,
+          193,
+          255),
+      defaultVisualRgb565(
+          219,
+          243,
+          255));
+
+  drawDefaultOrb(
+      320 +
+          static_cast<int>(
+              cosf(
+                  phase * 0.68f) *
+              10.0f),
+      252 +
+          static_cast<int>(
+              sinf(
+                  phase * 0.60f) *
+              7.0f),
+      24,
+      defaultVisualRgb565(
+          112,
+          105,
+          245),
+      defaultVisualRgb565(
+          137,
+          205,
+          255),
+      defaultVisualRgb565(
+          232,
+          246,
+          255));
+}
+
 static bool renderMainMenuBackground(
     uint8_t profile) {
   if (profile >= PROFILE_COUNT) {
@@ -1212,8 +1574,10 @@ static bool renderMainMenuBackground(
 
   if (!littleFsReady ||
       !LittleFS.exists(path)) {
-    tft->fillScreen(RGB565_BLACK);
-    return false;
+    renderDefaultVisual(
+        0,
+        false);
+    return true;
   }
 
   File file =
@@ -1222,8 +1586,10 @@ static bool renderMainMenuBackground(
           "r");
 
   if (!file) {
-    tft->fillScreen(RGB565_BLACK);
-    return false;
+    renderDefaultVisual(
+        0,
+        false);
+    return true;
   }
 
   JPEGDEC decoder;
@@ -1234,8 +1600,10 @@ static bool renderMainMenuBackground(
       decoder.getHeight() != TFT_HEIGHT) {
     decoder.close();
     file.close();
-    tft->fillScreen(RGB565_BLACK);
-    return false;
+    renderDefaultVisual(
+        0,
+        false);
+    return true;
   }
 
   tft->fillScreen(RGB565_BLACK);
@@ -1249,7 +1617,14 @@ static bool renderMainMenuBackground(
   decoder.close();
   file.close();
 
-  return result != 0;
+  if (result == 0) {
+    renderDefaultVisual(
+        0,
+        false);
+    return true;
+  }
+
+  return true;
 }
 
 static bool renderMainMenuIcon(
@@ -3341,6 +3716,7 @@ static bool beginGifUpload(
   saverHeight = height;
   saverFormat = SAVER_GIF;
   saverUploading = true;
+  saverUsingDefault = false;
   saverReady = false;
   saverActive = false;
 
@@ -4021,6 +4397,7 @@ static bool beginPackedUpload(
 
   saverUploading =
       true;
+  saverUsingDefault = false;
 
   saverReady =
       false;
@@ -4855,6 +5232,7 @@ static bool beginJpegUpload(
   saverFormat =
       SAVER_JPEG;
   saverUploading = true;
+  saverUsingDefault = false;
   saverReady = false;
   saverActive = false;
 
@@ -5027,7 +5405,25 @@ static bool loadPersistedJpeg() {
   return true;
 }
 
+static void activateDefaultSaver() {
+  saverUsingDefault = true;
+  saverFormat = SAVER_NONE;
+  saverWidth = TFT_WIDTH;
+  saverHeight = TFT_HEIGHT;
+  saverDataBytes = 0;
+  saverFrameBytes = 0;
+  saverBytesReceived = 0;
+  saverFrameCount = 0;
+  saverUploading = false;
+  saverReady = true;
+  saverActive = false;
+  saverFrameIndex = 0;
+  saverFrameStartedAt = 0;
+  defaultSaverNextFrameAt = 0;
+}
+
 static void loadPersistedMedia() {
+  saverUsingDefault = false;
   saverReady = false;
 
   if (loadPersistedPacked()) {
@@ -5039,6 +5435,10 @@ static void loadPersistedMedia() {
   }
 
   loadPersistedGif();
+
+  if (!saverReady) {
+    activateDefaultSaver();
+  }
 }
 
 static void clearSaverBuffer() {
@@ -5108,6 +5508,9 @@ static void clearSaverBuffer() {
       sizeof(packedPalette565));
 
   memset(saverDurations, 0, sizeof(saverDurations));
+
+  // Clearing user media must never remove the firmware-owned fallback.
+  activateDefaultSaver();
 }
 
 static void initDisplay() {
@@ -5218,6 +5621,22 @@ static void startSaverNow() {
     return;
   }
 
+  if (saverUsingDefault) {
+    saverActive = true;
+    saverFrameIndex = 0;
+    saverFrameStartedAt = millis();
+
+    renderDefaultVisual(
+        saverFrameStartedAt,
+        true);
+
+    defaultSaverNextFrameAt =
+        saverFrameStartedAt +
+        DEFAULT_SAVER_FRAME_MS;
+
+    return;
+  }
+
   if (saverFormat == SAVER_PACKED) {
     if (!openPackedPlayback()) {
       saverReady = false;
@@ -5310,6 +5729,22 @@ static void pollSaver() {
   }
 
   if (!saverReady) {
+    return;
+  }
+
+  if (saverUsingDefault) {
+    if (static_cast<int32_t>(
+            now -
+            defaultSaverNextFrameAt) >= 0) {
+      renderDefaultVisual(
+          now,
+          true);
+
+      defaultSaverNextFrameAt =
+          now +
+          DEFAULT_SAVER_FRAME_MS;
+    }
+
     return;
   }
 
@@ -5451,6 +5886,7 @@ static bool beginSaverUpload(
   memset(saverData, 0, saverDataBytes);
   saverBytesReceived = 0;
   saverUploading = true;
+  saverUsingDefault = false;
   saverReady = false;
   saverActive = false;
 
@@ -6244,6 +6680,12 @@ static void handleCommand(String command) {
       return;
     }
 
+    if (saverUsingDefault) {
+      cdcPrintln(
+          "SAVMEDIA|STATE=READY|KIND=DEFAULT|NAME=UElYRUwgUFJPIERlZmF1bHQ=|BYTES=0|W=480|H=320|FPS=12|DUR=0|THUMB=0");
+      return;
+    }
+
     String kind =
         preferences.getString(
             "sav_kind",
@@ -6937,7 +7379,7 @@ static void handleCommand(String command) {
     lastUserActivityAt = millis();
 
     if (displayReady) {
-      tft->fillScreen(RGB565_BLACK);
+      renderMainMenu();
     }
 
     cdcPrintln("OK|SAVCLEAR");
@@ -7927,7 +8369,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0188);
+  USB.firmwareVersion(0x0189);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -7941,7 +8383,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.8");
+  cdcPrintln("BOOT|PIXELPRO|1.8.9");
 }
 
 void loop() {
