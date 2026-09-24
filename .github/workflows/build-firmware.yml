@@ -2,7 +2,7 @@ name: Build and release PIXEL PRO native USB firmware
 
 on:
   push:
-    branches: [main, feature/native-usb-reset]
+    branches: [main, feature/native-usb-reset, fix/r61581-display-v197]
     paths:
       - 'firmware/**'
       - 'VERSION'
