@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.9.8**.
+Firmware: **1.9.9**.
 
 All controller pins below use the board silk-screen names **Dxx**. Do not convert
 this document to raw ESP32 pin naming when wiring.
@@ -119,11 +119,12 @@ CDC test commands:
 
 Panel: **3.5-inch 480 x 320 MCUFRIEND-style shield**, landscape, i8080 8-bit.
 
-Firmware 1.9.8 uses an **R61581-compatible 320x480 controller initialization**
-and rotates it to 480x320 landscape. The supplied shop sketch does not hard-code
-ILI9341: it calls `tft.readID()` and then `tft.begin(ID)`. The
-`//ID=0x9341` text beside the touch calibration pins is only a comment copied
-from the generic MCUFRIEND example.
+Firmware 1.9.9 mirrors the **MCUFRIEND_kbv controller-ID 0x1581 / R61581**
+initialization used by the shop example's `readID() -> begin(ID)` path, then
+rotates the 320x480 controller memory to 480x320 landscape. This adds the missing
+frame/interface/timing setup and explicitly forces normal (non-inverted) display
+polarity. The shop sketch's `//ID=0x9341` text is only a touch calibration
+comment; it is not the panel driver selection.
 
 | TFT shield signal | S2 Mini |
 |---|---|
@@ -161,7 +162,9 @@ PIXEL PRO uses a write-only parallel display path. Connect **LCD_RD directly to
 
 ## Resistive touch
 
-No additional touch pins are required. Touch shares four LCD wires:
+No additional touch pins are required. Touch shares four LCD wires. Firmware
+1.9.9 now reproduces the shop sketch's TouchScreen.h electrical sequence,
+300-ohm plate-pressure calculation and supplied calibration values:
 
 | Touch electrode | Shared signal | S2 Mini |
 |---|---|---|
@@ -169,6 +172,15 @@ No additional touch pins are required. Touch shares four LCD wires:
 | XM / X- | LCD_RS/DC | D14 |
 | XP / X+ | LCD_D6 | D39 |
 | YM / Y- | LCD_D7 | D40 |
+
+Shop calibration reproduced in firmware:
+
+- TS_LEFT = 907
+- TS_RT = 136
+- TS_TOP = 942
+- TS_BOT = 139
+- pressure window = 200..1000
+- X-plate resistance = 300 ohm
 
 Firmware deselects the LCD before every touch measurement, samples the resistive
 panel, then restores the 8-bit LCD bus.
