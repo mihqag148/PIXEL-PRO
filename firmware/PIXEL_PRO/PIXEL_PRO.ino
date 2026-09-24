@@ -27,6 +27,10 @@
 #define PIXEL_DIAG_DISPLAY_ONLY_IDLE 0
 #endif
 
+#ifndef PIXEL_DIAG_POST_INIT_STAGE
+#define PIXEL_DIAG_POST_INIT_STAGE 0
+#endif
+
 #if PIXEL_DIAG_SAFE_PAR8
 #include "PixelSafePAR8.h"
 #endif
@@ -10592,6 +10596,152 @@ void setup() {
   initKeys();
   initRoller();
   initDisplay();
+
+#if PIXEL_DIAG_POST_INIT_STAGE
+  auto showStage =
+      [](uint16_t color,
+         const char *label) {
+        if (!displayReady) {
+          delay(5000);
+          return;
+        }
+
+        tft->fillScreen(color);
+        tft->setTextSize(3);
+
+        const uint16_t textColor =
+            color == 0x0000
+                ? 0xFFFF
+                : 0x0000;
+
+        tft->setTextColor(textColor);
+        tft->setCursor(20, 24);
+        tft->print(label);
+      };
+
+  auto holdStage =
+      [](uint32_t durationMs,
+         bool pollKeysCdc,
+         bool pollRgb,
+         bool pollModules,
+         bool pollSaverRuntime) {
+        const uint32_t start =
+            millis();
+
+        while (static_cast<uint32_t>(
+                   millis() - start) <
+               durationMs) {
+          if (pollKeysCdc) {
+            pollKeys();
+            pollRoller();
+            pollCdc();
+          }
+
+          if (pollRgb) {
+            pollRgbEffect();
+          }
+
+          if (pollModules) {
+            pollModuleBus();
+          }
+
+          if (pollSaverRuntime) {
+            pollSaver();
+          }
+
+          delay(1);
+        }
+      };
+
+  // Stage 0: exact display-only state that has already tested bright/stable.
+  showStage(0xFFFF, "0 DISPLAY ONLY");
+  holdStage(5000, false, false, false, false);
+
+  // Stage 1: add SD/SPI init only.
+  mountSdCard();
+  showStage(0xFFE0, "1 SD / SPI");
+  holdStage(5000, false, false, false, false);
+
+  // Stage 2: add I2C module-bus init only.
+  initModuleBus();
+  showStage(0x07FF, "2 I2C INIT");
+  holdStage(5000, false, false, false, false);
+
+  // Stage 3: mount LittleFS and load saver metadata/media only.
+  littleFsReady = LittleFS.begin(true);
+  if (littleFsReady) {
+    loadPersistedMedia();
+  } else {
+    activateDefaultSaver();
+  }
+
+  showStage(0x07E0, "3 FLASH / MEDIA");
+  holdStage(5000, false, false, false, false);
+
+  // Stage 4: render the real Main Menu once, then do no runtime polling.
+  renderMainMenu();
+  if (displayReady) {
+    tft->fillRect(0, 0, 220, 34, 0xFFFF);
+    tft->setTextSize(2);
+    tft->setTextColor(0x0000);
+    tft->setCursor(8, 8);
+    tft->print("4 MAIN MENU");
+  }
+  holdStage(5000, false, false, false, false);
+
+  // Stage 5: start the same USB composite stack as production.
+  uint64_t diagMac = ESP.getEfuseMac();
+  char diagSerial[24];
+  snprintf(
+      diagSerial,
+      sizeof(diagSerial),
+      "PIXELPRO-%012llX",
+      static_cast<unsigned long long>(
+          diagMac));
+
+  USB.VID(USB_VID_PIXEL);
+  USB.PID(USB_PID_PIXEL);
+  USB.productName("PIXEL PRO");
+  USB.manufacturerName("Lumi3D");
+  USB.serialNumber(diagSerial);
+  USB.firmwareVersion(0x01A1);
+  USBSerial.enableReboot(false);
+  USBSerial.begin();
+  Keyboard.begin();
+  ConsumerControl.begin();
+  USB.begin();
+
+  delay(500);
+  showStage(0xF81F, "5 USB");
+  holdStage(5000, false, false, false, false);
+
+  // Stage 6: key/roller/CDC runtime only.
+  showStage(0xFFFF, "6 KEYS + CDC");
+  holdStage(7000, true, false, false, false);
+
+  // Stage 7: add RGB runtime. D15 must remain physically disconnected.
+  showStage(0xFD20, "7 RGB POLL");
+  holdStage(7000, true, true, false, false);
+
+  // Stage 8: add module polling.
+  showStage(0x07FF, "8 MODULE POLL");
+  holdStage(7000, true, true, true, false);
+
+  // Stage 9: add saver runtime too. Stay here so any recurring fault remains
+  // visible. Touch remains disabled for this diagnostic.
+  lastUserActivityAt = millis();
+  showStage(0xFFFF, "9 FULL LOOP");
+
+  while (true) {
+    pollKeys();
+    pollRoller();
+    pollCdc();
+    pollRgbEffect();
+    pollSaver();
+    pollModuleBus();
+    delay(1);
+  }
+#endif
 
 #if PIXEL_DIAG_DISPLAY_ONLY_IDLE
   // Diagnostic: stop immediately after the exact production display init.
