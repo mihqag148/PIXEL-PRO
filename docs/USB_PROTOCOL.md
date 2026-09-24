@@ -1,11 +1,11 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.9.6 keeps native USB HID + CDC, the ILI9486 480×320 i8080 display, 2×4 key matrix, horizontal roller, resistive touch, SPI microSD, and a three-port PCA9546A magnetic module bus.
+Firmware 1.9.7 keeps native USB HID + CDC, the ILI9486 480×320 i8080 display, 2×4 key matrix, horizontal roller, resistive touch, SPI microSD, and a three-port PCA9546A magnetic module bus.
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.9.6|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.9.7|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -605,3 +605,20 @@ available even when the user has never uploaded media.
   480×320 logical size and 20 FPS.
 - Because the fallback is inside the application image rather than LittleFS,
   formatting or clearing LittleFS cannot remove it.
+
+
+## Factory dune screensaver (firmware 1.9.7)
+
+PIXEL PRO 1.9.7 keeps the compiled red/orange dune JPEG as the factory Main
+Menu background and replaces the previous aqua factory screensaver with a
+matching animated red/orange dune scene.
+
+- The factory screensaver is firmware-resident and consumes no LittleFS media
+  space.
+- It renders at 480x320 and 20 FPS using smooth RGB565 scanlines.
+- User GIF/JPEG/PXQ media still has priority over the factory animation.
+- After `SAVCLEAR`, or when no user screensaver exists, the factory dune
+  animation becomes active automatically.
+- `SAVMEDIA` reports the factory saver as:
+  `STATE=READY|KIND=DEFAULT|ASSET=DUNE_RED_ORANGE_ANIM|...|W=480|H=320|FPS=20`.
+- The factory animation cannot be deleted by media-management commands.
