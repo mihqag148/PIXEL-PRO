@@ -1,0 +1,179 @@
+name: Build TFT static white diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'diagnostics/TFT_WHITE_INVOFF/**'
+      - 'diagnostics/TFT_WHITE_INVON/**'
+      - '.github/workflows/build-tft-white-static.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'diagnostics/TFT_WHITE_INVOFF/**'
+      - 'diagnostics/TFT_WHITE_INVON/**'
+      - '.github/workflows/build-tft-white-static.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant:
+          - name: INVOFF
+            sketch: diagnostics/TFT_WHITE_INVOFF
+          - name: INVON
+            sketch: diagnostics/TFT_WHITE_INVON
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: 1.5.1
+
+      - name: Install ESP32 core 3.3.12
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          for attempt in 1 2 3; do
+            if arduino-cli core install esp32:esp32@3.3.12; then
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "ESP32 core install failed after 3 attempts."
+              exit 1
+            fi
+            sleep 10
+            arduino-cli core update-index
+          done
+
+      - name: Compile ${{ matrix.variant.name }}
+        run: |
+          mkdir -p build dist/raw
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32s2:PSRAM=enabled,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,FlashMode=dio" \
+            --build-path build \
+            --output-dir dist/raw \
+            "${{ matrix.variant.sketch }}"
+
+      - name: Package merged ${{ matrix.variant.name }} image
+        run: |
+          python -m pip install --quiet esptool
+          APP_BIN="$(find dist/raw -maxdepth 1 -name '*.ino.bin' | head -n1)"
+          BOOT_BIN="$(find dist/raw -maxdepth 1 -name '*.ino.bootloader.bin' | head -n1)"
+          PART_BIN="$(find dist/raw -maxdepth 1 -name '*.ino.partitions.bin' | head -n1)"
+          BOOT_APP0="$HOME/.arduino15/packages/esp32/hardware/esp32/3.3.12/tools/partitions/boot_app0.bin"
+
+          test -n "$APP_BIN" && test -n "$BOOT_BIN" && test -n "$PART_BIN"
+          test -f "$BOOT_APP0"
+
+          cp "$APP_BIN" "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_app.bin"
+          cp "$BOOT_BIN" "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_bootloader.bin"
+          cp "$PART_BIN" "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_partitions.bin"
+          cp "$BOOT_APP0" "dist/boot_app0_${{ matrix.variant.name }}.bin"
+
+          esptool --chip esp32s2 merge-bin \
+            -o "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_merged.bin" \
+            0x1000 "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_bootloader.bin" \
+            0x8000 "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_partitions.bin" \
+            0xe000 "dist/boot_app0_${{ matrix.variant.name }}.bin" \
+            0x10000 "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_app.bin"
+
+          sha256sum "dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_merged.bin" \
+            > "dist/SHA256SUMS_${{ matrix.variant.name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PIXEL-PRO-TFT-WHITE-${{ matrix.variant.name }}
+          path: |
+            dist/PIXEL_PRO_TFT_WHITE_${{ matrix.variant.name }}_*.bin
+            dist/SHA256SUMS_${{ matrix.variant.name }}
+          if-no-files-found: error
+
+  pr-checks:
+    needs: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$BUILD_RESULT" = success
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: PIXEL-PRO-TFT-WHITE-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write test instructions
+        run: |
+          cat > dist/README-TFT-WHITE-TEST.txt <<'EOF'
+          PIXEL PRO TFT STATIC WHITE TEST v1
+
+          Purpose:
+          Isolate TFT init/bus/polarity from the normal firmware runtime.
+
+          NORMAL WIRING:
+          TFT 5V    -> 5V
+          TFT GND   -> GND
+          LCD_RD    -> 3V3
+          LCD_RST   -> EN
+          LCD_WR    -> D13
+          LCD_RS/DC -> D14
+          LCD_CS    -> D16
+          LCD_D0    -> D33
+          LCD_D1    -> D34
+          LCD_D2    -> D35
+          LCD_D3    -> D36
+          LCD_D4    -> D37
+          LCD_D5    -> D38
+          LCD_D6    -> D39
+          LCD_D7    -> D40
+
+          IMPORTANT:
+          - Keep RGB DATA DISCONNECTED from D15 for this test.
+          - No touch polling, RGB, SD, modules, GIF, menu, sleep, animation or
+            repeated screen refresh runs in either diagnostic.
+          - Each firmware initializes once, writes full-screen 0xFFFF once, then
+            leaves the display bus idle forever.
+
+          TEST ORDER:
+          1) Flash PIXEL_PRO_TFT_WHITE_INVOFF_merged.bin at offset 0x0.
+             Observe: brightness, flicker, and whether the screen is white/black.
+          2) Flash PIXEL_PRO_TFT_WHITE_INVON_merged.bin at offset 0x0.
+             Observe the same three things.
+          3) Report which build is brighter, whether either one flickers, and what
+             color each one shows.
+
+          The controller ID previously measured from this exact shield is 0x8357
+          (HX8357-B signature: 00 01 62 83 57 FF).
+          EOF
+
+      - name: Publish TFT static white diagnostic release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="tft-white-static-v1"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "PIXEL PRO TFT Static White Test v1" \
+              --notes "Two isolated LCD-only builds: INVOFF and INVON. No touch, RGB, SD, modules, GIF, menu, sleep or repeated refresh." \
+              dist/*
+          fi
