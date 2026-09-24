@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.10.0**.
+Firmware: **1.10.1**.
 
 All controller pins below use the board silk-screen names **Dxx**. Do not convert
 this document to raw ESP32 pin naming when wiring.
@@ -123,9 +123,13 @@ Firmware 1.10.0 uses the controller ID measured directly from the user's panel.
 The diagnostic read returned `00 01 62 83 57 FF` from register `0xBF`, which
 MCUFRIEND identifies as **0x8357 = HX8357-B**.
 
-PIXEL PRO therefore uses Arduino_GFX's native **Arduino_HX8357B** driver. The
-driver runs the panel's own HX8357-B power/timing/gamma sequence and uses the
-same reversed-screen polarity behavior MCUFRIEND applies to ID 0x8357.
+Firmware 1.10.1 keeps the verified **HX8357-B / ID 0x8357** controller but no
+longer uses Arduino_GFX's full HX8357-B voltage/timing table. This shield revision
+behaves like MCUFRIEND_kbv's 0x8357 path, which intentionally uses only the
+generic reset/pixel-format/sleep-out/display-on sequence plus REV_SCREEN polarity.
+
+This change avoids overwriting panel-specific power/timing values that caused
+the user's display to become dark and flicker.
 
 | TFT shield signal | S2 Mini |
 |---|---|
@@ -164,7 +168,7 @@ PIXEL PRO uses a write-only parallel display path. Connect **LCD_RD directly to
 ## Resistive touch
 
 No additional touch pins are required. Touch shares four LCD wires. Firmware
-1.10.0 reproduces the shop sketch's TouchScreen.h electrical sequence,
+1.10.1 reproduces the shop sketch's TouchScreen.h electrical sequence,
 300-ohm plate-pressure calculation and supplied calibration values:
 
 | Touch electrode | Shared signal | S2 Mini |
@@ -189,7 +193,7 @@ panel, then restores the 8-bit LCD bus.
 
 ## RGB
 
-RGB data stays on **D15** in firmware 1.10.0.
+RGB data stays on **D15** in firmware 1.10.1.
 
 | RGB connection | S2 Mini |
 |---|---|
