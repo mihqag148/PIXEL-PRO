@@ -140,6 +140,12 @@ struct KeyState {
   uint32_t changedAt;
 };
 
+struct DefaultVisualRgb {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+
 struct __attribute__((packed)) MainMenuConfig {
   uint8_t version;
   uint8_t actions[PROFILE_COUNT][MENU_SLOT_COUNT];
@@ -1207,12 +1213,6 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
 
   return 1;
 }
-
-struct DefaultVisualRgb {
-  uint8_t r;
-  uint8_t g;
-  uint8_t b;
-};
 
 static uint16_t defaultVisualRgb565(
     const DefaultVisualRgb &color) {
