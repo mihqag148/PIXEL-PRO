@@ -36,7 +36,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.9.8";
+static constexpr char FW_VERSION[] = "1.9.9";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -202,20 +202,29 @@ static constexpr int8_t TOUCH_YP_PIN = TFT_WR;  // D13
 static constexpr int8_t TOUCH_XM_PIN = TFT_DC;  // D14
 static constexpr int8_t TOUCH_XP_PIN = TFT_D6;  // D39
 static constexpr int8_t TOUCH_YM_PIN = TFT_D7;  // D40
-static constexpr uint16_t TOUCH_ADC_MAX = 4095;
-static constexpr uint16_t TOUCH_PRESSURE_MIN = 180;
-static constexpr uint16_t TOUCH_RAW_MIN_DEFAULT = 250;
-static constexpr uint16_t TOUCH_RAW_MAX_DEFAULT = 3850;
-static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 600;
+// Touch calibration copied from the shop's known-working MCUFRIEND sketch.
+// Firmware converts the ESP32-S2 12-bit ADC reading to the same 0..1023
+// scale used by TouchScreen.h before applying these values.
+static constexpr uint16_t TOUCH_ADC_MAX = 1023;
+static constexpr uint16_t TOUCH_PRESSURE_MIN = 200;
+static constexpr uint16_t TOUCH_PRESSURE_MAX = 1000;
+static constexpr uint16_t TOUCH_RXPLATE_OHMS = 300;
+static constexpr uint16_t TOUCH_X_MIN_DEFAULT = 136;  // shop TS_RT
+static constexpr uint16_t TOUCH_X_MAX_DEFAULT = 907;  // shop TS_LEFT
+static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 139;  // shop TS_BOT
+static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // shop TS_TOP
+static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
 static constexpr uint32_t TOUCH_POLL_MS = 24;
 static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
-static constexpr uint8_t TOUCH_CAL_VERSION = 1;
+static constexpr uint8_t TOUCH_CAL_VERSION = 2;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
 // The 320x480 controller memory is rotated to 480x320 landscape (rotation 1).
+// Shop sketch Orientation=1 maps tp.y high->low across screen X, while
+// tp.x grows top->bottom. That is SWAP_XY + INVERT_X in our mapper.
 static constexpr uint8_t TOUCH_DEFAULT_FLAGS =
-    TOUCH_FLAG_SWAP_XY | TOUCH_FLAG_INVERT_Y;
+    TOUCH_FLAG_SWAP_XY | TOUCH_FLAG_INVERT_X;
 
 struct __attribute__((packed)) ModuleFrame {
   uint8_t magic;
@@ -384,30 +393,38 @@ class PixelR61581 : public Arduino_TFT {
 
  protected:
   void tftInit() override {
-    // The shop sketch uses MCUFRIEND_kbv::readID() + begin(ID). Its
-    // //ID=0x9341 text belongs to the generic touch calibration constants and
-    // is not a hard-coded display choice. For this 480x320 shield family use
-    // the R61581 320x480 initialization sequence, then rotate to landscape.
+    // Match the MCUFRIEND_kbv path for controller ID 0x1581 exactly.
+    // The shop sketch does readID() -> begin(ID); its //ID=0x9341 text is
+    // only a touch-calibration comment. v1.9.8 used a shorter R61581 init,
+    // which can produce dim/flickering output and incorrect colour on this
+    // shield revision.
     if (_rst != GFX_NOT_DEFINED) {
       pinMode(_rst, OUTPUT);
       digitalWrite(_rst, HIGH);
-      delay(20);
+      delay(50);
       digitalWrite(_rst, LOW);
-      delay(20);
+      delay(100);
       digitalWrite(_rst, HIGH);
-      delay(120);
-    } else {
-      // LCD_RST is tied to S2 Mini EN. The software reset below gives the
-      // controller a deterministic state before the vendor init sequence.
-      _bus->sendCommand(0x01);
-      delay(150);
+      delay(100);
     }
 
-    send(0x11, nullptr, 0);
-    delay(20);
+    // MCUFRIEND reset_off[]
+    send(0x01, nullptr, 0);
+    delay(150);
+    send(0x28, nullptr, 0);
 
+    const uint8_t pixelFormat[] = {0x55};
+    send(0x3A, pixelFormat, sizeof(pixelFormat));
+
+    // MCUFRIEND case 0x1581 -> common_9481.
     const uint8_t b0[] = {0x00};
     send(0xB0, b0, sizeof(b0));
+
+    const uint8_t b3[] = {0x02, 0x00, 0x00, 0x00};
+    send(0xB3, b3, sizeof(b3));
+
+    const uint8_t b4[] = {0x00};
+    send(0xB4, b4, sizeof(b4));
 
     const uint8_t d0[] = {0x07, 0x42, 0x18};
     send(0xD0, d0, sizeof(d0));
@@ -418,11 +435,23 @@ class PixelR61581 : public Arduino_TFT {
     const uint8_t d2[] = {0x01, 0x02};
     send(0xD2, d2, sizeof(d2));
 
+    const uint8_t d3[] = {0x01, 0x02};
+    send(0xD3, d3, sizeof(d3));
+
+    const uint8_t d4[] = {0x01, 0x02};
+    send(0xD4, d4, sizeof(d4));
+
     const uint8_t c0[] = {0x12, 0x3B, 0x00, 0x02, 0x11};
     send(0xC0, c0, sizeof(c0));
 
+    const uint8_t c1[] = {0x10, 0x10, 0x88};
+    send(0xC1, c1, sizeof(c1));
+
     const uint8_t c5[] = {0x03};
     send(0xC5, c5, sizeof(c5));
+
+    const uint8_t c6[] = {0x02};
+    send(0xC6, c6, sizeof(c6));
 
     const uint8_t c8[] = {
         0x00, 0x32, 0x36, 0x45,
@@ -430,21 +459,18 @@ class PixelR61581 : public Arduino_TFT {
         0x77, 0x54, 0x0C, 0x00};
     send(0xC8, c8, sizeof(c8));
 
-    const uint8_t madctl[] = {0x0A};
-    send(0x36, madctl, sizeof(madctl));
+    const uint8_t cc[] = {0x00};
+    send(0xCC, cc, sizeof(cc));
 
-    const uint8_t pixelFormat[] = {0x55};
-    send(0x3A, pixelFormat, sizeof(pixelFormat));
-
-    const uint8_t fullColumns[] = {0x00, 0x00, 0x01, 0x3F};
-    send(0x2A, fullColumns, sizeof(fullColumns));
-
-    const uint8_t fullRows[] = {0x00, 0x00, 0x01, 0xDF};
-    send(0x2B, fullRows, sizeof(fullRows));
-
-    delay(120);
+    // MCUFRIEND wake_on[]
+    send(0x11, nullptr, 0);
+    delay(150);
     send(0x29, nullptr, 0);
-    delay(25);
+
+    // begin(ID) finishes with invertDisplay(false). Explicitly force
+    // normal (non-negative) polarity before Arduino_TFT applies rotation.
+    send(0x20, nullptr, 0);
+    delay(20);
   }
 
  private:
@@ -964,10 +990,10 @@ static void saveMacro(uint8_t index) {
 }
 
 static void setDefaultTouchCalibration() {
-  touchCalibration.xMin = TOUCH_RAW_MIN_DEFAULT;
-  touchCalibration.xMax = TOUCH_RAW_MAX_DEFAULT;
-  touchCalibration.yMin = TOUCH_RAW_MIN_DEFAULT;
-  touchCalibration.yMax = TOUCH_RAW_MAX_DEFAULT;
+  touchCalibration.xMin = TOUCH_X_MIN_DEFAULT;
+  touchCalibration.xMax = TOUCH_X_MAX_DEFAULT;
+  touchCalibration.yMin = TOUCH_Y_MIN_DEFAULT;
+  touchCalibration.yMax = TOUCH_Y_MAX_DEFAULT;
   touchCalibration.flags = TOUCH_DEFAULT_FLAGS;
 }
 
@@ -1030,19 +1056,19 @@ static void loadTouchCalibration() {
   stored.xMin =
       preferences.getUShort(
           "tcxmin",
-          TOUCH_RAW_MIN_DEFAULT);
+          TOUCH_X_MIN_DEFAULT);
   stored.xMax =
       preferences.getUShort(
           "tcxmax",
-          TOUCH_RAW_MAX_DEFAULT);
+          TOUCH_X_MAX_DEFAULT);
   stored.yMin =
       preferences.getUShort(
           "tcymin",
-          TOUCH_RAW_MIN_DEFAULT);
+          TOUCH_Y_MIN_DEFAULT);
   stored.yMax =
       preferences.getUShort(
           "tcymax",
-          TOUCH_RAW_MAX_DEFAULT);
+          TOUCH_Y_MAX_DEFAULT);
   stored.flags =
       preferences.getUChar(
           "tcflags",
@@ -10093,9 +10119,10 @@ static void restoreTouchSharedPins() {
       HIGH);
 }
 
-static uint16_t readTouchAdc(
+static uint16_t readTouchAdc10(
     int8_t pin) {
-  // First conversion after changing the resistive network is discarded.
+  // Match TouchScreen.h's 10-bit calibration domain while keeping the S2 ADC
+  // at 12 bits internally. Discard the first sample after each network change.
   (void)analogRead(pin);
 
   uint32_t sum = 0;
@@ -10106,12 +10133,15 @@ static uint16_t readTouchAdc(
     sum +=
         static_cast<uint16_t>(
             analogRead(pin));
-
     delayMicroseconds(8);
   }
 
+  const uint16_t adc12 =
+      static_cast<uint16_t>(
+          sum / 3U);
+
   return static_cast<uint16_t>(
-      sum / 3U);
+      (adc12 + 2U) >> 2);
 }
 
 static bool readTouchRaw(
@@ -10122,138 +10152,96 @@ static bool readTouchRaw(
     return false;
   }
 
-  // Deselect the LCD before touching WR/DC/data pins. Without this the
-  // resistive-touch measurement could be interpreted as an LCD write cycle.
-  pinMode(
-      TFT_CS,
-      OUTPUT);
-  digitalWrite(
-      TFT_CS,
-      HIGH);
+  // Deselect LCD while the four shared touch/LCD lines are repurposed.
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
 
-  // LCD_RD is hard-wired high to 3V3, so no MCU pin is needed here.
-
-  // Pressure: XP=0, YM=1, measure the two ADC-capable shared electrodes.
-  pinMode(
-      TOUCH_XP_PIN,
-      OUTPUT);
-  digitalWrite(
-      TOUCH_XP_PIN,
-      LOW);
-
-  pinMode(
-      TOUCH_YM_PIN,
-      OUTPUT);
-  digitalWrite(
-      TOUCH_YM_PIN,
-      HIGH);
-
-  pinMode(
-      TOUCH_XM_PIN,
-      INPUT);
-  pinMode(
-      TOUCH_YP_PIN,
-      INPUT);
-
-  delayMicroseconds(24);
-
-  const uint16_t z1 =
-      readTouchAdc(
-          TOUCH_XM_PIN);
-
-  const uint16_t z2 =
-      readTouchAdc(
-          TOUCH_YP_PIN);
-
-  int32_t delta =
-      static_cast<int32_t>(z2) -
-      static_cast<int32_t>(z1);
-
-  if (delta < 0) {
-    delta = 0;
-  }
-
-  if (delta >
-      TOUCH_ADC_MAX) {
-    delta =
-        TOUCH_ADC_MAX;
-  }
-
-  pressure =
-      static_cast<uint16_t>(
-          TOUCH_ADC_MAX -
-          delta);
-
-  if (pressure <
-      TOUCH_PRESSURE_MIN) {
-    restoreTouchSharedPins();
-    return false;
-  }
-
-  // Raw X: drive XP/XM and sample YP.
-  pinMode(
-      TOUCH_YP_PIN,
-      INPUT);
-  pinMode(
-      TOUCH_YM_PIN,
-      INPUT);
-
-  pinMode(
-      TOUCH_XP_PIN,
-      OUTPUT);
-  digitalWrite(
-      TOUCH_XP_PIN,
-      HIGH);
-
-  pinMode(
-      TOUCH_XM_PIN,
-      OUTPUT);
-  digitalWrite(
-      TOUCH_XM_PIN,
-      LOW);
-
+  // TouchScreen.h X read:
+  // YP/YM Hi-Z, XP=HIGH, XM=LOW, sample YP, then invert 10-bit ADC.
+  pinMode(TOUCH_YP_PIN, INPUT);
+  pinMode(TOUCH_YM_PIN, INPUT);
+  pinMode(TOUCH_XP_PIN, OUTPUT);
+  pinMode(TOUCH_XM_PIN, OUTPUT);
+  digitalWrite(TOUCH_XP_PIN, HIGH);
+  digitalWrite(TOUCH_XM_PIN, LOW);
   delayMicroseconds(24);
 
   rawX =
-      readTouchAdc(
-          TOUCH_YP_PIN);
+      static_cast<uint16_t>(
+          TOUCH_ADC_MAX -
+          readTouchAdc10(
+              TOUCH_YP_PIN));
 
-  // Raw Y: drive YP/YM and sample XM.
-  pinMode(
-      TOUCH_XP_PIN,
-      INPUT);
-  pinMode(
-      TOUCH_XM_PIN,
-      INPUT);
-
-  pinMode(
-      TOUCH_YP_PIN,
-      OUTPUT);
-  digitalWrite(
-      TOUCH_YP_PIN,
-      HIGH);
-
-  pinMode(
-      TOUCH_YM_PIN,
-      OUTPUT);
-  digitalWrite(
-      TOUCH_YM_PIN,
-      LOW);
-
+  // TouchScreen.h Y read:
+  // XP/XM Hi-Z, YP=HIGH, YM=LOW, sample XM, then invert 10-bit ADC.
+  pinMode(TOUCH_XP_PIN, INPUT);
+  pinMode(TOUCH_XM_PIN, INPUT);
+  pinMode(TOUCH_YP_PIN, OUTPUT);
+  pinMode(TOUCH_YM_PIN, OUTPUT);
+  digitalWrite(TOUCH_YP_PIN, HIGH);
+  digitalWrite(TOUCH_YM_PIN, LOW);
   delayMicroseconds(24);
 
   rawY =
-      readTouchAdc(
+      static_cast<uint16_t>(
+          TOUCH_ADC_MAX -
+          readTouchAdc10(
+              TOUCH_XM_PIN));
+
+  // TouchScreen.h pressure read with the shop's 300-ohm plate value:
+  // XP=LOW, YM=HIGH, XM/YP Hi-Z.
+  pinMode(TOUCH_XP_PIN, OUTPUT);
+  digitalWrite(TOUCH_XP_PIN, LOW);
+  pinMode(TOUCH_YM_PIN, OUTPUT);
+  digitalWrite(TOUCH_YM_PIN, HIGH);
+  pinMode(TOUCH_XM_PIN, INPUT);
+  pinMode(TOUCH_YP_PIN, INPUT);
+  delayMicroseconds(24);
+
+  const uint16_t z1 =
+      readTouchAdc10(
           TOUCH_XM_PIN);
+  const uint16_t z2 =
+      readTouchAdc10(
+          TOUCH_YP_PIN);
+
+  pressure = 0;
+
+  if (z1 > 0 &&
+      z2 > z1) {
+    uint64_t rtouch =
+        static_cast<uint64_t>(
+            z2 - z1) *
+        rawX *
+        TOUCH_RXPLATE_OHMS;
+
+    rtouch /= z1;
+    rtouch /= 1024U;
+
+    pressure =
+        static_cast<uint16_t>(
+            min<uint64_t>(
+                rtouch,
+                65535U));
+  }
 
   restoreTouchSharedPins();
 
-  // Reject rail values. They are almost always an open circuit / no-touch
-  // sample rather than a real press.
-  if (rawX < 16 ||
-      rawX > TOUCH_ADC_MAX - 16 ||
-      rawY < 16 ||
-      rawY > TOUCH_ADC_MAX - 16) {
+  // Use the same valid pressure window as the supplied shop sketch.
+  if (pressure <=
+          TOUCH_PRESSURE_MIN ||
+      pressure >=
+          TOUCH_PRESSURE_MAX) {
+    return false;
+  }
+
+  // Open-circuit rail readings are not valid touches.
+  if (rawX < 8 ||
+      rawX >
+          TOUCH_ADC_MAX - 8 ||
+      rawY < 8 ||
+      rawY >
+          TOUCH_ADC_MAX - 8) {
     return false;
   }
 
@@ -10633,7 +10621,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0198);
+  USB.firmwareVersion(0x0199);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -10647,7 +10635,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.8");
+  cdcPrintln("BOOT|PIXELPRO|1.9.9");
 }
 
 void loop() {
