@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.9.6**.
+Firmware: **1.9.7**.
 
 All controller pins below use the board silk-screen names **Dxx**. Do not convert
 this document to raw ESP32 pin naming when wiring.
@@ -115,9 +115,15 @@ CDC test commands:
 - `SDREMOUNT`
 - `SDTEST`
 
-## 3.5-inch ILI9486 display
+## 3.5-inch 480x320 MCUFRIEND display
 
-Panel: **ILI9486 480 x 320**, landscape, i8080 8-bit.
+Panel: **3.5-inch 480 x 320 MCUFRIEND-style shield**, landscape, i8080 8-bit.
+
+Firmware 1.9.7 uses an **R61581-compatible 320x480 controller initialization**
+and rotates it to 480x320 landscape. The shop sketch supplied with this panel
+does not hard-code ILI9341: it calls `tft.readID()` and then `tft.begin(ID)`.
+The `//ID=0x9341` text beside the touch-pin constants is only a copied
+calibration comment, not the display initialization.
 
 | TFT shield signal | S2 Mini |
 |---|---|
@@ -137,7 +143,10 @@ Panel: **ILI9486 480 x 320**, landscape, i8080 8-bit.
 | 5V | 5V / VBUS |
 | GND | GND |
 
-### LCD_RST change in 1.9.6
+**No display wiring change is required from v1.9.6 to v1.9.7.** Keep LCD_RST
+on EN and LCD_RD on 3V3.
+
+### LCD_RST wiring
 
 D17 is no longer used by LCD_RST.
 
@@ -166,7 +175,7 @@ panel, then restores the 8-bit LCD bus.
 
 ## RGB
 
-RGB data moves from D18 to **D15** in firmware 1.9.6.
+RGB data remains on **D15** in firmware 1.9.7.
 
 | RGB connection | S2 Mini |
 |---|---|
@@ -193,7 +202,7 @@ Physical LED order remains:
 
 ## Magnetic expansion modules
 
-Firmware 1.9.6 reserves exactly two S2 Mini pins for the expansion bus:
+Firmware 1.9.7 keeps exactly two S2 Mini pins for the expansion bus:
 
 | Expansion bus | S2 Mini |
 |---|---|
