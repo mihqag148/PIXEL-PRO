@@ -1,11 +1,11 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.9.6 keeps native USB HID + CDC, the ILI9486 480×320 i8080 display, 2×4 key matrix, horizontal roller, resistive touch, SPI microSD, and a three-port PCA9546A magnetic module bus.
+Firmware 1.9.7 keeps native USB HID + CDC, the 3.5-inch 480×320 MCUFRIEND-style R61581-compatible i8080 display, 2×4 key matrix, horizontal roller, resistive touch, SPI microSD, and a three-port PCA9546A magnetic module bus.
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.9.6|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.9.7|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=R61581,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -90,6 +90,25 @@ GET_KEYS returns:
 KEYS|<mask>|P=<profile>|L=<layer>
 
 GET_LAYER returns active profile/layer state.
+
+## Display controller compatibility
+
+Firmware 1.9.7 replaces the earlier ILI9486-specific initialization with the
+R61581-compatible sequence used for common 3.5-inch 320x480/480x320
+MCUFRIEND-style parallel shields.
+
+The shop sketch supplied for this display uses `MCUFRIEND_kbv`, calls
+`tft.readID()`, and passes the returned value to `tft.begin(ID)`. Its
+`//ID=0x9341` touch-pin comment is not a hard-coded controller selection.
+
+The external wiring is unchanged from firmware 1.9.6:
+
+- LCD_RST -> EN
+- LCD_RD -> 3V3
+- LCD_WR -> D13
+- LCD_RS/DC -> D14
+- LCD_CS -> D16
+- LCD_D0..LCD_D7 -> D33..D40
 
 ## Physical input subsystem
 
@@ -213,7 +232,7 @@ PANEL
 
 Response:
 
-PANEL|ILI9486|60|0|60
+PANEL|R61581|60|0|60
 
 Fields are panel name, PIXEL PRO refresh cap in Hz, legacy SPI-Hz field (0 for
 i8080 parallel), and maximum media FPS.
