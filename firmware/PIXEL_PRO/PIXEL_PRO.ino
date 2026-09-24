@@ -8351,6 +8351,10 @@ void setup() {
   littleFsReady = LittleFS.begin(true);
   if (littleFsReady) {
     loadPersistedMedia();
+  } else {
+    // The factory visual is firmware-resident and remains available even
+    // when LittleFS cannot be mounted.
+    activateDefaultSaver();
   }
 
   renderMainMenu();
