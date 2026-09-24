@@ -1,0 +1,167 @@
+name: Build safe PAR8 timing diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/PIXEL_PRO/**'
+      - '.github/workflows/build-safe-par8-diagnostic.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'firmware/PIXEL_PRO/**'
+      - '.github/workflows/build-safe-par8-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: 1.5.1
+
+      - name: Install ESP32 core 3.3.12
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          for attempt in 1 2 3; do
+            if arduino-cli core install esp32:esp32@3.3.12; then
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep 10
+            arduino-cli core update-index
+          done
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "GFX Library for Arduino@1.6.8"
+          arduino-cli lib install "AnimatedGIF@2.2.0"
+          arduino-cli lib install "JPEGDEC@1.8.4"
+          arduino-cli lib install "Adafruit NeoPixel@1.15.5"
+
+      - name: Compile full firmware with safe PAR8 timing
+        run: |
+          mkdir -p build dist/raw
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32s2:PSRAM=enabled,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,FlashMode=dio" \
+            --build-property compiler.cpp.extra_flags="-DPIXEL_DIAG_TOUCH_OFF=1 -DPIXEL_DIAG_SAFE_PAR8=1" \
+            --build-path build \
+            --output-dir dist/raw \
+            firmware/PIXEL_PRO
+
+      - name: Package merged diagnostic image
+        run: |
+          python -m pip install --quiet esptool
+          APP_BIN="$(find dist/raw -maxdepth 1 -name '*.ino.bin' | head -n1)"
+          BOOT_BIN="$(find dist/raw -maxdepth 1 -name '*.ino.bootloader.bin' | head -n1)"
+          PART_BIN="$(find dist/raw -maxdepth 1 -name '*.ino.partitions.bin' | head -n1)"
+          BOOT_APP0="$HOME/.arduino15/packages/esp32/hardware/esp32/3.3.12/tools/partitions/boot_app0.bin"
+
+          test -n "$APP_BIN" && test -n "$BOOT_BIN" && test -n "$PART_BIN"
+          test -f "$BOOT_APP0"
+
+          cp "$APP_BIN" dist/PIXEL_PRO_SAFE_PAR8_app.bin
+          cp "$BOOT_BIN" dist/PIXEL_PRO_SAFE_PAR8_bootloader.bin
+          cp "$PART_BIN" dist/PIXEL_PRO_SAFE_PAR8_partitions.bin
+          cp "$BOOT_APP0" dist/boot_app0.bin
+
+          esptool --chip esp32s2 merge-bin \
+            -o dist/PIXEL_PRO_SAFE_PAR8_merged.bin \
+            0x1000 dist/PIXEL_PRO_SAFE_PAR8_bootloader.bin \
+            0x8000 dist/PIXEL_PRO_SAFE_PAR8_partitions.bin \
+            0xe000 dist/boot_app0.bin \
+            0x10000 dist/PIXEL_PRO_SAFE_PAR8_app.bin
+
+          cat > dist/README-SAFE-PAR8.txt <<'EOF'
+          PIXEL PRO SAFE PAR8 TIMING TEST v1
+
+          This is the full PIXEL PRO firmware with:
+          - resistive touch init/poll disabled
+          - a diagnostic software 8-bit i8080 bus
+          - 1 us data setup, 1 us WR-low, 1 us recovery per byte
+          - HX8357-B / ID 0x8357
+          - INVON polarity retained
+
+          The static-white bit-banged test was bright and stable while the normal
+          Arduino_ESP32PAR8 build was dim/flickering. This build tests whether
+          the normal direct-register WR timing is too fast for this shield.
+
+          Keep RGB DATA disconnected from D15 for this test.
+
+          Wiring:
+          LCD_RD    -> 3V3
+          LCD_RST   -> EN
+          LCD_WR    -> D13
+          LCD_RS/DC -> D14
+          LCD_CS    -> D16
+          LCD_D0    -> D33
+          LCD_D1    -> D34
+          LCD_D2    -> D35
+          LCD_D3    -> D36
+          LCD_D4    -> D37
+          LCD_D5    -> D38
+          LCD_D6    -> D39
+          LCD_D7    -> D40
+
+          IMPORTANT: this diagnostic is intentionally slow. Initial menu drawing
+          can take several seconds. Judge only brightness/flicker/image stability.
+          EOF
+
+          sha256sum dist/PIXEL_PRO_SAFE_PAR8_merged.bin > dist/SHA256SUMS-SAFE-PAR8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PIXEL-PRO-SAFE-PAR8-DIAG
+          path: |
+            dist/PIXEL_PRO_SAFE_PAR8_*.bin
+            dist/README-SAFE-PAR8.txt
+            dist/SHA256SUMS-SAFE-PAR8
+          if-no-files-found: error
+
+  pr-checks:
+    needs: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$BUILD_RESULT" = success
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PIXEL-PRO-SAFE-PAR8-DIAG
+          path: dist
+
+      - name: Publish safe PAR8 diagnostic release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="tft-safe-par8-v1"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "PIXEL PRO Safe PAR8 Timing Test v1" \
+              --notes "Full firmware using deliberately slow 8-bit i8080 write timing. Touch off, RGB D15 disconnected during test." \
+              dist/*
+          fi
