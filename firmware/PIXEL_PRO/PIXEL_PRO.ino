@@ -35,7 +35,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.9.6";
+static constexpr char FW_VERSION[] = "1.9.7";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -78,10 +78,10 @@ static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 50;
 
-// Firmware-resident fallback visuals. The default art is rendered directly
-// from smooth scanlines inspired by the user's aqua/teal reference image, so
-// it consumes no LittleFS space and cannot be deleted by media commands.
-// User uploads always take precedence.
+// Firmware-resident fallback visuals. Main Menu uses the compiled red/orange
+// dune JPEG. The default screensaver renders the same dune visual language as
+// a smooth animated RGB565 scene, so it consumes no LittleFS space and cannot
+// be deleted by media commands. User uploads always take precedence.
 static constexpr uint8_t DEFAULT_SAVER_FPS = 20;
 static constexpr uint32_t DEFAULT_SAVER_FRAME_MS =
     1000UL / DEFAULT_SAVER_FPS;
@@ -1696,211 +1696,189 @@ static void renderDefaultVisual(
     return;
   }
 
-  // This palette and composition are based on the user's aqua/blue reference:
-  // bright cyan sky, translucent turquoise mid-layers, and deep navy foreground.
+  // Warm dune palette derived from the factory Main Menu JPEG:
+  // dark crimson sky, amber horizon, red middle dunes and near-black foreground.
   static constexpr DefaultVisualRgb SKY_TOP = {
-      8,
-      99,
-      165
+      36,
+      3,
+      8
   };
 
-  static constexpr DefaultVisualRgb SKY_BOTTOM = {
-      102,
-      211,
-      231
+  static constexpr DefaultVisualRgb SKY_MIDDLE = {
+      126,
+      13,
+      14
   };
 
-  static constexpr DefaultVisualRgb SKY_GLOW = {
-      235,
-      254,
-      250
-  };
-
-  static constexpr DefaultVisualRgb AQUA_TOP = {
-      75,
-      196,
-      222
-  };
-
-  static constexpr DefaultVisualRgb AQUA_BOTTOM = {
-      180,
-      241,
-      235
-  };
-
-  static constexpr DefaultVisualRgb TEAL_TOP = {
-      0,
-      79,
-      117
-  };
-
-  static constexpr DefaultVisualRgb TEAL_BOTTOM = {
-      24,
-      211,
-      181
-  };
-
-  static constexpr DefaultVisualRgb CYAN_TOP = {
-      0,
-      95,
-      170
-  };
-
-  static constexpr DefaultVisualRgb CYAN_BOTTOM = {
-      31,
-      191,
-      220
-  };
-
-  static constexpr DefaultVisualRgb NAVY_TOP = {
-      1,
-      62,
-      122
-  };
-
-  static constexpr DefaultVisualRgb NAVY_BOTTOM = {
-      0,
-      32,
-      79
-  };
-
-  static constexpr DefaultVisualRgb EDGE = {
-      205,
+  static constexpr DefaultVisualRgb HORIZON = {
       255,
-      249
+      137,
+      31
   };
 
-  static constexpr DefaultVisualRgb TEAL_GLOW = {
-      87,
-      245,
-      211
+  static constexpr DefaultVisualRgb HORIZON_WHITE = {
+      255,
+      218,
+      132
   };
 
-  static int16_t curve0[TFT_WIDTH] = {};
-  static int16_t curve1[TFT_WIDTH] = {};
-  static int16_t curve2[TFT_WIDTH] = {};
-  static int16_t curve3[TFT_WIDTH] = {};
+  static constexpr DefaultVisualRgb DUNE_BACK_TOP = {
+      164,
+      31,
+      18
+  };
+
+  static constexpr DefaultVisualRgb DUNE_BACK_BOTTOM = {
+      82,
+      6,
+      10
+  };
+
+  static constexpr DefaultVisualRgb DUNE_MID_TOP = {
+      126,
+      11,
+      13
+  };
+
+  static constexpr DefaultVisualRgb DUNE_MID_BOTTOM = {
+      48,
+      3,
+      8
+  };
+
+  static constexpr DefaultVisualRgb DUNE_FRONT_TOP = {
+      69,
+      5,
+      10
+  };
+
+  static constexpr DefaultVisualRgb DUNE_FRONT_BOTTOM = {
+      13,
+      1,
+      5
+  };
+
+  static constexpr DefaultVisualRgb EDGE_GLOW = {
+      255,
+      104,
+      18
+  };
+
+  static constexpr DefaultVisualRgb EDGE_HOT = {
+      255,
+      190,
+      69
+  };
+
+  static int16_t ridge0[TFT_WIDTH] = {};
+  static int16_t ridge1[TFT_WIDTH] = {};
+  static int16_t ridge2[TFT_WIDTH] = {};
   static uint16_t line[TFT_WIDTH] = {};
 
   float phase =
       animated
           ? static_cast<float>(now) *
-                0.00105f
-          : 0.62f;
+                0.00072f
+          : 0.64f;
 
-  // The four boundaries deliberately move at different speeds. Their minimum
-  // separation is enforced below, keeping every frame smooth and avoiding the
-  // self-intersections that made the old fallback look like flat polygons.
+  // Three independently drifting dune ridges create subtle parallax without
+  // changing the identity of the factory artwork.
   for (int x = 0;
        x < TFT_WIDTH;
        ++x) {
     float fx =
         static_cast<float>(x);
 
-    int c0 =
-        132 +
+    int r0 =
+        160 +
         static_cast<int>(
             sinf(
-                fx * 0.0104f +
-                phase * 0.42f) *
+                fx * 0.0092f +
+                phase * 0.52f +
+                0.55f) *
+            22.0f) +
+        static_cast<int>(
+            sinf(
+                fx * 0.0185f -
+                phase * 0.23f +
+                1.8f) *
+            8.0f);
+
+    int r1 =
+        214 +
+        static_cast<int>(
+            sinf(
+                fx * 0.0084f -
+                phase * 0.46f +
+                1.65f) *
             27.0f) +
         static_cast<int>(
             sinf(
-                fx * 0.0217f -
-                phase * 0.24f +
-                1.15f) *
-            11.0f);
+                fx * 0.0170f +
+                phase * 0.29f +
+                0.25f) *
+            9.0f);
 
-    int c1 =
-        181 +
+    int r2 =
+        270 +
         static_cast<int>(
             sinf(
-                fx * 0.0092f -
-                phase * 0.55f +
-                1.55f) *
-            29.0f) +
-        static_cast<int>(
-            sinf(
-                fx * 0.0172f +
-                phase * 0.31f +
-                0.45f) *
-            10.0f);
-
-    int c2 =
-        225 +
-        static_cast<int>(
-            sinf(
-                fx * 0.0112f +
-                phase * 0.66f +
-                2.18f) *
+                fx * 0.0077f +
+                phase * 0.38f +
+                2.75f) *
             25.0f) +
         static_cast<int>(
             sinf(
-                fx * 0.0190f -
-                phase * 0.28f) *
-            9.0f);
+                fx * 0.0152f -
+                phase * 0.31f +
+                0.9f) *
+            8.0f);
 
-    int c3 =
-        272 +
-        static_cast<int>(
-            sinf(
-                fx * 0.0087f -
-                phase * 0.48f +
-                0.28f) *
-            29.0f) +
-        static_cast<int>(
-            sinf(
-                fx * 0.0158f +
-                phase * 0.35f +
-                2.8f) *
-            11.0f);
-
-    c0 =
+    r0 =
         constrain(
-            c0,
-            92,
-            174);
+            r0,
+            126,
+            194);
 
-    c1 =
+    r1 =
         constrain(
             max(
-                c1,
-                c0 + 32),
-            c0 + 32,
-            225);
+                r1,
+                r0 + 34),
+            r0 + 34,
+            256);
 
-    c2 =
+    r2 =
         constrain(
             max(
-                c2,
-                c1 + 30),
-            c1 + 30,
-            278);
+                r2,
+                r1 + 34),
+            r1 + 34,
+            315);
 
-    c3 =
-        constrain(
-            max(
-                c3,
-                c2 + 30),
-            c2 + 30,
-            316);
+    ridge0[x] =
+        static_cast<int16_t>(r0);
 
-    curve0[x] =
-        static_cast<int16_t>(c0);
-    curve1[x] =
-        static_cast<int16_t>(c1);
-    curve2[x] =
-        static_cast<int16_t>(c2);
-    curve3[x] =
-        static_cast<int16_t>(c3);
+    ridge1[x] =
+        static_cast<int16_t>(r1);
+
+    ridge2[x] =
+        static_cast<int16_t>(r2);
   }
 
-  int movingGlowX =
-      318 +
+  int glowX =
+      332 +
       static_cast<int>(
           sinf(
-              phase * 0.58f) *
-          54.0f);
+              phase * 0.41f) *
+          30.0f);
+
+  int glowY =
+      145 +
+      static_cast<int>(
+          cosf(
+              phase * 0.35f) *
+          5.0f);
 
   for (int y = 0;
        y < TFT_HEIGHT;
@@ -1908,196 +1886,210 @@ static void renderDefaultVisual(
     for (int x = 0;
          x < TFT_WIDTH;
          ++x) {
-      int c0 = curve0[x];
-      int c1 = curve1[x];
-      int c2 = curve2[x];
-      int c3 = curve3[x];
+      int r0 =
+          ridge0[x];
+
+      int r1 =
+          ridge1[x];
+
+      int r2 =
+          ridge2[x];
 
       DefaultVisualRgb color;
 
-      if (y < c0) {
-        uint16_t amount =
+      if (y < r0) {
+        uint16_t skyAmount =
             static_cast<uint16_t>(
                 constrain(
                     (y * 255) /
                         max(
                             1,
-                            c0),
+                            r0),
                     0,
                     255));
 
         color =
             defaultVisualMix(
                 SKY_TOP,
-                SKY_BOTTOM,
-                amount);
+                SKY_MIDDLE,
+                skyAmount);
 
-        // Wide soft light in the upper-right reproduces the luminous area of
-        // the reference without expensive alpha blending.
+        // Warm horizon bloom centered slightly right, matching the selected
+        // Main Menu dune artwork.
         int dx =
             abs(
-                x - 380);
+                x -
+                glowX);
 
         int dy =
             abs(
-                y - 72);
+                y -
+                glowY);
+
+        int bloom =
+            232 -
+            dx / 2 -
+            dy * 2;
+
+        if (bloom > 0) {
+          color =
+              defaultVisualMix(
+                  color,
+                  HORIZON,
+                  static_cast<uint16_t>(
+                      min(
+                          bloom,
+                          196)));
+        }
+
+        int core =
+            104 -
+            dx -
+            dy * 2;
+
+        if (core > 0) {
+          color =
+              defaultVisualMix(
+                  color,
+                  HORIZON_WHITE,
+                  static_cast<uint16_t>(
+                      min(
+                          core,
+                          116)));
+        }
+      } else if (y < r1) {
+        uint16_t amount =
+            static_cast<uint16_t>(
+                constrain(
+                    ((y - r0) * 255) /
+                        max(
+                            1,
+                            r1 - r0),
+                    0,
+                    255));
+
+        color =
+            defaultVisualMix(
+                DUNE_BACK_TOP,
+                DUNE_BACK_BOTTOM,
+                amount);
 
         int light =
-            210 -
-            dx / 2 -
-            dy;
+            92 -
+            abs(
+                x -
+                glowX) /
+                4;
 
         if (light > 0) {
           color =
               defaultVisualMix(
                   color,
-                  SKY_GLOW,
+                  HORIZON,
                   static_cast<uint16_t>(
                       min(
                           light,
-                          176)));
+                          72)));
         }
-      } else if (y < c1) {
+      } else if (y < r2) {
         uint16_t amount =
             static_cast<uint16_t>(
                 constrain(
-                    ((y - c0) * 255) /
+                    ((y - r1) * 255) /
                         max(
                             1,
-                            c1 - c0),
+                            r2 - r1),
                     0,
                     255));
 
         color =
             defaultVisualMix(
-                AQUA_TOP,
-                AQUA_BOTTOM,
-                amount);
-      } else if (y < c2) {
-        uint16_t amount =
-            static_cast<uint16_t>(
-                constrain(
-                    ((y - c1) * 255) /
-                        max(
-                            1,
-                            c2 - c1),
-                    0,
-                    255));
-
-        color =
-            defaultVisualMix(
-                TEAL_TOP,
-                TEAL_BOTTOM,
+                DUNE_MID_TOP,
+                DUNE_MID_BOTTOM,
                 amount);
 
-        int glow =
-            72 -
+        int light =
+            70 -
             abs(
                 x -
-                movingGlowX) /
-                3;
+                (glowX - 70)) /
+                5;
 
-        if (glow > 0) {
+        if (light > 0) {
           color =
               defaultVisualMix(
                   color,
-                  TEAL_GLOW,
+                  EDGE_GLOW,
                   static_cast<uint16_t>(
                       min(
-                          glow,
-                          58)));
+                          light,
+                          48)));
         }
-      } else if (y < c3) {
-        uint16_t amount =
-            static_cast<uint16_t>(
-                constrain(
-                    ((y - c2) * 255) /
-                        max(
-                            1,
-                            c3 - c2),
-                    0,
-                    255));
-
-        color =
-            defaultVisualMix(
-                CYAN_TOP,
-                CYAN_BOTTOM,
-                amount);
       } else {
         uint16_t amount =
             static_cast<uint16_t>(
                 constrain(
-                    ((y - c3) * 255) /
+                    ((y - r2) * 255) /
                         max(
                             1,
-                            TFT_HEIGHT - c3 - 1),
+                            TFT_HEIGHT -
+                            r2 -
+                            1),
                     0,
                     255));
 
         color =
             defaultVisualMix(
-                NAVY_TOP,
-                NAVY_BOTTOM,
+                DUNE_FRONT_TOP,
+                DUNE_FRONT_BOTTOM,
                 amount);
-
-        int glow =
-            64 -
-            abs(
-                x -
-                (movingGlowX - 110)) /
-                4;
-
-        if (glow > 0) {
-          color =
-              defaultVisualMix(
-                  color,
-                  TEAL_TOP,
-                  static_cast<uint16_t>(
-                      min(
-                          glow,
-                          46)));
-        }
       }
 
       uint8_t edgeGlow = 0;
 
-      edgeGlow =
-          max(
-              edgeGlow,
-              defaultVisualEdgeGlow(
-                  abs(
-                      y -
-                      c0)));
+      int d0 =
+          abs(
+              y -
+              r0);
+
+      int d1 =
+          abs(
+              y -
+              r1);
+
+      int d2 =
+          abs(
+              y -
+              r2);
 
       edgeGlow =
           max(
               edgeGlow,
               defaultVisualEdgeGlow(
-                  abs(
-                      y -
-                      c1)));
+                  d0));
 
       edgeGlow =
           max(
               edgeGlow,
               defaultVisualEdgeGlow(
-                  abs(
-                      y -
-                      c2)));
+                  d1));
 
       edgeGlow =
           max(
               edgeGlow,
               defaultVisualEdgeGlow(
-                  abs(
-                      y -
-                      c3)));
+                  d2));
 
       if (edgeGlow > 0) {
+        DefaultVisualRgb edge =
+            d0 <= 1
+                ? EDGE_HOT
+                : EDGE_GLOW;
+
         color =
             defaultVisualMix(
                 color,
-                EDGE,
+                edge,
                 edgeGlow);
       }
 
@@ -7598,7 +7590,7 @@ static void handleCommand(String command) {
 
     if (saverUsingDefault) {
       cdcPrintln(
-          "SAVMEDIA|STATE=READY|KIND=DEFAULT|NAME=UElYRUwgUFJPIERlZmF1bHQ=|BYTES=0|W=480|H=320|FPS=12|DUR=0|THUMB=0");
+          "SAVMEDIA|STATE=READY|KIND=DEFAULT|ASSET=DUNE_RED_ORANGE_ANIM|NAME=UElYRUwgUFJPIEZhY3RvcnkgRHVuZSBBbmltYXRpb24=|BYTES=0|W=480|H=320|FPS=20|DUR=0|THUMB=0");
       return;
     }
 
@@ -10465,7 +10457,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0196);
+  USB.firmwareVersion(0x0197);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -10479,7 +10471,7 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.9.6");
+  cdcPrintln("BOOT|PIXELPRO|1.9.7");
 }
 
 void loop() {
