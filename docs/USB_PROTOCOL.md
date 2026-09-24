@@ -1,12 +1,11 @@
 # PIXEL PRO USB CDC protocol v1
 
-Firmware 1.5.3 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings and the ILI9486 480×320 i8080 display. GIF files stay compressed and are decoded on-device; v1.3.5 also accepts arbitrary GIF canvas sizes up to 1024×1024 and scales them to the panel at render time.
-
+Firmware 1.9.0 keeps native USB HID + CDC, 20 keymap profiles, live memory telemetry, Lumi Action bindings, the ILI9486 480×320 i8080 display, a 2×4 key matrix, EC11 encoder, and shared-pin 4-wire resistive touch. GIF files stay compressed and are decoded on-device.\n
 ## HELLO
 
 HELLO / GET_INFO returns a line containing:
 
-PIXELPRO|1|FW=1.5.3|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,ROM_BOOT|VID=303A|PID=80C2
+PIXELPRO|1|FW=1.9.0|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,TOUCH_RESISTIVE,ROM_BOOT|VID=303A|PID=80C2
 
 ## Keymap profiles
 
@@ -91,6 +90,53 @@ GET_KEYS returns:
 KEYS|<mask>|P=<profile>|L=<layer>
 
 GET_LAYER returns active profile/layer state.
+
+## Physical input subsystem
+
+Firmware 1.9.0 scans the eight keys as a 2 × 4 diode matrix. Logical key event
+messages remain unchanged, so existing LumiPad keymap handling stays compatible.
+
+The EC11 encoder is handled directly by firmware:
+
+- clockwise -> USB Consumer Volume Increment
+- counter-clockwise -> USB Consumer Volume Decrement
+- press -> USB Consumer Mute
+
+Diagnostic CDC events are also emitted:
+
+- `ENCODER|CW`
+- `ENCODER|CCW`
+- `ENCODER|PRESS`
+
+### Resistive touch
+
+The 4-wire touch panel shares LCD_WR, LCD_RS, LCD_D6 and LCD_D7. Firmware
+deselects the LCD before every touch sample and restores the 8080 bus afterward.
+
+Touch diagnostic events:
+
+- `TOUCH|DOWN|X=<x>|Y=<y>|RAWX=<raw>|RAWY=<raw>|P=<pressure>|SLOT=<0-8>`
+- `TOUCH|UP`
+
+A Main Menu touch on a configured slot emits the same Lumi Action event family
+used by a physical action key:
+
+`ACTION|<1-32>|KEY=0|P=<profile>|L=<layer>|TOUCH=<1-8>`
+
+The first touch while the screensaver is active only wakes the display and is not
+dispatched as an action.
+
+Calibration commands:
+
+- `GET_TOUCH_CAL`
+- `SET_TOUCH_CAL|<xMin>|<xMax>|<yMin>|<yMax>|<flags>`
+- `RESET_TOUCH_CAL`
+
+`GET_TOUCH_CAL` returns:
+
+`TOUCH_CAL|<xMin>|<xMax>|<yMin>|<yMax>|<flags>`
+
+Flags: bit 0 swaps X/Y, bit 1 inverts X, bit 2 inverts Y.
 
 ## Panel information
 

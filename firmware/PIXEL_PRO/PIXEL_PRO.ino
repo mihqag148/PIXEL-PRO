@@ -17,7 +17,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.8.9";
+static constexpr char FW_VERSION[] = "1.9.0";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -124,7 +124,43 @@ static constexpr uint8_t LAYER_TG = 2;
 static constexpr uint8_t LAYER_TO = 3;
 static constexpr uint8_t KEYMAP_STORAGE_VERSION = 3;
 
-static const uint8_t KEY_PINS[KEY_COUNT] = {1, 2, 3, 4, 5, 6, 7, 8};
+// Final PIXEL PRO input wiring.
+static constexpr uint8_t MATRIX_ROW_COUNT = 2;
+static constexpr uint8_t MATRIX_COL_COUNT = 4;
+static constexpr uint8_t MATRIX_ROW_PINS[MATRIX_ROW_COUNT] = {1, 2};
+static constexpr uint8_t MATRIX_COL_PINS[MATRIX_COL_COUNT] = {3, 4, 5, 6};
+
+// EC11 encoder. Rotation is standalone USB media volume; push is mute.
+static constexpr uint8_t ENCODER_A_PIN = 7;
+static constexpr uint8_t ENCODER_B_PIN = 8;
+static constexpr uint8_t ENCODER_SW_PIN = 21;
+static constexpr int8_t ENCODER_TRANSITIONS_PER_DETENT = 4;
+static constexpr uint16_t ENCODER_CW_CONSUMER = 0x00E9;   // Volume increment
+static constexpr uint16_t ENCODER_CCW_CONSUMER = 0x00EA;  // Volume decrement
+static constexpr uint16_t ENCODER_SW_CONSUMER = 0x00E2;   // Mute
+
+// 4-wire resistive touch shares four ILI9486 shield signals.
+// YP=A1/LCD_WR, XM=A2/LCD_RS, XP=D6/LCD_D6, YM=D7/LCD_D7.
+// D13/D14 are ADC-capable on ESP32-S2. LCD_CS is held high while the
+// shared pins are temporarily reconfigured for a touch sample.
+static constexpr int8_t TOUCH_YP_PIN = TFT_WR;  // D13
+static constexpr int8_t TOUCH_XM_PIN = TFT_DC;  // D14
+static constexpr int8_t TOUCH_XP_PIN = TFT_D6;  // D39
+static constexpr int8_t TOUCH_YM_PIN = TFT_D7;  // D40
+static constexpr uint16_t TOUCH_ADC_MAX = 4095;
+static constexpr uint16_t TOUCH_PRESSURE_MIN = 180;
+static constexpr uint16_t TOUCH_RAW_MIN_DEFAULT = 250;
+static constexpr uint16_t TOUCH_RAW_MAX_DEFAULT = 3850;
+static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 600;
+static constexpr uint32_t TOUCH_POLL_MS = 24;
+static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
+static constexpr uint8_t TOUCH_CAL_VERSION = 1;
+static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
+static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
+static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
+// ILI9486 is mounted portrait but firmware rotates it to landscape (rotation 1).
+static constexpr uint8_t TOUCH_DEFAULT_FLAGS =
+    TOUCH_FLAG_SWAP_XY | TOUCH_FLAG_INVERT_Y;
 
 struct __attribute__((packed)) KeyBinding {
   uint8_t type;
@@ -137,6 +173,14 @@ struct KeyState {
   bool rawPressed;
   bool stablePressed;
   uint32_t changedAt;
+};
+
+struct __attribute__((packed)) TouchCalibration {
+  uint16_t xMin;
+  uint16_t xMax;
+  uint16_t yMin;
+  uint16_t yMax;
+  uint8_t flags;
 };
 
 struct __attribute__((packed)) MainMenuConfig {
@@ -179,6 +223,22 @@ Arduino_GFX *tft =
         false);
 
 static KeyState keyState[KEY_COUNT] = {};
+static KeyState encoderSwitchState = {};
+static uint8_t encoderLastAB = 0;
+static int8_t encoderTransitionAccumulator = 0;
+
+static TouchCalibration touchCalibration = {};
+static bool touchRawPressed = false;
+static bool touchStablePressed = false;
+static bool touchWakeOnly = false;
+static uint32_t touchChangedAt = 0;
+static uint32_t touchLastPollAt = 0;
+static uint16_t touchRawX = 0;
+static uint16_t touchRawY = 0;
+static uint16_t touchPressure = 0;
+static int16_t touchX = -1;
+static int16_t touchY = -1;
+
 static KeyBinding keymap[PROFILE_COUNT][LAYER_COUNT][KEY_COUNT] = {};
 static KeyBinding activeBindings[KEY_COUNT] = {};
 static String macros[MACRO_COUNT];
@@ -453,6 +513,99 @@ static void saveMacro(uint8_t index) {
   char key[5];
   snprintf(key, sizeof(key), "m%u", index);
   preferences.putString(key, macros[index]);
+}
+
+static void setDefaultTouchCalibration() {
+  touchCalibration.xMin = TOUCH_RAW_MIN_DEFAULT;
+  touchCalibration.xMax = TOUCH_RAW_MAX_DEFAULT;
+  touchCalibration.yMin = TOUCH_RAW_MIN_DEFAULT;
+  touchCalibration.yMax = TOUCH_RAW_MAX_DEFAULT;
+  touchCalibration.flags = TOUCH_DEFAULT_FLAGS;
+}
+
+static bool touchCalibrationIsValid(
+    const TouchCalibration &calibration) {
+  if (calibration.xMax <= calibration.xMin ||
+      calibration.yMax <= calibration.yMin) {
+    return false;
+  }
+
+  if (calibration.xMax - calibration.xMin < TOUCH_CAL_MIN_SPAN ||
+      calibration.yMax - calibration.yMin < TOUCH_CAL_MIN_SPAN) {
+    return false;
+  }
+
+  if (calibration.xMax > TOUCH_ADC_MAX ||
+      calibration.yMax > TOUCH_ADC_MAX ||
+      calibration.flags >
+          (TOUCH_FLAG_SWAP_XY |
+           TOUCH_FLAG_INVERT_X |
+           TOUCH_FLAG_INVERT_Y)) {
+    return false;
+  }
+
+  return true;
+}
+
+static void saveTouchCalibration() {
+  preferences.putUChar(
+      "tcver",
+      TOUCH_CAL_VERSION);
+  preferences.putUShort(
+      "tcxmin",
+      touchCalibration.xMin);
+  preferences.putUShort(
+      "tcxmax",
+      touchCalibration.xMax);
+  preferences.putUShort(
+      "tcymin",
+      touchCalibration.yMin);
+  preferences.putUShort(
+      "tcymax",
+      touchCalibration.yMax);
+  preferences.putUChar(
+      "tcflags",
+      touchCalibration.flags);
+}
+
+static void loadTouchCalibration() {
+  setDefaultTouchCalibration();
+
+  if (preferences.getUChar(
+          "tcver",
+          0) != TOUCH_CAL_VERSION) {
+    saveTouchCalibration();
+    return;
+  }
+
+  TouchCalibration stored = {};
+  stored.xMin =
+      preferences.getUShort(
+          "tcxmin",
+          TOUCH_RAW_MIN_DEFAULT);
+  stored.xMax =
+      preferences.getUShort(
+          "tcxmax",
+          TOUCH_RAW_MAX_DEFAULT);
+  stored.yMin =
+      preferences.getUShort(
+          "tcymin",
+          TOUCH_RAW_MIN_DEFAULT);
+  stored.yMax =
+      preferences.getUShort(
+          "tcymax",
+          TOUCH_RAW_MAX_DEFAULT);
+  stored.flags =
+      preferences.getUChar(
+          "tcflags",
+          TOUCH_DEFAULT_FLAGS);
+
+  if (!touchCalibrationIsValid(stored)) {
+    saveTouchCalibration();
+    return;
+  }
+
+  touchCalibration = stored;
 }
 
 static void setDefaultRgbProfiles() {
@@ -5960,7 +6113,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=ILI9486,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,TOUCH_RESISTIVE,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -6108,6 +6261,90 @@ static void handleCommand(String command) {
 
   if (upper == "GET_KEYS") {
     sendKeyState();
+    return;
+  }
+
+  if (upper == "GET_TOUCH_CAL") {
+    char out[96];
+    snprintf(
+        out,
+        sizeof(out),
+        "TOUCH_CAL|%u|%u|%u|%u|%u",
+        static_cast<unsigned>(touchCalibration.xMin),
+        static_cast<unsigned>(touchCalibration.xMax),
+        static_cast<unsigned>(touchCalibration.yMin),
+        static_cast<unsigned>(touchCalibration.yMax),
+        static_cast<unsigned>(touchCalibration.flags));
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "RESET_TOUCH_CAL") {
+    setDefaultTouchCalibration();
+    saveTouchCalibration();
+    cdcPrintln("OK|TOUCH_CAL_RESET");
+    return;
+  }
+
+  if (upper.startsWith("SET_TOUCH_CAL|")) {
+    int p1 = command.indexOf('|');
+    int p2 = command.indexOf('|', p1 + 1);
+    int p3 = command.indexOf('|', p2 + 1);
+    int p4 = command.indexOf('|', p3 + 1);
+    int p5 = command.indexOf('|', p4 + 1);
+
+    uint16_t xMin = 0;
+    uint16_t xMax = 0;
+    uint16_t yMin = 0;
+    uint16_t yMax = 0;
+    uint16_t flags = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        p3 < 0 ||
+        p4 < 0 ||
+        p5 < 0 ||
+        !parseUnsigned(
+            command.substring(p1 + 1, p2),
+            TOUCH_ADC_MAX,
+            xMin) ||
+        !parseUnsigned(
+            command.substring(p2 + 1, p3),
+            TOUCH_ADC_MAX,
+            xMax) ||
+        !parseUnsigned(
+            command.substring(p3 + 1, p4),
+            TOUCH_ADC_MAX,
+            yMin) ||
+        !parseUnsigned(
+            command.substring(p4 + 1, p5),
+            TOUCH_ADC_MAX,
+            yMax) ||
+        !parseUnsigned(
+            command.substring(p5 + 1),
+            TOUCH_FLAG_SWAP_XY |
+                TOUCH_FLAG_INVERT_X |
+                TOUCH_FLAG_INVERT_Y,
+            flags)) {
+      cdcPrintln("ERR|BAD_TOUCH_CAL");
+      return;
+    }
+
+    TouchCalibration candidate = {
+        xMin,
+        xMax,
+        yMin,
+        yMax,
+        static_cast<uint8_t>(flags)};
+
+    if (!touchCalibrationIsValid(candidate)) {
+      cdcPrintln("ERR|BAD_TOUCH_CAL");
+      return;
+    }
+
+    touchCalibration = candidate;
+    saveTouchCalibration();
+    cdcPrintln("OK|TOUCH_CAL");
     return;
   }
 
@@ -8239,18 +8476,742 @@ static void emitKeyEvent(uint8_t index, bool pressed) {
   cdcPrintln(out);
 }
 
-static void initKeys() {
-  for (uint8_t i = 0; i < KEY_COUNT; ++i) {
-    pinMode(KEY_PINS[i], INPUT_PULLUP);
+static uint8_t readMatrixMask() {
+  uint8_t mask = 0;
 
-    bool pressed = digitalRead(KEY_PINS[i]) == LOW;
+  for (uint8_t row = 0;
+       row < MATRIX_ROW_COUNT;
+       ++row) {
+    const uint8_t rowPin =
+        MATRIX_ROW_PINS[row];
+
+    pinMode(
+        rowPin,
+        OUTPUT);
+    digitalWrite(
+        rowPin,
+        LOW);
+
+    // 2 us is ample for the short hand-wired matrix and keeps scan latency low.
+    delayMicroseconds(2);
+
+    for (uint8_t col = 0;
+         col < MATRIX_COL_COUNT;
+         ++col) {
+      if (digitalRead(
+              MATRIX_COL_PINS[col]) == LOW) {
+        const uint8_t index =
+            row * MATRIX_COL_COUNT +
+            col;
+
+        mask |=
+            static_cast<uint8_t>(
+                1U << index);
+      }
+    }
+
+    // Unselected rows are high impedance. With diode cathodes toward ROW this
+    // avoids cross-row current while the column pull-ups remain enabled.
+    pinMode(
+        rowPin,
+        INPUT);
+  }
+
+  return mask;
+}
+
+static void initKeys() {
+  for (uint8_t row = 0;
+       row < MATRIX_ROW_COUNT;
+       ++row) {
+    pinMode(
+        MATRIX_ROW_PINS[row],
+        INPUT);
+  }
+
+  for (uint8_t col = 0;
+       col < MATRIX_COL_COUNT;
+       ++col) {
+    pinMode(
+        MATRIX_COL_PINS[col],
+        INPUT_PULLUP);
+  }
+
+  delayMicroseconds(20);
+
+  const uint8_t mask =
+      readMatrixMask();
+
+  pressedMask = 0;
+
+  for (uint8_t i = 0;
+       i < KEY_COUNT;
+       ++i) {
+    const bool pressed =
+        (mask &
+         static_cast<uint8_t>(
+             1U << i)) != 0;
+
     keyState[i].rawPressed = pressed;
     keyState[i].stablePressed = pressed;
     keyState[i].changedAt = millis();
     activeBindings[i] = disabledBinding();
 
     if (pressed) {
-      pressedMask |= static_cast<uint8_t>(1U << i);
+      pressedMask |=
+          static_cast<uint8_t>(
+              1U << i);
+    }
+  }
+}
+
+static void sendConsumerTap(
+    uint16_t usage) {
+  if (!HID.ready() ||
+      usage == 0) {
+    return;
+  }
+
+  // Preserve a consumer key that may already be held by a physical key.
+  const uint16_t heldUsage =
+      activeConsumerCode;
+
+  if (heldUsage != 0) {
+    ConsumerControl.release();
+  }
+
+  ConsumerControl.press(
+      usage);
+  delay(2);
+  ConsumerControl.release();
+
+  if (heldUsage != 0) {
+    ConsumerControl.press(
+        heldUsage);
+  }
+}
+
+static void emitEncoderStep(
+    bool clockwise) {
+  lastUserActivityAt = millis();
+  stopSaver();
+
+  sendConsumerTap(
+      clockwise
+          ? ENCODER_CW_CONSUMER
+          : ENCODER_CCW_CONSUMER);
+
+  cdcPrintln(
+      clockwise
+          ? "ENCODER|CW"
+          : "ENCODER|CCW");
+}
+
+static void emitEncoderSwitchPress() {
+  lastUserActivityAt = millis();
+  stopSaver();
+
+  sendConsumerTap(
+      ENCODER_SW_CONSUMER);
+
+  cdcPrintln(
+      "ENCODER|PRESS");
+}
+
+static void initEncoder() {
+  pinMode(
+      ENCODER_A_PIN,
+      INPUT_PULLUP);
+  pinMode(
+      ENCODER_B_PIN,
+      INPUT_PULLUP);
+  pinMode(
+      ENCODER_SW_PIN,
+      INPUT_PULLUP);
+
+  encoderLastAB =
+      static_cast<uint8_t>(
+          (digitalRead(ENCODER_A_PIN) == HIGH
+               ? 2U
+               : 0U) |
+          (digitalRead(ENCODER_B_PIN) == HIGH
+               ? 1U
+               : 0U));
+
+  encoderTransitionAccumulator = 0;
+
+  const bool switchPressed =
+      digitalRead(
+          ENCODER_SW_PIN) == LOW;
+
+  encoderSwitchState.rawPressed =
+      switchPressed;
+  encoderSwitchState.stablePressed =
+      switchPressed;
+  encoderSwitchState.changedAt =
+      millis();
+}
+
+static void pollEncoder() {
+  // Gray-code transition table. Invalid two-bit jumps are ignored, which
+  // removes most mechanical bounce without delaying the main loop.
+  static const int8_t TRANSITION[16] = {
+      0, -1, 1, 0,
+      1, 0, 0, -1,
+      -1, 0, 0, 1,
+      0, 1, -1, 0};
+
+  const uint8_t currentAB =
+      static_cast<uint8_t>(
+          (digitalRead(ENCODER_A_PIN) == HIGH
+               ? 2U
+               : 0U) |
+          (digitalRead(ENCODER_B_PIN) == HIGH
+               ? 1U
+               : 0U));
+
+  const uint8_t transitionIndex =
+      static_cast<uint8_t>(
+          (encoderLastAB << 2) |
+          currentAB);
+
+  encoderLastAB =
+      currentAB;
+
+  encoderTransitionAccumulator +=
+      TRANSITION[transitionIndex];
+
+  if (encoderTransitionAccumulator >=
+      ENCODER_TRANSITIONS_PER_DETENT) {
+    encoderTransitionAccumulator = 0;
+    emitEncoderStep(true);
+  } else if (encoderTransitionAccumulator <=
+             -ENCODER_TRANSITIONS_PER_DETENT) {
+    encoderTransitionAccumulator = 0;
+    emitEncoderStep(false);
+  }
+
+  const uint32_t now =
+      millis();
+
+  const bool switchPressed =
+      digitalRead(
+          ENCODER_SW_PIN) == LOW;
+
+  if (switchPressed !=
+      encoderSwitchState.rawPressed) {
+    encoderSwitchState.rawPressed =
+        switchPressed;
+    encoderSwitchState.changedAt =
+        now;
+  }
+
+  if (switchPressed !=
+          encoderSwitchState.stablePressed &&
+      now -
+              encoderSwitchState.changedAt >=
+          DEBOUNCE_MS) {
+    encoderSwitchState.stablePressed =
+        switchPressed;
+
+    if (switchPressed) {
+      emitEncoderSwitchPress();
+    }
+  }
+}
+
+static void restoreTouchSharedPins() {
+  // Return every shared touch/LCD line to the output state expected by the
+  // 8080 bus. CS stays high while idle; Arduino_GFX asserts it as required.
+  pinMode(
+      TOUCH_YP_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_YP_PIN,
+      HIGH);
+
+  pinMode(
+      TOUCH_XM_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_XM_PIN,
+      HIGH);
+
+  pinMode(
+      TOUCH_XP_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_XP_PIN,
+      LOW);
+
+  pinMode(
+      TOUCH_YM_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_YM_PIN,
+      LOW);
+
+  pinMode(
+      TFT_RD,
+      OUTPUT);
+  digitalWrite(
+      TFT_RD,
+      HIGH);
+
+  pinMode(
+      TFT_CS,
+      OUTPUT);
+  digitalWrite(
+      TFT_CS,
+      HIGH);
+}
+
+static uint16_t readTouchAdc(
+    int8_t pin) {
+  // First conversion after changing the resistive network is discarded.
+  (void)analogRead(pin);
+
+  uint32_t sum = 0;
+
+  for (uint8_t i = 0;
+       i < 3;
+       ++i) {
+    sum +=
+        static_cast<uint16_t>(
+            analogRead(pin));
+
+    delayMicroseconds(8);
+  }
+
+  return static_cast<uint16_t>(
+      sum / 3U);
+}
+
+static bool readTouchRaw(
+    uint16_t &rawX,
+    uint16_t &rawY,
+    uint16_t &pressure) {
+  if (!displayReady) {
+    return false;
+  }
+
+  // Deselect the LCD before touching WR/DC/data pins. Without this the
+  // resistive-touch measurement could be interpreted as an LCD write cycle.
+  pinMode(
+      TFT_CS,
+      OUTPUT);
+  digitalWrite(
+      TFT_CS,
+      HIGH);
+
+  pinMode(
+      TFT_RD,
+      OUTPUT);
+  digitalWrite(
+      TFT_RD,
+      HIGH);
+
+  // Pressure: XP=0, YM=1, measure the two ADC-capable shared electrodes.
+  pinMode(
+      TOUCH_XP_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_XP_PIN,
+      LOW);
+
+  pinMode(
+      TOUCH_YM_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_YM_PIN,
+      HIGH);
+
+  pinMode(
+      TOUCH_XM_PIN,
+      INPUT);
+  pinMode(
+      TOUCH_YP_PIN,
+      INPUT);
+
+  delayMicroseconds(24);
+
+  const uint16_t z1 =
+      readTouchAdc(
+          TOUCH_XM_PIN);
+
+  const uint16_t z2 =
+      readTouchAdc(
+          TOUCH_YP_PIN);
+
+  int32_t delta =
+      static_cast<int32_t>(z2) -
+      static_cast<int32_t>(z1);
+
+  if (delta < 0) {
+    delta = 0;
+  }
+
+  if (delta >
+      TOUCH_ADC_MAX) {
+    delta =
+        TOUCH_ADC_MAX;
+  }
+
+  pressure =
+      static_cast<uint16_t>(
+          TOUCH_ADC_MAX -
+          delta);
+
+  if (pressure <
+      TOUCH_PRESSURE_MIN) {
+    restoreTouchSharedPins();
+    return false;
+  }
+
+  // Raw X: drive XP/XM and sample YP.
+  pinMode(
+      TOUCH_YP_PIN,
+      INPUT);
+  pinMode(
+      TOUCH_YM_PIN,
+      INPUT);
+
+  pinMode(
+      TOUCH_XP_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_XP_PIN,
+      HIGH);
+
+  pinMode(
+      TOUCH_XM_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_XM_PIN,
+      LOW);
+
+  delayMicroseconds(24);
+
+  rawX =
+      readTouchAdc(
+          TOUCH_YP_PIN);
+
+  // Raw Y: drive YP/YM and sample XM.
+  pinMode(
+      TOUCH_XP_PIN,
+      INPUT);
+  pinMode(
+      TOUCH_XM_PIN,
+      INPUT);
+
+  pinMode(
+      TOUCH_YP_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_YP_PIN,
+      HIGH);
+
+  pinMode(
+      TOUCH_YM_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_YM_PIN,
+      LOW);
+
+  delayMicroseconds(24);
+
+  rawY =
+      readTouchAdc(
+          TOUCH_XM_PIN);
+
+  restoreTouchSharedPins();
+
+  // Reject rail values. They are almost always an open circuit / no-touch
+  // sample rather than a real press.
+  if (rawX < 16 ||
+      rawX > TOUCH_ADC_MAX - 16 ||
+      rawY < 16 ||
+      rawY > TOUCH_ADC_MAX - 16) {
+    return false;
+  }
+
+  return true;
+}
+
+static uint16_t normalizeTouchAxis(
+    uint16_t raw,
+    uint16_t minimum,
+    uint16_t maximum) {
+  if (raw <= minimum) {
+    return 0;
+  }
+
+  if (raw >= maximum) {
+    return 65535;
+  }
+
+  return static_cast<uint16_t>(
+      (static_cast<uint32_t>(
+           raw - minimum) *
+       65535UL) /
+      static_cast<uint32_t>(
+          maximum - minimum));
+}
+
+static void mapTouchCoordinates(
+    uint16_t rawX,
+    uint16_t rawY,
+    int16_t &screenX,
+    int16_t &screenY) {
+  uint16_t nx =
+      normalizeTouchAxis(
+          rawX,
+          touchCalibration.xMin,
+          touchCalibration.xMax);
+
+  uint16_t ny =
+      normalizeTouchAxis(
+          rawY,
+          touchCalibration.yMin,
+          touchCalibration.yMax);
+
+  if ((touchCalibration.flags &
+       TOUCH_FLAG_SWAP_XY) != 0) {
+    const uint16_t temp =
+        nx;
+    nx = ny;
+    ny = temp;
+  }
+
+  if ((touchCalibration.flags &
+       TOUCH_FLAG_INVERT_X) != 0) {
+    nx =
+        static_cast<uint16_t>(
+            65535U - nx);
+  }
+
+  if ((touchCalibration.flags &
+       TOUCH_FLAG_INVERT_Y) != 0) {
+    ny =
+        static_cast<uint16_t>(
+            65535U - ny);
+  }
+
+  screenX =
+      static_cast<int16_t>(
+          (static_cast<uint32_t>(nx) *
+           (TFT_WIDTH - 1U)) /
+          65535UL);
+
+  screenY =
+      static_cast<int16_t>(
+          (static_cast<uint32_t>(ny) *
+           (TFT_HEIGHT - 1U)) /
+          65535UL);
+}
+
+static int8_t mainMenuSlotAt(
+    int16_t x,
+    int16_t y) {
+  const int statusY =
+      TFT_HEIGHT -
+      MENU_STATUS_HEIGHT;
+
+  const int marginX = 10;
+  const int marginY = 6;
+  const int gapX = 6;
+  const int gapY = 4;
+
+  const int cellW =
+      (TFT_WIDTH -
+       marginX * 2 -
+       gapX * 3) /
+      4;
+
+  const int cellH =
+      (statusY -
+       marginY * 2 -
+       gapY) /
+      2;
+
+  for (uint8_t slot = 0;
+       slot < MENU_SLOT_COUNT;
+       ++slot) {
+    const int col =
+        slot % 4;
+
+    const int row =
+        slot / 4;
+
+    const int left =
+        marginX +
+        col *
+            (cellW + gapX);
+
+    const int top =
+        marginY +
+        row *
+            (cellH + gapY);
+
+    if (x >= left &&
+        x < left + cellW &&
+        y >= top &&
+        y < top + cellH) {
+      return static_cast<int8_t>(
+          slot);
+    }
+  }
+
+  return -1;
+}
+
+static void emitTouchAction(
+    uint8_t slot) {
+  if (slot >= MENU_SLOT_COUNT) {
+    return;
+  }
+
+  const uint8_t profile =
+      activeProfile <
+              PROFILE_COUNT
+          ? activeProfile
+          : 0;
+
+  const uint8_t action =
+      mainMenuConfig
+          .actions[profile][slot];
+
+  if (action == 0 ||
+      action > ACTION_COUNT) {
+    return;
+  }
+
+  char out[80];
+  snprintf(
+      out,
+      sizeof(out),
+      "ACTION|%u|KEY=0|P=%u|L=%u|TOUCH=%u",
+      static_cast<unsigned>(action),
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(currentLayer()),
+      static_cast<unsigned>(slot + 1));
+
+  cdcPrintln(out);
+}
+
+static void initTouch() {
+  analogReadResolution(12);
+  restoreTouchSharedPins();
+
+  touchRawPressed = false;
+  touchStablePressed = false;
+  touchWakeOnly = false;
+  touchChangedAt = millis();
+  touchLastPollAt = 0;
+}
+
+static void pollTouch() {
+  if (!displayReady) {
+    return;
+  }
+
+  const uint32_t now =
+      millis();
+
+  if (now -
+          touchLastPollAt <
+      TOUCH_POLL_MS) {
+    return;
+  }
+
+  touchLastPollAt =
+      now;
+
+  uint16_t rawX = 0;
+  uint16_t rawY = 0;
+  uint16_t pressure = 0;
+
+  const bool pressed =
+      readTouchRaw(
+          rawX,
+          rawY,
+          pressure);
+
+  if (pressed) {
+    touchRawX = rawX;
+    touchRawY = rawY;
+    touchPressure = pressure;
+
+    mapTouchCoordinates(
+        rawX,
+        rawY,
+        touchX,
+        touchY);
+  }
+
+  if (pressed !=
+      touchRawPressed) {
+    touchRawPressed =
+        pressed;
+    touchChangedAt =
+        now;
+  }
+
+  if (pressed !=
+          touchStablePressed &&
+      now -
+              touchChangedAt >=
+          TOUCH_DEBOUNCE_MS) {
+    touchStablePressed =
+        pressed;
+
+    if (pressed) {
+      lastUserActivityAt =
+          now;
+
+      const bool wasSaverActive =
+          saverActive;
+
+      if (wasSaverActive) {
+        touchWakeOnly = true;
+        stopSaver();
+      } else {
+        touchWakeOnly = false;
+
+        const int8_t slot =
+            mainMenuSlotAt(
+                touchX,
+                touchY);
+
+        char out[96];
+        snprintf(
+            out,
+            sizeof(out),
+            "TOUCH|DOWN|X=%d|Y=%d|RAWX=%u|RAWY=%u|P=%u|SLOT=%d",
+            static_cast<int>(touchX),
+            static_cast<int>(touchY),
+            static_cast<unsigned>(touchRawX),
+            static_cast<unsigned>(touchRawY),
+            static_cast<unsigned>(touchPressure),
+            slot >= 0
+                ? static_cast<int>(slot + 1)
+                : 0);
+
+        cdcPrintln(out);
+
+        if (slot >= 0) {
+          emitTouchAction(
+              static_cast<uint8_t>(
+                  slot));
+        }
+      }
+    } else {
+      if (!touchWakeOnly) {
+        cdcPrintln(
+            "TOUCH|UP");
+      }
+
+      touchWakeOnly = false;
     }
   }
 }
@@ -8315,20 +9276,38 @@ static void pollStatusLed() {
 }
 
 static void pollKeys() {
-  const uint32_t now = millis();
+  const uint32_t now =
+      millis();
 
-  for (uint8_t i = 0; i < KEY_COUNT; ++i) {
-    bool pressed = digitalRead(KEY_PINS[i]) == LOW;
+  const uint8_t mask =
+      readMatrixMask();
 
-    if (pressed != keyState[i].rawPressed) {
-      keyState[i].rawPressed = pressed;
-      keyState[i].changedAt = now;
+  for (uint8_t i = 0;
+       i < KEY_COUNT;
+       ++i) {
+    const bool pressed =
+        (mask &
+         static_cast<uint8_t>(
+             1U << i)) != 0;
+
+    if (pressed !=
+        keyState[i].rawPressed) {
+      keyState[i].rawPressed =
+          pressed;
+      keyState[i].changedAt =
+          now;
     }
 
-    if (pressed != keyState[i].stablePressed &&
-        (now - keyState[i].changedAt) >= DEBOUNCE_MS) {
-      keyState[i].stablePressed = pressed;
-      emitKeyEvent(i, pressed);
+    if (pressed !=
+            keyState[i].stablePressed &&
+        now -
+                keyState[i].changedAt >=
+            DEBOUNCE_MS) {
+      keyState[i].stablePressed =
+          pressed;
+      emitKeyEvent(
+          i,
+          pressed);
     }
   }
 }
@@ -8339,6 +9318,7 @@ void setup() {
   loadMacros();
   loadRgbProfiles();
   loadMainMenuConfig();
+  loadTouchCalibration();
 
   menuHostOs =
       preferences.getUChar(
@@ -8356,7 +9336,9 @@ void setup() {
 
   initStatusLed();
   initKeys();
+  initEncoder();
   initDisplay();
+  initTouch();
 
   littleFsReady = LittleFS.begin(true);
   if (littleFsReady) {
@@ -8383,7 +9365,7 @@ void setup() {
   USB.productName("PIXEL PRO");
   USB.manufacturerName("Lumi3D");
   USB.serialNumber(serial);
-  USB.firmwareVersion(0x0189);
+  USB.firmwareVersion(0x0190);
 
   // Normal Lumi Macropad CDC traffic must never be interpreted as a request
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
@@ -8397,14 +9379,16 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.8.9");
+  cdcPrintln("BOOT|PIXELPRO|1.9.0");
 }
 
 void loop() {
   pollKeys();
+  pollEncoder();
   pollCdc();
   pollRgbEffect();
   pollSaver();
+  pollTouch();
   pollStatusLed();
 
   if (bootloaderArmed &&
