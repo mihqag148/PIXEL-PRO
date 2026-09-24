@@ -23,6 +23,10 @@
 #define PIXEL_DIAG_SAFE_PAR8 0
 #endif
 
+#ifndef PIXEL_DIAG_DISPLAY_ONLY_IDLE
+#define PIXEL_DIAG_DISPLAY_ONLY_IDLE 0
+#endif
+
 #if PIXEL_DIAG_SAFE_PAR8
 #include "PixelSafePAR8.h"
 #endif
@@ -10588,6 +10592,20 @@ void setup() {
   initKeys();
   initRoller();
   initDisplay();
+
+#if PIXEL_DIAG_DISPLAY_ONLY_IDLE
+  // Diagnostic: stop immediately after the exact production display init.
+  // Draw a bright constant frame once, then leave the LCD bus completely idle.
+  // No SD, I2C module bus, LittleFS, USB, RGB animation, keys, saver or touch
+  // runtime is started after this point.
+  if (displayReady) {
+    tft->fillScreen(0xFFFF);
+  }
+
+  while (true) {
+    delay(1000);
+  }
+#endif
   if (!PIXEL_DIAG_TOUCH_OFF) {
     initTouch();
   }
