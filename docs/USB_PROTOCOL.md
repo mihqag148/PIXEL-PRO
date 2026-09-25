@@ -677,3 +677,16 @@ PIXEL PRO is the authoritative store for the active Main Menu:
   backup left by an interrupted replacement;
 - failed/cancelled uploads therefore no longer erase the previously working
   background or icon.
+
+
+### No factory visual fallback (firmware 1.10.9)
+
+Firmware 1.10.9 removes both compiled PIXEL factory visuals:
+
+- no firmware Main Menu JPEG is embedded; a profile with no custom background
+  renders a black background and `MENUBGSTATE` reports `STATE=EMPTY|ASSET=NONE`;
+- no firmware screensaver animation is embedded; when no uploaded GIF/image/PXQ
+  exists, `SAVERSTATE` and `SAVMEDIA` report `EMPTY`;
+- clearing user screensaver media does not activate any fallback animation;
+- existing custom Main Menu icons/actions continue to render over the black
+  background when no background JPEG is stored.
