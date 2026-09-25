@@ -1771,6 +1771,8 @@ static uint8_t currentLayer() {
 }
 
 
+static bool saveMainMenuConfig();
+
 static uint8_t effectiveMainMenuAction(
     uint8_t profile,
     uint8_t slot) {
