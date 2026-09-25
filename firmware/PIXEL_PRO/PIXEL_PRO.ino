@@ -224,7 +224,7 @@ static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 139;  // tp.y TS_BOT
 static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // tp.y TS_TOP
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
 static constexpr uint32_t TOUCH_POLL_MS = 12;
-static constexpr uint32_t TOUCH_DEBOUNCE_MS = 0;
+static constexpr uint8_t TOUCH_RELEASE_MISS_COUNT = 3;
 static constexpr uint8_t TOUCH_CAL_VERSION = 6;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
@@ -11309,10 +11309,10 @@ static bool readTouchRaw(
   const bool stableCoordinates =
       touchDelta(
           x1,
-          x2) <= 140 &&
+          x2) <= 240 &&
       touchDelta(
           y1,
-          y2) <= 140;
+          y2) <= 240;
 
   return axesInsidePanel &&
          stableCoordinates;
@@ -11899,6 +11899,7 @@ static void startAutomaticTouchCalibration() {
 
   touchRawPressed = false;
   touchStablePressed = false;
+  touchReleaseMisses = 0;
   touchChangedAt = millis();
   touchWakeOnly = false;
   touchHeldFallbackSlot = -1;
@@ -11913,6 +11914,7 @@ static void cancelAutomaticTouchCalibration() {
   touchCalibrationPoint = 0;
   touchRawPressed = false;
   touchStablePressed = false;
+  touchReleaseMisses = 0;
   touchChangedAt = millis();
   renderMainMenu();
 }
@@ -12009,6 +12011,7 @@ static void initTouch() {
 
   touchRawPressed = false;
   touchStablePressed = false;
+  touchReleaseMisses = 0;
   touchWakeOnly = false;
   touchHeldFallbackSlot = -1;
   touchFeedbackSlot = -1;
