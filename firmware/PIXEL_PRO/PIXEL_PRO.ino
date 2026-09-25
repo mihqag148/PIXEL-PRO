@@ -56,7 +56,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.6";
+static constexpr char FW_VERSION[] = "1.10.7";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -3559,8 +3559,7 @@ static bool writeMenuAssetChunk(
     uint32_t offset,
     const String &encoded) {
   if (menuUploadKind == 0 ||
-      !menuUploadFile ||
-      offset != menuUploadReceivedBytes) {
+      !menuUploadFile) {
     return false;
   }
 
@@ -3576,17 +3575,33 @@ static bool writeMenuAssetChunk(
           encoded.length());
 
   if (result != 0 ||
-      decodedLength == 0 ||
+      decodedLength == 0) {
+    return false;
+  }
+
+  // ACK-per-chunk transfers must tolerate an ACK being lost after the data
+  // was already committed. Accept one exact replay without writing twice.
+  if (offset < menuUploadReceivedBytes) {
+    return offset + decodedLength ==
+           menuUploadReceivedBytes;
+  }
+
+  if (offset != menuUploadReceivedBytes ||
       menuUploadReceivedBytes + decodedLength >
           menuUploadExpectedBytes) {
     return false;
   }
 
-  if (menuUploadFile.write(decoded, decodedLength) != decodedLength) {
+  if (menuUploadFile.write(
+          decoded,
+          decodedLength) !=
+      decodedLength) {
     return false;
   }
 
-  menuUploadReceivedBytes += decodedLength;
+  menuUploadReceivedBytes +=
+      decodedLength;
+
   return true;
 }
 
@@ -4720,8 +4735,7 @@ static bool writeGifUploadChunk(
     const String &encoded) {
   if (!saverUploading ||
       saverFormat != SAVER_GIF ||
-      !gifUploadFile ||
-      offset != saverBytesReceived) {
+      !gifUploadFile) {
     return false;
   }
 
@@ -4739,7 +4753,16 @@ static bool writeGifUploadChunk(
           encoded.length());
 
   if (result != 0 ||
-      decodedLength == 0 ||
+      decodedLength == 0) {
+    return false;
+  }
+
+  if (offset < saverBytesReceived) {
+    return offset + decodedLength ==
+           saverBytesReceived;
+  }
+
+  if (offset != saverBytesReceived ||
       saverBytesReceived +
               decodedLength >
           gifUploadExpectedBytes) {
@@ -4942,9 +4965,7 @@ static bool beginSaverThumbUpload(
 static bool writeSaverThumbChunk(
     uint32_t offset,
     const String &encoded) {
-  if (!saverThumbUploadFile ||
-      offset !=
-          saverThumbReceivedBytes) {
+  if (!saverThumbUploadFile) {
     return false;
   }
 
@@ -4962,7 +4983,16 @@ static bool writeSaverThumbChunk(
           encoded.length());
 
   if (result != 0 ||
-      decodedLength == 0 ||
+      decodedLength == 0) {
+    return false;
+  }
+
+  if (offset < saverThumbReceivedBytes) {
+    return offset + decodedLength ==
+           saverThumbReceivedBytes;
+  }
+
+  if (offset != saverThumbReceivedBytes ||
       saverThumbReceivedBytes +
               decodedLength >
           saverThumbExpectedBytes) {
@@ -4974,8 +5004,7 @@ static bool writeSaverThumbChunk(
           decoded,
           decodedLength);
 
-  if (written !=
-      decodedLength) {
+  if (written != decodedLength) {
     return false;
   }
 
@@ -6231,8 +6260,7 @@ static bool writeJpegUploadChunk(
     const String &encoded) {
   if (!saverUploading ||
       saverFormat != SAVER_JPEG ||
-      !jpegUploadFile ||
-      offset != saverBytesReceived) {
+      !jpegUploadFile) {
     return false;
   }
 
@@ -6250,7 +6278,16 @@ static bool writeJpegUploadChunk(
           encoded.length());
 
   if (result != 0 ||
-      decodedLength == 0 ||
+      decodedLength == 0) {
+    return false;
+  }
+
+  if (offset < saverBytesReceived) {
+    return offset + decodedLength ==
+           saverBytesReceived;
+  }
+
+  if (offset != saverBytesReceived ||
       saverBytesReceived +
               decodedLength >
           jpegUploadExpectedBytes) {
@@ -8127,7 +8164,7 @@ static void handleCommand(String command) {
 
     if (saverUsingDefault) {
       cdcPrintln(
-          "SAVMEDIA|STATE=READY|KIND=DEFAULT|ASSET=DUNE_RED_ORANGE_ANIM|NAME=UElYRUwgUFJPIEZhY3RvcnkgRHVuZSBBbmltYXRpb24=|BYTES=0|W=480|H=320|FPS=20|DUR=0|THUMB=0");
+          "SAVMEDIA|STATE=READY|KIND=DEFAULT|FORMAT=0|DEFAULT=1|ASSET=DUNE_RED_ORANGE_ANIM|NAME=UElYRUwgUFJPIEZhY3RvcnkgRHVuZSBBbmltYXRpb24=|BYTES=0|W=480|H=320|FPS=20|DUR=0|THUMB=0");
       return;
     }
 
@@ -8192,8 +8229,10 @@ static void handleCommand(String command) {
     snprintf(
         out,
         sizeof(out),
-        "SAVMEDIA|STATE=READY|KIND=%s|NAME=%s|BYTES=%lu|W=%u|H=%u|FPS=%u|DUR=%lu|THUMB=%lu",
+        "SAVMEDIA|STATE=READY|KIND=%s|FORMAT=%u|DEFAULT=0|NAME=%s|BYTES=%lu|W=%u|H=%u|FPS=%u|DUR=%lu|THUMB=%lu",
         kind.c_str(),
+        static_cast<unsigned>(
+            saverFormat),
         reinterpret_cast<
             const char *>(
             encodedName),
