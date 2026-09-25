@@ -11309,6 +11309,50 @@ static void mapTouchCoordinates(
     uint16_t rawY,
     int16_t &screenX,
     int16_t &screenY) {
+  if (touchAffineValid) {
+    const float mappedX =
+        touchAffine.ax *
+            static_cast<float>(
+                rawX) +
+        touchAffine.bx *
+            static_cast<float>(
+                rawY) +
+        touchAffine.cx;
+
+    const float mappedY =
+        touchAffine.ay *
+            static_cast<float>(
+                rawX) +
+        touchAffine.by *
+            static_cast<float>(
+                rawY) +
+        touchAffine.cy;
+
+    screenX =
+        static_cast<int16_t>(
+            constrain(
+                static_cast<int>(
+                    lroundf(
+                        mappedX)),
+                0,
+                static_cast<int>(
+                    TFT_WIDTH - 1)));
+
+    screenY =
+        static_cast<int16_t>(
+            constrain(
+                static_cast<int>(
+                    lroundf(
+                        mappedY)),
+                0,
+                static_cast<int>(
+                    TFT_HEIGHT - 1)));
+
+    return;
+  }
+
+  // Legacy fallback only. New installs/calibration use the full affine
+  // transform above, which also corrects panel skew and axis cross-coupling.
   uint16_t nx =
       normalizeTouchAxis(
           rawX,
