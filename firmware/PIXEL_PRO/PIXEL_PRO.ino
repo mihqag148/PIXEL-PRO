@@ -56,7 +56,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.5";
+static constexpr char FW_VERSION[] = "1.10.6";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -778,6 +778,33 @@ static void closePackedFiles();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
+}
+
+static bool mountPersistentStorage(
+    bool allowFormat = true) {
+  LittleFS.end();
+
+  // The custom partition is named "spiffs" for Arduino compatibility,
+  // while the filesystem stored inside it is LittleFS. Name the partition
+  // explicitly so a core/library default can never select the wrong data
+  // partition.
+  if (LittleFS.begin(
+          false,
+          "/littlefs",
+          10,
+          "spiffs")) {
+    return true;
+  }
+
+  if (!allowFormat) {
+    return false;
+  }
+
+  return LittleFS.begin(
+      true,
+      "/littlefs",
+      10,
+      "spiffs");
 }
 
 static const char *sdCardTypeName(
@@ -7946,6 +7973,110 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "FSINFO") {
+    size_t total =
+        littleFsReady
+            ? LittleFS.totalBytes()
+            : 0;
+
+    size_t used =
+        littleFsReady
+            ? LittleFS.usedBytes()
+            : 0;
+
+    size_t freeBytes =
+        total > used
+            ? total - used
+            : 0;
+
+    uint8_t iconMask = 0;
+
+    if (littleFsReady) {
+      for (uint8_t slot = 0;
+           slot < MENU_SLOT_COUNT;
+           ++slot) {
+        char path[24] = {};
+        menuIconPath(
+            activeProfile,
+            slot,
+            false,
+            path,
+            sizeof(path));
+
+        if (LittleFS.exists(path)) {
+          File icon =
+              LittleFS.open(path, "r");
+
+          if (icon &&
+              icon.size() ==
+                  MENU_ICON_ASSET_BYTES) {
+            iconMask |=
+                static_cast<uint8_t>(
+                    1U << slot);
+          }
+
+          if (icon) {
+            icon.close();
+          }
+        }
+      }
+    }
+
+    char bgPath[24] = {};
+    menuBackgroundPath(
+        activeProfile,
+        false,
+        bgPath,
+        sizeof(bgPath));
+
+    const bool customBackground =
+        littleFsReady &&
+        LittleFS.exists(bgPath);
+
+    char out[220] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "FSINFO|READY=%u|TOTAL=%lu|USED=%lu|FREE=%lu|PROFILE=%u|BG=%s|ICONS=%02X|SAVER=%s|FW=%s",
+        littleFsReady ? 1U : 0U,
+        static_cast<unsigned long>(total),
+        static_cast<unsigned long>(used),
+        static_cast<unsigned long>(freeBytes),
+        static_cast<unsigned>(activeProfile),
+        customBackground ? "CUSTOM" : "FACTORY",
+        static_cast<unsigned>(iconMask),
+        saverUsingDefault ? "DEFAULT" : (saverReady ? "CUSTOM" : "EMPTY"),
+        FW_VERSION);
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "FSREPAIR") {
+    if (littleFsReady) {
+      cdcPrintln("OK|FSREPAIR|ALREADY_READY");
+      return;
+    }
+
+    littleFsReady =
+        mountPersistentStorage(true);
+
+    if (!littleFsReady) {
+      cdcPrintln("ERR|FSREPAIR");
+      return;
+    }
+
+    loadPersistedMedia();
+
+    if (displayReady &&
+        !saverActive) {
+      renderMainMenu();
+    }
+
+    cdcPrintln("OK|FSREPAIR|READY");
+    return;
+  }
+
   if (upper == "SAVERINFO") {
     size_t total =
         littleFsReady
@@ -8600,45 +8731,44 @@ static void handleCommand(String command) {
       return;
     }
 
-    size_t total =
-        littleFsReady
-            ? LittleFS.totalBytes()
-            : 0;
-
-    size_t used =
-        littleFsReady
-            ? LittleFS.usedBytes()
-            : 0;
-
-    size_t freeBytes =
-        total > used
-            ? total - used
-            : 0;
-
     if (!littleFsReady) {
       cdcPrintln("ERR|FS_NOT_READY");
       return;
     }
 
-    if (static_cast<size_t>(byteCount) + 4096 > freeBytes) {
-      char out[96];
-      snprintf(
-          out,
-          sizeof(out),
-          "ERR|NO_SPACE|NEED=%lu|FREE=%lu|TOTAL=%lu",
-          static_cast<unsigned long>(byteCount),
-          static_cast<unsigned long>(freeBytes),
-          static_cast<unsigned long>(total));
-      cdcPrintln(out);
-      return;
-    }
-
+    // beginGifUpload() deletes the previous user screensaver first, exactly
+    // as requested by the product UX. Check capacity only after that cleanup,
+    // otherwise replacing an existing large GIF falsely reports NO_SPACE.
     if (!beginGifUpload(
             byteCount,
             width,
             height,
             scaleMode)) {
-      cdcPrintln("ERR|SAVGIFBEGIN_ALLOC");
+      size_t total =
+          LittleFS.totalBytes();
+
+      size_t used =
+          LittleFS.usedBytes();
+
+      size_t freeBytes =
+          total > used
+              ? total - used
+              : 0;
+
+      if (static_cast<size_t>(byteCount) + 4096 > freeBytes) {
+        char out[96];
+        snprintf(
+            out,
+            sizeof(out),
+            "ERR|NO_SPACE|NEED=%lu|FREE=%lu|TOTAL=%lu",
+            static_cast<unsigned long>(byteCount + 4096),
+            static_cast<unsigned long>(freeBytes),
+            static_cast<unsigned long>(total));
+        cdcPrintln(out);
+      } else {
+        cdcPrintln("ERR|SAVGIFBEGIN_ALLOC");
+      }
+
       return;
     }
 
@@ -10416,11 +10546,20 @@ static bool readTouchRaw(
 
   pressure = 0;
 
+  // Some MCUFRIEND-compatible clone panels expose the pressure divider with
+  // the opposite polarity from the original AVR shield. X/Y are still valid,
+  // but z2 can be lower than z1. Use the magnitude of the divider delta so
+  // both electrical orientations register a real press.
+  const uint16_t zDelta =
+      z2 >= z1
+          ? static_cast<uint16_t>(z2 - z1)
+          : static_cast<uint16_t>(z1 - z2);
+
   if (z1 > 0 &&
-      z2 > z1) {
+      zDelta > 0) {
     uint64_t rtouch =
         static_cast<uint64_t>(
-            z2 - z1) *
+            zDelta) *
         rawX *
         TOUCH_RXPLATE_OHMS;
 
@@ -10434,15 +10573,14 @@ static bool readTouchRaw(
                 : rtouch);
   }
 
-  // ESP32-S2 ADC transfer characteristics differ from the AVR used by the
-  // shop sketch, so do not reject every press solely on the AVR's narrow
-  // 200..1000 pressure window. A real resistive contact must produce valid
-  // non-rail X/Y coordinates plus two finite pressure-node readings.
+  // Require a stable resistive divider, but do not assume z2 > z1. That
+  // assumption rejected every touch on some clone shields.
   const bool contact =
       z1 >= 8 &&
       z1 <= TOUCH_ADC_MAX - 8 &&
-      z2 > z1 + 2 &&
-      z2 <= TOUCH_ADC_MAX;
+      z2 >= 8 &&
+      z2 <= TOUCH_ADC_MAX - 8 &&
+      zDelta > 2;
 
   restoreTouchSharedPins();
 
@@ -10887,7 +11025,7 @@ void setup() {
   holdStage(5000, false, false, false, false);
 
   // Stage 3: mount LittleFS and load saver metadata/media only.
-  littleFsReady = LittleFS.begin(true);
+  littleFsReady = mountPersistentStorage(true);
   if (littleFsReady) {
     loadPersistedMedia();
   } else {
@@ -10981,7 +11119,7 @@ void setup() {
   mountSdCard();
   initModuleBus();
 
-  littleFsReady = LittleFS.begin(true);
+  littleFsReady = mountPersistentStorage(true);
   if (littleFsReady) {
     loadPersistedMedia();
   } else {
@@ -11020,7 +11158,13 @@ void setup() {
 
   delay(500);
   sendMappedReports();
-  cdcPrintln("BOOT|PIXELPRO|1.10.1");
+  char bootLine[48] = {};
+  snprintf(
+      bootLine,
+      sizeof(bootLine),
+      "BOOT|PIXELPRO|%s",
+      FW_VERSION);
+  cdcPrintln(bootLine);
 }
 
 void loop() {
