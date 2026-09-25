@@ -599,6 +599,7 @@ static bool touchRawPressed = false;
 static bool touchStablePressed = false;
 static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
+static int8_t touchFeedbackSlot = -1;
 static uint32_t touchChangedAt = 0;
 static uint32_t touchLastPollAt = 0;
 static uint16_t touchRawX = 0;
@@ -10908,6 +10909,71 @@ static int8_t mainMenuSlotAt(
   return -1;
 }
 
+static void drawTouchSlotFeedback(
+    int8_t slot) {
+  if (!displayReady ||
+      slot < 0 ||
+      slot >= MENU_SLOT_COUNT) {
+    return;
+  }
+
+  const int statusY =
+      TFT_HEIGHT -
+      MENU_STATUS_HEIGHT;
+
+  const int marginX = 10;
+  const int marginY = 6;
+  const int gapX = 6;
+  const int gapY = 4;
+
+  const int cellW =
+      (TFT_WIDTH -
+       marginX * 2 -
+       gapX * 3) /
+      4;
+
+  const int cellH =
+      (statusY -
+       marginY * 2 -
+       gapY) /
+      2;
+
+  const int col =
+      slot % 4;
+
+  const int row =
+      slot / 4;
+
+  const int x =
+      marginX +
+      col *
+          (cellW + gapX);
+
+  const int y =
+      marginY +
+      row *
+          (cellH + gapY);
+
+  // A bright double border is visible on both empty K1-K8 fallback cells and
+  // user artwork. It is cleared by re-rendering the menu on TOUCH UP.
+  tft->drawRect(
+      x,
+      y,
+      cellW,
+      cellH,
+      0xFFFF);
+
+  tft->drawRect(
+      x + 1,
+      y + 1,
+      cellW - 2,
+      cellH - 2,
+      0xFFFF);
+
+  touchFeedbackSlot =
+      slot;
+}
+
 static bool emitTouchAction(
     uint8_t slot) {
   if (slot >= MENU_SLOT_COUNT) {
@@ -11002,6 +11068,7 @@ static void initTouch() {
   touchStablePressed = false;
   touchWakeOnly = false;
   touchHeldFallbackSlot = -1;
+  touchFeedbackSlot = -1;
   touchChangedAt = millis();
   touchLastPollAt = 0;
 }
@@ -11096,6 +11163,8 @@ static void pollTouch() {
         cdcPrintln(out);
 
         if (slot >= 0) {
+          drawTouchSlotFeedback(
+              slot);
           const uint8_t touchedSlot =
               static_cast<uint8_t>(
                   slot);
@@ -11113,6 +11182,11 @@ static void pollTouch() {
     } else {
       if (!touchWakeOnly) {
         releaseTouchFallbackKey();
+
+        if (touchFeedbackSlot >= 0) {
+          touchFeedbackSlot = -1;
+          renderMainMenu();
+        }
 
         cdcPrintln(
             "TOUCH|UP");
