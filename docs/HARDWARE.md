@@ -363,3 +363,13 @@ PXQ delta frames are assembled in the 480x320 PSRAM framebuffer and transferred
 to the TFT only after the complete frame is ready. PXQ and direct-GIF playback
 also use frame-start deadlines so decode and TFT transfer time is not added to
 the requested frame delay.
+
+
+## 1.10.6 persistent-media and touch fixes
+
+- LittleFS now mounts the custom `spiffs` partition by explicit label.
+- `FSINFO` reports storage readiness, free space, active-profile background/icon state, saver state and firmware version.
+- `FSREPAIR` can re-mount/format only when storage is not ready.
+- Direct GIF replacement checks free space after deleting the old screensaver, preventing false `NO_SPACE`.
+- Resistive-touch pressure detection accepts both divider polarities used by MCUFRIEND-compatible clone panels.
+- USB boot diagnostics report the real `FW_VERSION`.
