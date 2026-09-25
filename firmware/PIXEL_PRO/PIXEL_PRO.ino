@@ -41,22 +41,7 @@
 USBCDC USBSerial;
 #endif
 
-extern const char PIXEL_FACTORY_MENU_B64_0[];
-extern const char PIXEL_FACTORY_MENU_B64_1[];
-extern const char PIXEL_FACTORY_MENU_B64_2[];
-extern const char PIXEL_FACTORY_MENU_B64_3[];
-extern const char PIXEL_FACTORY_MENU_B64_4[];
-extern const char PIXEL_FACTORY_MENU_B64_5[];
-extern const size_t PIXEL_FACTORY_MENU_B64_0_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_1_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_2_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_3_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_4_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
-
-static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
-
-static constexpr char FW_VERSION[] = "1.10.8";
+static constexpr char FW_VERSION[] = "1.10.9";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -99,13 +84,8 @@ static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 0;
 
-// Firmware-resident fallback visuals. Main Menu uses the compiled red/orange
-// dune JPEG. The default screensaver renders the same dune visual language as
-// a smooth animated RGB565 scene, so it consumes no LittleFS space and cannot
-// be deleted by media commands. User uploads always take precedence.
-static constexpr uint8_t DEFAULT_SAVER_FPS = 20;
-static constexpr uint32_t DEFAULT_SAVER_FRAME_MS =
-    1000UL / DEFAULT_SAVER_FPS;
+// PIXEL PRO has no firmware-resident Main Menu background or screensaver.
+// User-uploaded assets are the only persistent visual media.
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -293,12 +273,6 @@ struct KeyState {
   bool rawPressed;
   bool stablePressed;
   uint32_t changedAt;
-};
-
-struct DefaultVisualRgb {
-  uint8_t r;
-  uint8_t g;
-  uint8_t b;
 };
 
 struct __attribute__((packed)) TouchCalibration {
@@ -767,9 +741,6 @@ static float gifScaleX = 1.0f;
 static float gifScaleY = 1.0f;
 static float gifOffsetX = 0.0f;
 static float gifOffsetY = 0.0f;
-
-static bool saverUsingDefault = false;
-static uint32_t defaultSaverNextFrameAt = 0;
 
 static void stopSaver();
 static void clearSaverBuffer();
@@ -2033,601 +2004,6 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
   return 1;
 }
 
-static uint16_t defaultVisualRgb565(
-    const DefaultVisualRgb &color) {
-  return static_cast<uint16_t>(
-      ((static_cast<uint16_t>(color.r) & 0xF8) << 8) |
-      ((static_cast<uint16_t>(color.g) & 0xFC) << 3) |
-      (static_cast<uint16_t>(color.b) >> 3));
-}
-
-static DefaultVisualRgb defaultVisualMix(
-    const DefaultVisualRgb &a,
-    const DefaultVisualRgb &b,
-    uint16_t amount) {
-  amount =
-      amount > 255
-          ? 255
-          : amount;
-
-  uint16_t inverse =
-      static_cast<uint16_t>(
-          255 - amount);
-
-  DefaultVisualRgb out = {
-      static_cast<uint8_t>(
-          (static_cast<uint16_t>(a.r) * inverse +
-           static_cast<uint16_t>(b.r) * amount +
-           127) /
-          255),
-      static_cast<uint8_t>(
-          (static_cast<uint16_t>(a.g) * inverse +
-           static_cast<uint16_t>(b.g) * amount +
-           127) /
-          255),
-      static_cast<uint8_t>(
-          (static_cast<uint16_t>(a.b) * inverse +
-           static_cast<uint16_t>(b.b) * amount +
-           127) /
-          255)
-  };
-
-  return out;
-}
-
-static uint8_t defaultVisualEdgeGlow(
-    int distance) {
-  if (distance <= 0) {
-    return 188;
-  }
-
-  if (distance == 1) {
-    return 146;
-  }
-
-  if (distance == 2) {
-    return 92;
-  }
-
-  if (distance == 3) {
-    return 42;
-  }
-
-  return 0;
-}
-
-static void renderDefaultVisual(
-    uint32_t now,
-    bool animated) {
-  if (!displayReady) {
-    return;
-  }
-
-  // Warm dune palette derived from the factory Main Menu JPEG:
-  // dark crimson sky, amber horizon, red middle dunes and near-black foreground.
-  static constexpr DefaultVisualRgb SKY_TOP = {
-      36,
-      3,
-      8
-  };
-
-  static constexpr DefaultVisualRgb SKY_MIDDLE = {
-      126,
-      13,
-      14
-  };
-
-  static constexpr DefaultVisualRgb HORIZON = {
-      255,
-      137,
-      31
-  };
-
-  static constexpr DefaultVisualRgb HORIZON_WHITE = {
-      255,
-      218,
-      132
-  };
-
-  static constexpr DefaultVisualRgb DUNE_BACK_TOP = {
-      164,
-      31,
-      18
-  };
-
-  static constexpr DefaultVisualRgb DUNE_BACK_BOTTOM = {
-      82,
-      6,
-      10
-  };
-
-  static constexpr DefaultVisualRgb DUNE_MID_TOP = {
-      126,
-      11,
-      13
-  };
-
-  static constexpr DefaultVisualRgb DUNE_MID_BOTTOM = {
-      48,
-      3,
-      8
-  };
-
-  static constexpr DefaultVisualRgb DUNE_FRONT_TOP = {
-      69,
-      5,
-      10
-  };
-
-  static constexpr DefaultVisualRgb DUNE_FRONT_BOTTOM = {
-      13,
-      1,
-      5
-  };
-
-  static constexpr DefaultVisualRgb EDGE_GLOW = {
-      255,
-      104,
-      18
-  };
-
-  static constexpr DefaultVisualRgb EDGE_HOT = {
-      255,
-      190,
-      69
-  };
-
-  static int16_t ridge0[TFT_WIDTH] = {};
-  static int16_t ridge1[TFT_WIDTH] = {};
-  static int16_t ridge2[TFT_WIDTH] = {};
-  static uint16_t line[TFT_WIDTH] = {};
-
-  float phase =
-      animated
-          ? static_cast<float>(now) *
-                0.00072f
-          : 0.64f;
-
-  // Three independently drifting dune ridges create subtle parallax without
-  // changing the identity of the factory artwork.
-  for (int x = 0;
-       x < TFT_WIDTH;
-       ++x) {
-    float fx =
-        static_cast<float>(x);
-
-    int r0 =
-        160 +
-        static_cast<int>(
-            sinf(
-                fx * 0.0092f +
-                phase * 0.52f +
-                0.55f) *
-            22.0f) +
-        static_cast<int>(
-            sinf(
-                fx * 0.0185f -
-                phase * 0.23f +
-                1.8f) *
-            8.0f);
-
-    int r1 =
-        214 +
-        static_cast<int>(
-            sinf(
-                fx * 0.0084f -
-                phase * 0.46f +
-                1.65f) *
-            27.0f) +
-        static_cast<int>(
-            sinf(
-                fx * 0.0170f +
-                phase * 0.29f +
-                0.25f) *
-            9.0f);
-
-    int r2 =
-        270 +
-        static_cast<int>(
-            sinf(
-                fx * 0.0077f +
-                phase * 0.38f +
-                2.75f) *
-            25.0f) +
-        static_cast<int>(
-            sinf(
-                fx * 0.0152f -
-                phase * 0.31f +
-                0.9f) *
-            8.0f);
-
-    r0 =
-        constrain(
-            r0,
-            126,
-            194);
-
-    r1 =
-        constrain(
-            max(
-                r1,
-                r0 + 34),
-            r0 + 34,
-            256);
-
-    r2 =
-        constrain(
-            max(
-                r2,
-                r1 + 34),
-            r1 + 34,
-            315);
-
-    ridge0[x] =
-        static_cast<int16_t>(r0);
-
-    ridge1[x] =
-        static_cast<int16_t>(r1);
-
-    ridge2[x] =
-        static_cast<int16_t>(r2);
-  }
-
-  int glowX =
-      332 +
-      static_cast<int>(
-          sinf(
-              phase * 0.41f) *
-          30.0f);
-
-  int glowY =
-      145 +
-      static_cast<int>(
-          cosf(
-              phase * 0.35f) *
-          5.0f);
-
-  for (int y = 0;
-       y < TFT_HEIGHT;
-       ++y) {
-    for (int x = 0;
-         x < TFT_WIDTH;
-         ++x) {
-      int r0 =
-          ridge0[x];
-
-      int r1 =
-          ridge1[x];
-
-      int r2 =
-          ridge2[x];
-
-      DefaultVisualRgb color;
-
-      if (y < r0) {
-        uint16_t skyAmount =
-            static_cast<uint16_t>(
-                constrain(
-                    (y * 255) /
-                        max(
-                            1,
-                            r0),
-                    0,
-                    255));
-
-        color =
-            defaultVisualMix(
-                SKY_TOP,
-                SKY_MIDDLE,
-                skyAmount);
-
-        // Warm horizon bloom centered slightly right, matching the selected
-        // Main Menu dune artwork.
-        int dx =
-            abs(
-                x -
-                glowX);
-
-        int dy =
-            abs(
-                y -
-                glowY);
-
-        int bloom =
-            232 -
-            dx / 2 -
-            dy * 2;
-
-        if (bloom > 0) {
-          color =
-              defaultVisualMix(
-                  color,
-                  HORIZON,
-                  static_cast<uint16_t>(
-                      min(
-                          bloom,
-                          196)));
-        }
-
-        int core =
-            104 -
-            dx -
-            dy * 2;
-
-        if (core > 0) {
-          color =
-              defaultVisualMix(
-                  color,
-                  HORIZON_WHITE,
-                  static_cast<uint16_t>(
-                      min(
-                          core,
-                          116)));
-        }
-      } else if (y < r1) {
-        uint16_t amount =
-            static_cast<uint16_t>(
-                constrain(
-                    ((y - r0) * 255) /
-                        max(
-                            1,
-                            r1 - r0),
-                    0,
-                    255));
-
-        color =
-            defaultVisualMix(
-                DUNE_BACK_TOP,
-                DUNE_BACK_BOTTOM,
-                amount);
-
-        int light =
-            92 -
-            abs(
-                x -
-                glowX) /
-                4;
-
-        if (light > 0) {
-          color =
-              defaultVisualMix(
-                  color,
-                  HORIZON,
-                  static_cast<uint16_t>(
-                      min(
-                          light,
-                          72)));
-        }
-      } else if (y < r2) {
-        uint16_t amount =
-            static_cast<uint16_t>(
-                constrain(
-                    ((y - r1) * 255) /
-                        max(
-                            1,
-                            r2 - r1),
-                    0,
-                    255));
-
-        color =
-            defaultVisualMix(
-                DUNE_MID_TOP,
-                DUNE_MID_BOTTOM,
-                amount);
-
-        int light =
-            70 -
-            abs(
-                x -
-                (glowX - 70)) /
-                5;
-
-        if (light > 0) {
-          color =
-              defaultVisualMix(
-                  color,
-                  EDGE_GLOW,
-                  static_cast<uint16_t>(
-                      min(
-                          light,
-                          48)));
-        }
-      } else {
-        uint16_t amount =
-            static_cast<uint16_t>(
-                constrain(
-                    ((y - r2) * 255) /
-                        max(
-                            1,
-                            TFT_HEIGHT -
-                            r2 -
-                            1),
-                    0,
-                    255));
-
-        color =
-            defaultVisualMix(
-                DUNE_FRONT_TOP,
-                DUNE_FRONT_BOTTOM,
-                amount);
-      }
-
-      uint8_t edgeGlow = 0;
-
-      int d0 =
-          abs(
-              y -
-              r0);
-
-      int d1 =
-          abs(
-              y -
-              r1);
-
-      int d2 =
-          abs(
-              y -
-              r2);
-
-      edgeGlow =
-          max(
-              edgeGlow,
-              defaultVisualEdgeGlow(
-                  d0));
-
-      edgeGlow =
-          max(
-              edgeGlow,
-              defaultVisualEdgeGlow(
-                  d1));
-
-      edgeGlow =
-          max(
-              edgeGlow,
-              defaultVisualEdgeGlow(
-                  d2));
-
-      if (edgeGlow > 0) {
-        DefaultVisualRgb edge =
-            d0 <= 1
-                ? EDGE_HOT
-                : EDGE_GLOW;
-
-        color =
-            defaultVisualMix(
-                color,
-                edge,
-                edgeGlow);
-      }
-
-      line[x] =
-          defaultVisualRgb565(
-              color);
-    }
-
-    tft->draw16bitRGBBitmap(
-        0,
-        y,
-        line,
-        TFT_WIDTH,
-        1);
-  }
-}
-
-static bool renderFactoryMenuJpeg() {
-  if (!displayReady) {
-    return false;
-  }
-
-  const char *chunks[] = {
-      PIXEL_FACTORY_MENU_B64_0,
-      PIXEL_FACTORY_MENU_B64_1,
-      PIXEL_FACTORY_MENU_B64_2,
-      PIXEL_FACTORY_MENU_B64_3,
-      PIXEL_FACTORY_MENU_B64_4,
-      PIXEL_FACTORY_MENU_B64_5
-  };
-
-  const size_t chunkLengths[] = {
-      PIXEL_FACTORY_MENU_B64_0_LEN,
-      PIXEL_FACTORY_MENU_B64_1_LEN,
-      PIXEL_FACTORY_MENU_B64_2_LEN,
-      PIXEL_FACTORY_MENU_B64_3_LEN,
-      PIXEL_FACTORY_MENU_B64_4_LEN,
-      PIXEL_FACTORY_MENU_B64_5_LEN
-  };
-
-  size_t encodedSize = 0;
-  for (size_t i = 0;
-       i < sizeof(chunkLengths) / sizeof(chunkLengths[0]);
-       ++i) {
-    encodedSize += chunkLengths[i];
-  }
-
-  char *encoded =
-      static_cast<char *>(
-          malloc(encodedSize));
-
-  uint8_t *jpegBytes =
-      static_cast<uint8_t *>(
-          malloc(PIXEL_FACTORY_MENU_JPEG_SIZE));
-
-  if (encoded == nullptr ||
-      jpegBytes == nullptr) {
-    free(encoded);
-    free(jpegBytes);
-    return false;
-  }
-
-  size_t encodedOffset = 0;
-  for (size_t i = 0;
-       i < sizeof(chunkLengths) / sizeof(chunkLengths[0]);
-       ++i) {
-    memcpy(
-        encoded + encodedOffset,
-        chunks[i],
-        chunkLengths[i]);
-
-    encodedOffset +=
-        chunkLengths[i];
-  }
-
-  size_t decodedSize = 0;
-  int decodeStatus =
-      mbedtls_base64_decode(
-          jpegBytes,
-          PIXEL_FACTORY_MENU_JPEG_SIZE,
-          &decodedSize,
-          reinterpret_cast<const unsigned char *>(
-              encoded),
-          encodedSize);
-
-  free(encoded);
-
-  if (decodeStatus != 0 ||
-      decodedSize != PIXEL_FACTORY_MENU_JPEG_SIZE) {
-    free(jpegBytes);
-    return false;
-  }
-
-  JPEGDEC decoder;
-
-  if (!decoder.openRAM(
-          jpegBytes,
-          static_cast<int>(
-              decodedSize),
-          mainMenuJpegDraw) ||
-      decoder.getWidth() != TFT_WIDTH ||
-      decoder.getHeight() != TFT_HEIGHT) {
-    decoder.close();
-    free(jpegBytes);
-    return false;
-  }
-
-  tft->fillScreen(
-      RGB565_BLACK);
-
-  int result =
-      decoder.decode(
-          0,
-          0,
-          0);
-
-  decoder.close();
-  free(jpegBytes);
-
-  return result != 0;
-}
-
-static void renderFactoryMenuFallback() {
-  if (!renderFactoryMenuJpeg()) {
-    // Keep the procedural visual as a final emergency fallback only.
-    renderDefaultVisual(
-        0,
-        false);
-  }
-}
-
 static bool renderMainMenuBackground(
     uint8_t profile) {
   if (profile >= PROFILE_COUNT) {
@@ -2643,7 +2019,8 @@ static bool renderMainMenuBackground(
 
   if (!littleFsReady ||
       !LittleFS.exists(path)) {
-    renderFactoryMenuFallback();
+    tft->fillScreen(
+        RGB565_BLACK);
     return true;
   }
 
@@ -2653,7 +2030,8 @@ static bool renderMainMenuBackground(
           "r");
 
   if (!file) {
-    renderFactoryMenuFallback();
+    tft->fillScreen(
+        RGB565_BLACK);
     return true;
   }
 
@@ -2665,7 +2043,8 @@ static bool renderMainMenuBackground(
       decoder.getHeight() != TFT_HEIGHT) {
     decoder.close();
     file.close();
-    renderFactoryMenuFallback();
+    tft->fillScreen(
+        RGB565_BLACK);
     return true;
   }
 
@@ -2681,7 +2060,8 @@ static bool renderMainMenuBackground(
   file.close();
 
   if (result == 0) {
-    renderFactoryMenuFallback();
+    tft->fillScreen(
+        RGB565_BLACK);
     return true;
   }
 
@@ -5039,7 +4419,6 @@ static bool beginGifUpload(
   saverHeight = height;
   saverFormat = SAVER_GIF;
   saverUploading = true;
-  saverUsingDefault = false;
   saverReady = false;
   saverActive = false;
 
@@ -5734,7 +5113,6 @@ static bool beginPackedUpload(
 
   saverUploading =
       true;
-  saverUsingDefault = false;
 
   saverReady =
       false;
@@ -6564,7 +5942,6 @@ static bool beginJpegUpload(
   saverFormat =
       SAVER_JPEG;
   saverUploading = true;
-  saverUsingDefault = false;
   saverReady = false;
   saverActive = false;
 
@@ -6745,25 +6122,7 @@ static bool loadPersistedJpeg() {
   return true;
 }
 
-static void activateDefaultSaver() {
-  saverUsingDefault = true;
-  saverFormat = SAVER_NONE;
-  saverWidth = TFT_WIDTH;
-  saverHeight = TFT_HEIGHT;
-  saverDataBytes = 0;
-  saverFrameBytes = 0;
-  saverBytesReceived = 0;
-  saverFrameCount = 0;
-  saverUploading = false;
-  saverReady = true;
-  saverActive = false;
-  saverFrameIndex = 0;
-  saverFrameStartedAt = 0;
-  defaultSaverNextFrameAt = 0;
-}
-
 static void loadPersistedMedia() {
-  saverUsingDefault = false;
   saverReady = false;
 
   if (loadPersistedPacked()) {
@@ -6776,9 +6135,6 @@ static void loadPersistedMedia() {
 
   loadPersistedGif();
 
-  if (!saverReady) {
-    activateDefaultSaver();
-  }
 }
 
 static void clearSaverBuffer() {
@@ -6849,8 +6205,6 @@ static void clearSaverBuffer() {
 
   memset(saverDurations, 0, sizeof(saverDurations));
 
-  // Clearing user media must never remove the firmware-owned fallback.
-  activateDefaultSaver();
 }
 
 static void initDisplay() {
@@ -6966,22 +6320,6 @@ static void startSaverNow() {
     return;
   }
 
-  if (saverUsingDefault) {
-    saverActive = true;
-    saverFrameIndex = 0;
-    saverFrameStartedAt = millis();
-
-    renderDefaultVisual(
-        saverFrameStartedAt,
-        true);
-
-    defaultSaverNextFrameAt =
-        saverFrameStartedAt +
-        DEFAULT_SAVER_FRAME_MS;
-
-    return;
-  }
-
   if (saverFormat == SAVER_PACKED) {
     if (!openPackedPlayback()) {
       saverReady = false;
@@ -7074,22 +6412,6 @@ static void pollSaver() {
   }
 
   if (!saverReady) {
-    return;
-  }
-
-  if (saverUsingDefault) {
-    if (static_cast<int32_t>(
-            now -
-            defaultSaverNextFrameAt) >= 0) {
-      renderDefaultVisual(
-          now,
-          true);
-
-      defaultSaverNextFrameAt =
-          now +
-          DEFAULT_SAVER_FRAME_MS;
-    }
-
     return;
   }
 
@@ -7231,7 +6553,6 @@ static bool beginSaverUpload(
   memset(saverData, 0, saverDataBytes);
   saverBytesReceived = 0;
   saverUploading = true;
-  saverUsingDefault = false;
   saverReady = false;
   saverActive = false;
 
@@ -8083,8 +7404,7 @@ static void handleCommand(String command) {
         littleFsReady &&
         LittleFS.exists(path);
 
-    size_t bytes =
-        PIXEL_FACTORY_MENU_JPEG_SIZE;
+    size_t bytes = 0;
 
     if (custom) {
       File file =
@@ -8095,12 +7415,9 @@ static void handleCommand(String command) {
       if (file) {
         bytes =
             file.size();
-
         file.close();
       } else {
         custom = false;
-        bytes =
-            PIXEL_FACTORY_MENU_JPEG_SIZE;
       }
     }
 
@@ -8113,13 +7430,19 @@ static void handleCommand(String command) {
         static_cast<unsigned>(profile),
         custom
             ? "CUSTOM"
-            : "FACTORY",
+            : "EMPTY",
         custom
             ? "USER_JPEG"
-            : "DUNE_RED_ORANGE",
+            : "NONE",
         static_cast<unsigned long>(bytes),
-        static_cast<unsigned>(TFT_WIDTH),
-        static_cast<unsigned>(TFT_HEIGHT));
+        static_cast<unsigned>(
+            custom
+                ? TFT_WIDTH
+                : 0),
+        static_cast<unsigned>(
+            custom
+                ? TFT_HEIGHT
+                : 0));
 
     cdcPrintln(out);
     return;
@@ -8399,9 +7722,9 @@ static void handleCommand(String command) {
         static_cast<unsigned long>(used),
         static_cast<unsigned long>(freeBytes),
         static_cast<unsigned>(activeProfile),
-        customBackground ? "CUSTOM" : "FACTORY",
+        customBackground ? "CUSTOM" : "EMPTY",
         static_cast<unsigned>(iconMask),
-        saverUsingDefault ? "DEFAULT" : (saverReady ? "CUSTOM" : "EMPTY"),
+        saverReady ? "CUSTOM" : "EMPTY",
         FW_VERSION);
 
     cdcPrintln(out);
@@ -8482,11 +7805,6 @@ static void handleCommand(String command) {
       return;
     }
 
-    if (saverUsingDefault) {
-      cdcPrintln(
-          "SAVMEDIA|STATE=READY|KIND=DEFAULT|FORMAT=0|DEFAULT=1|ASSET=DUNE_RED_ORANGE_ANIM|NAME=UElYRUwgUFJPIEZhY3RvcnkgRHVuZSBBbmltYXRpb24=|BYTES=0|W=480|H=320|FPS=20|DUR=0|THUMB=0");
-      return;
-    }
 
     String kind =
         preferences.getString(
@@ -11397,7 +10715,9 @@ void setup() {
     recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
-    activateDefaultSaver();
+    saverReady = false;
+    saverActive = false;
+    saverFormat = SAVER_NONE;
   }
 
   showStage(0x07E0, "3 FLASH / MEDIA");
@@ -11492,9 +10812,9 @@ void setup() {
     recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
-    // The factory visual is firmware-resident and remains available even
-    // when LittleFS cannot be mounted.
-    activateDefaultSaver();
+    saverReady = false;
+    saverActive = false;
+    saverFormat = SAVER_NONE;
   }
 
   renderMainMenu();
