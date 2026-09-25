@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.10.2**.
+Firmware: **1.10.3**.
 
 All controller pins below use the board silk-screen names **Dxx**. Do not convert
 this document to raw ESP32 pin naming when wiring.
@@ -123,7 +123,7 @@ Firmware 1.10.0 uses the controller ID measured directly from the user's panel.
 The diagnostic read returned `00 01 62 83 57 FF` from register `0xBF`, which
 MCUFRIEND identifies as **0x8357 = HX8357-B**.
 
-Firmware 1.10.2 keeps the verified **HX8357-B / ID 0x8357** controller and no
+Firmware 1.10.3 keeps the verified **HX8357-B / ID 0x8357** controller and no
 longer uses Arduino_GFX's full HX8357-B voltage/timing table. This shield revision
 behaves like MCUFRIEND_kbv's 0x8357 path, which intentionally uses only the
 generic reset/pixel-format/sleep-out/display-on sequence plus REV_SCREEN polarity.
@@ -194,15 +194,20 @@ No additional touch pins are required. Touch shares four LCD wires. Firmware
 | XP / X+ | LCD_D6 | D39 |
 | YM / Y- | LCD_D7 | D40 |
 
-Shop calibration reproduced in firmware:
+Touch calibration reproduced in firmware:
 
-- tp.y: TS_RT = 136, TS_LEFT = 907
-- tp.x: TS_BOT = 139, TS_TOP = 942
-- landscape mapping inverts both axes after X/Y swap
+- XP = shield D6 -> S2 Mini D39
+- XM = shield A2/LCD_RS -> S2 Mini D14
+- YP = shield A1/LCD_WR -> S2 Mini D13
+- YM = shield D7 -> S2 Mini D40
+- tp.x calibrated range = TS_RT 136 .. TS_LEFT 907
+- tp.y calibrated range = TS_BOT 139 .. TS_TOP 942
+- landscape Orientation=1: X = map(tp.y, TS_TOP, TS_BOT, 0, 480)
+- landscape Orientation=1: Y = map(tp.x, TS_RT, TS_LEFT, 0, 320)
 - pressure window = 200..1000
 - X-plate resistance = 300 ohm
 
-Existing v1.9.9 touch calibration is automatically reset because v1.10.0 bumps the touch calibration storage version after correcting the raw-axis assignment.
+Firmware 1.10.3 bumps the touch-calibration storage version to 4 so older landscape calibration flags are automatically replaced.
 
 Firmware deselects the LCD before every touch measurement, samples the resistive
 panel, then restores the 8-bit LCD bus.

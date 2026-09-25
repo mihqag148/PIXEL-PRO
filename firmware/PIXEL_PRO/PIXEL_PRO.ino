@@ -56,7 +56,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.2";
+static constexpr char FW_VERSION[] = "1.10.3";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -97,7 +97,7 @@ static constexpr uint32_t MENU_ICON_ASSET_BYTES =
 static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
-static constexpr uint8_t MENU_STATUS_HEIGHT = 50;
+static constexpr uint8_t MENU_STATUS_HEIGHT = 0;
 
 // Firmware-resident fallback visuals. Main Menu uses the compiled red/orange
 // dune JPEG. The default screensaver renders the same dune visual language as
@@ -233,26 +233,27 @@ static constexpr uint16_t TOUCH_ADC_MAX = 1023;
 static constexpr uint16_t TOUCH_PRESSURE_MIN = 200;
 static constexpr uint16_t TOUCH_PRESSURE_MAX = 1000;
 static constexpr uint16_t TOUCH_RXPLATE_OHMS = 300;
-static constexpr uint16_t TOUCH_X_MIN_DEFAULT = 139;  // tp.x shop TS_BOT
-static constexpr uint16_t TOUCH_X_MAX_DEFAULT = 942;  // tp.x shop TS_TOP
-static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 136;  // tp.y shop TS_RT
-static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 907;  // tp.y shop TS_LEFT
+// rawX is TouchScreen.h tp.x (sampled on YP); rawY is tp.y (sampled on XM).
+// Keep the calibrated edge pairs with their real raw axes.
+static constexpr uint16_t TOUCH_X_MIN_DEFAULT = 136;  // tp.x TS_RT
+static constexpr uint16_t TOUCH_X_MAX_DEFAULT = 907;  // tp.x TS_LEFT
+static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 139;  // tp.y TS_BOT
+static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // tp.y TS_TOP
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
 static constexpr uint32_t TOUCH_POLL_MS = 24;
 static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
-static constexpr uint8_t TOUCH_CAL_VERSION = 3;
+static constexpr uint8_t TOUCH_CAL_VERSION = 4;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
-// HX8357-B native memory is 320x480 and is rotated to 480x320 landscape (rotation 1).
-// Shop sketch Orientation=1 maps:
- //   screen X = map(tp.y, TS_LEFT=907, TS_RT=136, 0, 480)
- //   screen Y = map(tp.x, TS_TOP=942, TS_BOT=139, 0, 320)
- // Both raw axes therefore run opposite to screen direction after swapping.
+// HX8357-B native memory is 320x480 and is rotated to 480x320 landscape.
+// MCUFRIEND Touch_shield_new Orientation=1 maps:
+//   screen X = map(tp.y, TS_TOP, TS_BOT, 0, 480)
+//   screen Y = map(tp.x, TS_RT, TS_LEFT, 0, 320)
+// With the calibrated ranges above that is swap X/Y + invert screen X only.
 static constexpr uint8_t TOUCH_DEFAULT_FLAGS =
     TOUCH_FLAG_SWAP_XY |
-    TOUCH_FLAG_INVERT_X |
-    TOUCH_FLAG_INVERT_Y;
+    TOUCH_FLAG_INVERT_X;
 
 struct __attribute__((packed)) ModuleFrame {
   uint8_t magic;
@@ -3093,6 +3094,11 @@ static void drawDockSettings(
 }
 
 static void renderMainMenuStatusBar() {
+  // 1.10.3: the previous four OS-style dock glyphs were decorative only and
+  // could not be pressed. Keep this hook as a no-op for existing callers so
+  // every visible Main Menu item is now one of the eight real touch slots.
+  return;
+
   if (!displayReady ||
       saverActive) {
     return;
@@ -10169,7 +10175,10 @@ static bool readTouchRaw(
   digitalWrite(TFT_CS, HIGH);
 
   // TouchScreen.h X read:
-  // YP/YM Hi-Z, XP=HIGH, XM=LOW, sample YP, then invert 10-bit ADC.
+  // YP/YM Hi-Z with pull-ups disabled, XP=HIGH, XM=LOW, sample YP,
+  // then invert the 10-bit ADC.
+  digitalWrite(TOUCH_YP_PIN, LOW);
+  digitalWrite(TOUCH_YM_PIN, LOW);
   pinMode(TOUCH_YP_PIN, INPUT);
   pinMode(TOUCH_YM_PIN, INPUT);
   pinMode(TOUCH_XP_PIN, OUTPUT);
@@ -10185,7 +10194,10 @@ static bool readTouchRaw(
               TOUCH_YP_PIN));
 
   // TouchScreen.h Y read:
-  // XP/XM Hi-Z, YP=HIGH, YM=LOW, sample XM, then invert 10-bit ADC.
+  // XP/XM Hi-Z with pull-ups disabled, YP=HIGH, YM=LOW, sample XM,
+  // then invert the 10-bit ADC.
+  digitalWrite(TOUCH_XP_PIN, LOW);
+  digitalWrite(TOUCH_XM_PIN, LOW);
   pinMode(TOUCH_XP_PIN, INPUT);
   pinMode(TOUCH_XM_PIN, INPUT);
   pinMode(TOUCH_YP_PIN, OUTPUT);
@@ -10206,6 +10218,9 @@ static bool readTouchRaw(
   digitalWrite(TOUCH_XP_PIN, LOW);
   pinMode(TOUCH_YM_PIN, OUTPUT);
   digitalWrite(TOUCH_YM_PIN, HIGH);
+  // Explicit LOW before INPUT disables ESP32 pull-ups on these shared lines.
+  digitalWrite(TOUCH_XM_PIN, LOW);
+  digitalWrite(TOUCH_YP_PIN, LOW);
   pinMode(TOUCH_XM_PIN, INPUT);
   pinMode(TOUCH_YP_PIN, INPUT);
   delayMicroseconds(24);
