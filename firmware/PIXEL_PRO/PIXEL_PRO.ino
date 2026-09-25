@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.11";
+static constexpr char FW_VERSION[] = "1.10.12";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -1771,6 +1771,86 @@ static uint8_t currentLayer() {
 }
 
 
+static bool saveMainMenuConfig();
+
+static uint8_t effectiveMainMenuAction(
+    uint8_t profile,
+    uint8_t slot) {
+  if (profile >= PROFILE_COUNT ||
+      slot >= MENU_SLOT_COUNT) {
+    return 0;
+  }
+
+  const uint8_t stored =
+      mainMenuConfig
+          .actions[profile][slot];
+
+  if (stored > 0 &&
+      stored <= ACTION_COUNT) {
+    return stored;
+  }
+
+  // If the dedicated menu map was erased but the keymap survived, use the
+  // layer-0 Action binding for the same physical key. This keeps the screen
+  // and touch action functional without inventing a factory visual.
+  const KeyBinding &binding =
+      keymap[profile][0][slot];
+
+  if (binding.type == BIND_ACTION &&
+      binding.keyCode >= 1 &&
+      binding.keyCode <= ACTION_COUNT) {
+    return binding.keyCode;
+  }
+
+  return 0;
+}
+
+static bool recoverMainMenuActionsFromKeymap() {
+  bool changed = false;
+
+  for (uint8_t profile = 0;
+       profile < PROFILE_COUNT;
+       ++profile) {
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
+      if (mainMenuConfig.actions[profile][slot] != 0) {
+        continue;
+      }
+
+      const KeyBinding &binding =
+          keymap[profile][0][slot];
+
+      if (binding.type != BIND_ACTION ||
+          binding.keyCode < 1 ||
+          binding.keyCode > ACTION_COUNT) {
+        continue;
+      }
+
+      mainMenuConfig.actions[profile][slot] =
+          binding.keyCode;
+
+      if (mainMenuConfig.labels[profile][slot][0] == '\0') {
+        snprintf(
+            mainMenuConfig.labels[profile][slot],
+            MENU_LABEL_MAX_LEN + 1,
+            "A%02u",
+            static_cast<unsigned>(
+                binding.keyCode));
+      }
+
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return false;
+  }
+
+  return saveMainMenuConfig();
+}
+
+
 static void setDefaultMainMenuConfig() {
   memset(&mainMenuConfig, 0, sizeof(mainMenuConfig));
   mainMenuConfig.version = MENU_STORAGE_VERSION;
@@ -2941,8 +3021,9 @@ static void renderMainMenu() {
             iconY);
 
     uint8_t action =
-        mainMenuConfig
-            .actions[profile][slot];
+        effectiveMainMenuAction(
+            profile,
+            slot);
 
     if (drewIcon ||
         action > 0) {
@@ -3017,33 +3098,45 @@ static void renderMainMenu() {
   }
 
   if (!hasVisibleMenuItem) {
-    const char *title =
-        "MAIN MENU EMPTY";
+    // No factory background/screensaver is reintroduced. When persistent
+    // artwork/action metadata is genuinely empty, keep a usable 2x4 key grid
+    // instead of the previous MAIN MENU EMPTY error screen.
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
+      const int col =
+          slot % 4;
+      const int row =
+          slot / 4;
 
-    const char *hint =
-        "Connect LumiPad to sync";
+      const int x =
+          marginX +
+          col *
+              (cellW + gapX);
+      const int y =
+          marginY +
+          row *
+              (cellH + gapY);
 
-    tft->setTextSize(2);
-    tft->setTextColor(
-        0xFFFF);
+      char label[6] = {};
+      snprintf(
+          label,
+          sizeof(label),
+          "K%u",
+          static_cast<unsigned>(
+              slot + 1));
 
-    tft->setCursor(
-        156,
-        132);
-
-    tft->print(
-        title);
-
-    tft->setTextSize(1);
-    tft->setTextColor(
-        0xC618);
-
-    tft->setCursor(
-        174,
-        160);
-
-    tft->print(
-        hint);
+      tft->setTextSize(2);
+      tft->setTextColor(
+          0x7BEF);
+      tft->setCursor(
+          x +
+              (cellW - 24) / 2,
+          y +
+              (cellH - 16) / 2);
+      tft->print(
+          label);
+    }
   }
 
   renderMainMenuStatusBar();
@@ -10802,8 +10895,9 @@ static void emitTouchAction(
           : 0;
 
   const uint8_t action =
-      mainMenuConfig
-          .actions[profile][slot];
+      effectiveMainMenuAction(
+          profile,
+          slot);
 
   if (action == 0 ||
       action > ACTION_COUNT) {
@@ -11089,6 +11183,7 @@ void setup() {
       (void)saveMainMenuConfig();
     }
 
+    (void)recoverMainMenuActionsFromKeymap();
     recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
@@ -11191,6 +11286,7 @@ void setup() {
       (void)saveMainMenuConfig();
     }
 
+    (void)recoverMainMenuActionsFromKeymap();
     recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
