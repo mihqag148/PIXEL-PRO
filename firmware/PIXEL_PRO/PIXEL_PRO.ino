@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.14";
+static constexpr char FW_VERSION[] = "1.10.15";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -225,7 +225,7 @@ static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // tp.y TS_TOP
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
 static constexpr uint32_t TOUCH_POLL_MS = 24;
 static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
-static constexpr uint8_t TOUCH_CAL_VERSION = 4;
+static constexpr uint8_t TOUCH_CAL_VERSION = 5;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
@@ -600,6 +600,10 @@ static bool touchStablePressed = false;
 static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
 static int8_t touchFeedbackSlot = -1;
+static bool touchCalibrationMode = false;
+static uint8_t touchCalibrationPoint = 0;
+static uint16_t touchCalibrationRawX[4] = {};
+static uint16_t touchCalibrationRawY[4] = {};
 static uint32_t touchChangedAt = 0;
 static uint32_t touchLastPollAt = 0;
 static uint16_t touchRawX = 0;
@@ -758,6 +762,8 @@ static void stopSaver();
 static void clearSaverBuffer();
 static void closeJpegUploadFile();
 static void closePackedFiles();
+static void startAutomaticTouchCalibration();
+static void cancelAutomaticTouchCalibration();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -1772,6 +1778,10 @@ static uint8_t currentLayer() {
   return baseLayer;
 }
 
+
+static KeyBinding resolveBinding(
+    uint8_t layer,
+    uint8_t keyIndex);
 
 static bool saveMainMenuConfig();
 
@@ -2947,6 +2957,308 @@ static void renderMainMenuStatusBar() {
       tileY);
 }
 
+static const char *fallbackConsumerName(
+    uint16_t usage) {
+  switch (usage) {
+    case 0x00E9:
+      return "Volume +";
+    case 0x00EA:
+      return "Volume -";
+    case 0x00E2:
+      return "Mute";
+    case 0x00CD:
+      return "Play/Pause";
+    case 0x00B5:
+      return "Next";
+    case 0x00B6:
+      return "Previous";
+    case 0x00B7:
+      return "Stop";
+    default:
+      return nullptr;
+  }
+}
+
+static void fallbackKeyboardName(
+    uint8_t keyCode,
+    char *out,
+    size_t outSize) {
+  if (keyCode >= 0x04 &&
+      keyCode <= 0x1D) {
+    snprintf(
+        out,
+        outSize,
+        "%c",
+        static_cast<char>(
+            'A' +
+            keyCode -
+            0x04));
+    return;
+  }
+
+  if (keyCode >= 0x1E &&
+      keyCode <= 0x26) {
+    snprintf(
+        out,
+        outSize,
+        "%u",
+        static_cast<unsigned>(
+            keyCode -
+            0x1D));
+    return;
+  }
+
+  if (keyCode == 0x27) {
+    snprintf(
+        out,
+        outSize,
+        "0");
+    return;
+  }
+
+  if (keyCode >= 0x3A &&
+      keyCode <= 0x45) {
+    snprintf(
+        out,
+        outSize,
+        "F%u",
+        static_cast<unsigned>(
+            keyCode -
+            0x39));
+    return;
+  }
+
+  const char *name = nullptr;
+
+  switch (keyCode) {
+    case 0x28:
+      name = "Enter";
+      break;
+    case 0x29:
+      name = "Esc";
+      break;
+    case 0x2A:
+      name = "Backspace";
+      break;
+    case 0x2B:
+      name = "Tab";
+      break;
+    case 0x2C:
+      name = "Space";
+      break;
+    case 0x4A:
+      name = "Home";
+      break;
+    case 0x4B:
+      name = "Page Up";
+      break;
+    case 0x4D:
+      name = "End";
+      break;
+    case 0x4E:
+      name = "Page Down";
+      break;
+    case 0x4F:
+      name = "Right";
+      break;
+    case 0x50:
+      name = "Left";
+      break;
+    case 0x51:
+      name = "Down";
+      break;
+    case 0x52:
+      name = "Up";
+      break;
+    case 0x49:
+      name = "Insert";
+      break;
+    case 0x4C:
+      name = "Delete";
+      break;
+    default:
+      break;
+  }
+
+  if (name != nullptr) {
+    snprintf(
+        out,
+        outSize,
+        "%s",
+        name);
+    return;
+  }
+
+  snprintf(
+      out,
+      outSize,
+      "Key %02X",
+      static_cast<unsigned>(
+          keyCode));
+}
+
+static void fallbackBindingLabel(
+    uint8_t slot,
+    char *out,
+    size_t outSize) {
+  if (out == nullptr ||
+      outSize == 0 ||
+      slot >= KEY_COUNT) {
+    return;
+  }
+
+  const KeyBinding binding =
+      resolveBinding(
+          currentLayer(),
+          slot);
+
+  out[0] = '\0';
+
+  switch (binding.type) {
+    case BIND_KEYBOARD: {
+      char keyName[18] = {};
+      fallbackKeyboardName(
+          binding.keyCode,
+          keyName,
+          sizeof(keyName));
+
+      char mods[12] = {};
+
+      if ((binding.modifiers & 0x01U) != 0) {
+        strncat(
+            mods,
+            "Ctrl+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      if ((binding.modifiers & 0x02U) != 0) {
+        strncat(
+            mods,
+            "Shift+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      if ((binding.modifiers & 0x04U) != 0) {
+        strncat(
+            mods,
+            "Alt+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      if ((binding.modifiers & 0x08U) != 0) {
+        strncat(
+            mods,
+            "Win+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      snprintf(
+          out,
+          outSize,
+          "%s%s",
+          mods,
+          keyName);
+      break;
+    }
+
+    case BIND_CONSUMER: {
+      const char *name =
+          fallbackConsumerName(
+              binding.consumerCode);
+
+      if (name != nullptr) {
+        snprintf(
+            out,
+            outSize,
+            "%s",
+            name);
+      } else {
+        snprintf(
+            out,
+            outSize,
+            "Media %04X",
+            static_cast<unsigned>(
+                binding.consumerCode));
+      }
+      break;
+    }
+
+    case BIND_LAYER: {
+      const char *mode =
+          binding.modifiers ==
+                  LAYER_MO
+              ? "Hold"
+              : binding.modifiers ==
+                        LAYER_TG
+                    ? "Toggle"
+                    : "Layer";
+
+      snprintf(
+          out,
+          outSize,
+          "%s L%u",
+          mode,
+          static_cast<unsigned>(
+              binding.keyCode));
+      break;
+    }
+
+    case BIND_MACRO:
+      snprintf(
+          out,
+          outSize,
+          "Macro %u",
+          static_cast<unsigned>(
+              binding.keyCode + 1));
+      break;
+
+    case BIND_ACTION: {
+      const char *label =
+          mainMenuConfig
+              .labels[activeProfile][slot];
+
+      if (label[0] != '\0') {
+        snprintf(
+            out,
+            outSize,
+            "%s",
+            label);
+      } else {
+        snprintf(
+            out,
+            outSize,
+            "Action %u",
+            static_cast<unsigned>(
+                binding.keyCode));
+      }
+      break;
+    }
+
+    case BIND_TRANSPARENT:
+      snprintf(
+          out,
+          outSize,
+          "Transparent");
+      break;
+
+    case BIND_DISABLED:
+    default:
+      snprintf(
+          out,
+          outSize,
+          "Not assigned");
+      break;
+  }
+}
+
 static void renderMainMenu() {
   if (!displayReady ||
       saverActive) {
@@ -3100,9 +3412,8 @@ static void renderMainMenu() {
   }
 
   if (!hasVisibleMenuItem) {
-    // No factory background/screensaver is reintroduced. When persistent
-    // artwork/action metadata is genuinely empty, keep a usable 2x4 key grid
-    // instead of the previous MAIN MENU EMPTY error screen.
+    // If user artwork was erased, keep the display useful by reflecting the
+    // live keymap instead of showing eight anonymous K labels.
     for (uint8_t slot = 0;
          slot < MENU_SLOT_COUNT;
          ++slot) {
@@ -3120,24 +3431,61 @@ static void renderMainMenu() {
           row *
               (cellH + gapY);
 
-      char label[6] = {};
+      tft->drawRoundRect(
+          x + 3,
+          y + 3,
+          cellW - 6,
+          cellH - 6,
+          10,
+          0x7BEF);
+
+      char keyLabel[6] = {};
       snprintf(
-          label,
-          sizeof(label),
+          keyLabel,
+          sizeof(keyLabel),
           "K%u",
           static_cast<unsigned>(
               slot + 1));
 
-      tft->setTextSize(2);
+      tft->setTextSize(1);
       tft->setTextColor(
           0x7BEF);
       tft->setCursor(
-          x +
-              (cellW - 24) / 2,
-          y +
-              (cellH - 16) / 2);
+          x + 10,
+          y + 10);
       tft->print(
-          label);
+          keyLabel);
+
+      char bindingLabel[30] = {};
+      fallbackBindingLabel(
+          slot,
+          bindingLabel,
+          sizeof(bindingLabel));
+
+      size_t len =
+          strnlen(
+              bindingLabel,
+              sizeof(bindingLabel));
+
+      const int textWidth =
+          static_cast<int>(
+              len) *
+          6;
+
+      tft->setTextColor(
+          0xFFFF);
+      tft->setCursor(
+          x +
+              max(
+                  8,
+                  (cellW -
+                   textWidth) /
+                      2),
+          y +
+              (cellH - 8) /
+                  2);
+      tft->print(
+          bindingLabel);
     }
   }
 
@@ -7262,6 +7610,34 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "TOUCH_CAL_START") {
+    startAutomaticTouchCalibration();
+    cdcPrintln(
+        "OK|TOUCH_CAL_START");
+    return;
+  }
+
+  if (upper == "TOUCH_CAL_CANCEL") {
+    cancelAutomaticTouchCalibration();
+    cdcPrintln(
+        "OK|TOUCH_CAL_CANCEL");
+    return;
+  }
+
+  if (upper == "GET_TOUCH_CAL_STATE") {
+    char out[64] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "TOUCH_CAL_STATE|ACTIVE=%u|POINT=%u",
+        touchCalibrationMode ? 1U : 0U,
+        static_cast<unsigned>(
+            touchCalibrationPoint));
+    cdcPrintln(
+        out);
+    return;
+  }
+
   if (upper == "GET_TOUCH_RAW") {
     uint16_t rawX = 0;
     uint16_t rawY = 0;
@@ -10974,6 +11350,383 @@ static void drawTouchSlotFeedback(
       slot;
 }
 
+static void drawTouchCalibrationTarget() {
+  if (!displayReady ||
+      !touchCalibrationMode ||
+      touchCalibrationPoint >= 4) {
+    return;
+  }
+
+  static const int16_t targetX[4] = {
+      40,
+      TFT_WIDTH - 41,
+      TFT_WIDTH - 41,
+      40
+  };
+
+  static const int16_t targetY[4] = {
+      40,
+      40,
+      TFT_HEIGHT - 41,
+      TFT_HEIGHT - 41
+  };
+
+  const int16_t x =
+      targetX[touchCalibrationPoint];
+
+  const int16_t y =
+      targetY[touchCalibrationPoint];
+
+  tft->fillScreen(
+      RGB565_BLACK);
+
+  tft->setTextSize(2);
+  tft->setTextColor(
+      0xFFFF);
+
+  tft->setCursor(
+      118,
+      12);
+
+  tft->print(
+      "TOUCH CALIBRATION");
+
+  char step[32] = {};
+  snprintf(
+      step,
+      sizeof(step),
+      "Touch target %u / 4",
+      static_cast<unsigned>(
+          touchCalibrationPoint + 1));
+
+  tft->setTextSize(1);
+  tft->setCursor(
+      184,
+      38);
+  tft->print(
+      step);
+
+  tft->drawCircle(
+      x,
+      y,
+      14,
+      0xFFFF);
+  tft->drawCircle(
+      x,
+      y,
+      15,
+      0xFFFF);
+  tft->drawLine(
+      x - 24,
+      y,
+      x + 24,
+      y,
+      0xFFFF);
+  tft->drawLine(
+      x,
+      y - 24,
+      x,
+      y + 24,
+      0xFFFF);
+}
+
+static int32_t extrapolateTouchEdge(
+    int32_t rawA,
+    int32_t rawB,
+    int32_t screenA,
+    int32_t screenB,
+    int32_t screenValue) {
+  const int32_t span =
+      screenB -
+      screenA;
+
+  if (span == 0) {
+    return rawA;
+  }
+
+  const int64_t numerator =
+      static_cast<int64_t>(
+          rawB - rawA) *
+      static_cast<int64_t>(
+          screenValue - screenA);
+
+  int32_t value =
+      rawA +
+      static_cast<int32_t>(
+          numerator /
+          span);
+
+  return constrain(
+      value,
+      0,
+      static_cast<int32_t>(
+          TOUCH_ADC_MAX));
+}
+
+static bool setTouchRangeFromPair(
+    int32_t rawA,
+    int32_t rawB,
+    int32_t screenA,
+    int32_t screenB,
+    int32_t screenMax,
+    uint16_t &minimum,
+    uint16_t &maximum) {
+  const int32_t edge0 =
+      extrapolateTouchEdge(
+          rawA,
+          rawB,
+          screenA,
+          screenB,
+          0);
+
+  const int32_t edge1 =
+      extrapolateTouchEdge(
+          rawA,
+          rawB,
+          screenA,
+          screenB,
+          screenMax);
+
+  const int32_t low =
+      min(
+          edge0,
+          edge1);
+
+  const int32_t high =
+      max(
+          edge0,
+          edge1);
+
+  if (high - low <
+      TOUCH_CAL_MIN_SPAN) {
+    return false;
+  }
+
+  minimum =
+      static_cast<uint16_t>(
+          low);
+
+  maximum =
+      static_cast<uint16_t>(
+          high);
+
+  return true;
+}
+
+static bool finishAutomaticTouchCalibration() {
+  const int32_t leftX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[3])) /
+      2;
+
+  const int32_t rightX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[1]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[2])) /
+      2;
+
+  const int32_t topX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[1])) /
+      2;
+
+  const int32_t bottomX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[2]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[3])) /
+      2;
+
+  const int32_t leftY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[3])) /
+      2;
+
+  const int32_t rightY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[1]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[2])) /
+      2;
+
+  const int32_t topY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[1])) /
+      2;
+
+  const int32_t bottomY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[2]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[3])) /
+      2;
+
+  const int32_t horizontalX =
+      abs(
+          rightX -
+          leftX);
+
+  const int32_t horizontalY =
+      abs(
+          rightY -
+          leftY);
+
+  const bool swap =
+      horizontalY >
+      horizontalX;
+
+  TouchCalibration candidate = {};
+
+  uint16_t calibratedXMin = 0;
+  uint16_t calibratedXMax = 0;
+  uint16_t calibratedYMin = 0;
+  uint16_t calibratedYMax = 0;
+
+  bool xRangeOk = false;
+  bool yRangeOk = false;
+
+  uint8_t flags = 0;
+
+  if (!swap) {
+    xRangeOk =
+        setTouchRangeFromPair(
+            leftX,
+            rightX,
+            40,
+            TFT_WIDTH - 41,
+            TFT_WIDTH - 1,
+            calibratedXMin,
+            calibratedXMax);
+
+    yRangeOk =
+        setTouchRangeFromPair(
+            topY,
+            bottomY,
+            40,
+            TFT_HEIGHT - 41,
+            TFT_HEIGHT - 1,
+            calibratedYMin,
+            calibratedYMax);
+
+    if (rightX <
+        leftX) {
+      flags |=
+          TOUCH_FLAG_INVERT_X;
+    }
+
+    if (bottomY <
+        topY) {
+      flags |=
+          TOUCH_FLAG_INVERT_Y;
+    }
+  } else {
+    flags |=
+        TOUCH_FLAG_SWAP_XY;
+
+    xRangeOk =
+        setTouchRangeFromPair(
+            topX,
+            bottomX,
+            40,
+            TFT_HEIGHT - 41,
+            TFT_HEIGHT - 1,
+            calibratedXMin,
+            calibratedXMax);
+
+    yRangeOk =
+        setTouchRangeFromPair(
+            leftY,
+            rightY,
+            40,
+            TFT_WIDTH - 41,
+            TFT_WIDTH - 1,
+            calibratedYMin,
+            calibratedYMax);
+
+    if (rightY <
+        leftY) {
+      flags |=
+          TOUCH_FLAG_INVERT_X;
+    }
+
+    if (bottomX <
+        topX) {
+      flags |=
+          TOUCH_FLAG_INVERT_Y;
+    }
+  }
+
+  candidate.xMin =
+      calibratedXMin;
+  candidate.xMax =
+      calibratedXMax;
+  candidate.yMin =
+      calibratedYMin;
+  candidate.yMax =
+      calibratedYMax;
+  candidate.flags =
+      flags;
+
+  if (!xRangeOk ||
+      !yRangeOk ||
+      !touchCalibrationIsValid(
+          candidate)) {
+    return false;
+  }
+
+  touchCalibration =
+      candidate;
+
+  saveTouchCalibration();
+
+  return true;
+}
+
+static void startAutomaticTouchCalibration() {
+  touchCalibrationMode = true;
+  touchCalibrationPoint = 0;
+
+  memset(
+      touchCalibrationRawX,
+      0,
+      sizeof(
+          touchCalibrationRawX));
+
+  memset(
+      touchCalibrationRawY,
+      0,
+      sizeof(
+          touchCalibrationRawY));
+
+  touchRawPressed = false;
+  touchStablePressed = false;
+  touchChangedAt = millis();
+  touchWakeOnly = false;
+  touchHeldFallbackSlot = -1;
+  touchFeedbackSlot = -1;
+
+  stopSaver();
+  drawTouchCalibrationTarget();
+}
+
+static void cancelAutomaticTouchCalibration() {
+  touchCalibrationMode = false;
+  touchCalibrationPoint = 0;
+  touchRawPressed = false;
+  touchStablePressed = false;
+  touchChangedAt = millis();
+  renderMainMenu();
+}
+
 static bool emitTouchAction(
     uint8_t slot) {
   if (slot >= MENU_SLOT_COUNT) {
@@ -11105,11 +11858,13 @@ static void pollTouch() {
     touchRawY = rawY;
     touchPressure = pressure;
 
-    mapTouchCoordinates(
-        rawX,
-        rawY,
-        touchX,
-        touchY);
+    if (!touchCalibrationMode) {
+      mapTouchCoordinates(
+          rawX,
+          rawY,
+          touchX,
+          touchY);
+    }
   }
 
   if (pressed !=
@@ -11127,6 +11882,72 @@ static void pollTouch() {
           TOUCH_DEBOUNCE_MS) {
     touchStablePressed =
         pressed;
+
+    if (touchCalibrationMode) {
+      if (pressed &&
+          touchCalibrationPoint < 4) {
+        touchCalibrationRawX[
+            touchCalibrationPoint] =
+            touchRawX;
+
+        touchCalibrationRawY[
+            touchCalibrationPoint] =
+            touchRawY;
+
+        char pointOut[96] = {};
+        snprintf(
+            pointOut,
+            sizeof(pointOut),
+            "TOUCH_CAL_AUTO|POINT=%u|RAWX=%u|RAWY=%u",
+            static_cast<unsigned>(
+                touchCalibrationPoint + 1),
+            static_cast<unsigned>(
+                touchRawX),
+            static_cast<unsigned>(
+                touchRawY));
+        cdcPrintln(
+            pointOut);
+
+        touchCalibrationPoint++;
+
+        if (touchCalibrationPoint >= 4) {
+          const bool ok =
+              finishAutomaticTouchCalibration();
+
+          touchCalibrationMode = false;
+          touchCalibrationPoint = 0;
+
+          if (ok) {
+            char done[112] = {};
+            snprintf(
+                done,
+                sizeof(done),
+                "TOUCH_CAL_AUTO|DONE|%u|%u|%u|%u|%u",
+                static_cast<unsigned>(
+                    touchCalibration.xMin),
+                static_cast<unsigned>(
+                    touchCalibration.xMax),
+                static_cast<unsigned>(
+                    touchCalibration.yMin),
+                static_cast<unsigned>(
+                    touchCalibration.yMax),
+                static_cast<unsigned>(
+                    touchCalibration.flags));
+            cdcPrintln(
+                done);
+          } else {
+            cdcPrintln(
+                "TOUCH_CAL_AUTO|ERR|BAD_GEOMETRY");
+          }
+
+          renderMainMenu();
+        } else {
+          drawTouchCalibrationTarget();
+        }
+      }
+
+      return;
+    }
 
     if (pressed) {
       lastUserActivityAt =
