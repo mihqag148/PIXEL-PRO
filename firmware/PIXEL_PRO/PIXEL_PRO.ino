@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.12";
+static constexpr char FW_VERSION[] = "1.10.13";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -598,6 +598,7 @@ static TouchCalibration touchCalibration = {};
 static bool touchRawPressed = false;
 static bool touchStablePressed = false;
 static bool touchWakeOnly = false;
+static int8_t touchHeldFallbackSlot = -1;
 static uint32_t touchChangedAt = 0;
 static uint32_t touchLastPollAt = 0;
 static uint16_t touchRawX = 0;
@@ -10882,10 +10883,10 @@ static int8_t mainMenuSlotAt(
   return -1;
 }
 
-static void emitTouchAction(
+static bool emitTouchAction(
     uint8_t slot) {
   if (slot >= MENU_SLOT_COUNT) {
-    return;
+    return false;
   }
 
   const uint8_t profile =
@@ -10901,7 +10902,7 @@ static void emitTouchAction(
 
   if (action == 0 ||
       action > ACTION_COUNT) {
-    return;
+    return false;
   }
 
   char out[80];
@@ -10915,6 +10916,57 @@ static void emitTouchAction(
       static_cast<unsigned>(slot + 1));
 
   cdcPrintln(out);
+  return true;
+}
+
+static void pressTouchFallbackKey(
+    uint8_t slot) {
+  if (slot >= KEY_COUNT ||
+      touchHeldFallbackSlot >= 0) {
+    return;
+  }
+
+  touchHeldFallbackSlot =
+      static_cast<int8_t>(
+          slot);
+
+  emitKeyEvent(
+      slot,
+      true);
+
+  char out[64] = {};
+  snprintf(
+      out,
+      sizeof(out),
+      "TOUCH|FALLBACK|DOWN|KEY=%u",
+      static_cast<unsigned>(
+          slot + 1));
+  cdcPrintln(out);
+}
+
+static void releaseTouchFallbackKey() {
+  if (touchHeldFallbackSlot < 0) {
+    return;
+  }
+
+  const uint8_t slot =
+      static_cast<uint8_t>(
+          touchHeldFallbackSlot);
+
+  touchHeldFallbackSlot = -1;
+
+  emitKeyEvent(
+      slot,
+      false);
+
+  char out[64] = {};
+  snprintf(
+      out,
+      sizeof(out),
+      "TOUCH|FALLBACK|UP|KEY=%u",
+      static_cast<unsigned>(
+          slot + 1));
+  cdcPrintln(out);
 }
 
 static void initTouch() {
@@ -10924,6 +10976,7 @@ static void initTouch() {
   touchRawPressed = false;
   touchStablePressed = false;
   touchWakeOnly = false;
+  touchHeldFallbackSlot = -1;
   touchChangedAt = millis();
   touchLastPollAt = 0;
 }
@@ -11018,13 +11071,24 @@ static void pollTouch() {
         cdcPrintln(out);
 
         if (slot >= 0) {
-          emitTouchAction(
+          const uint8_t touchedSlot =
               static_cast<uint8_t>(
-                  slot));
+                  slot);
+
+          // Prefer the dedicated Main Menu Action when one exists. If this
+          // slot is only the K1-K8 recovery fallback, execute the same binding
+          // as the physical key and keep it held until TOUCH UP.
+          if (!emitTouchAction(
+                  touchedSlot)) {
+            pressTouchFallbackKey(
+                touchedSlot);
+          }
         }
       }
     } else {
       if (!touchWakeOnly) {
+        releaseTouchFallbackKey();
+
         cdcPrintln(
             "TOUCH|UP");
       }
