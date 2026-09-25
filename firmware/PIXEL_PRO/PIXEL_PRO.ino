@@ -3538,8 +3538,9 @@ static void renderMainMenu() {
   }
 
   if (!hasVisibleMenuItem) {
-    // If user artwork was erased, keep the display useful by reflecting the
-    // live keymap instead of showing eight anonymous K labels.
+    // Recovery UI: show the live keymap clearly. This is generated UI, not a
+    // factory wallpaper, so it stays useful even after all user assets were
+    // erased without reintroducing the removed default artwork.
     for (uint8_t slot = 0;
          slot < MENU_SLOT_COUNT;
          ++slot) {
@@ -3557,13 +3558,21 @@ static void renderMainMenu() {
           row *
               (cellH + gapY);
 
+      tft->fillRoundRect(
+          x + 3,
+          y + 3,
+          cellW - 6,
+          cellH - 6,
+          10,
+          0x18E3);
+
       tft->drawRoundRect(
           x + 3,
           y + 3,
           cellW - 6,
           cellH - 6,
           10,
-          0x7BEF);
+          0x528A);
 
       char keyLabel[6] = {};
       snprintf(
@@ -3575,10 +3584,10 @@ static void renderMainMenu() {
 
       tft->setTextSize(1);
       tft->setTextColor(
-          0x7BEF);
+          0x9CF3);
       tft->setCursor(
           x + 10,
-          y + 10);
+          y + 9);
       tft->print(
           keyLabel);
 
@@ -3593,23 +3602,43 @@ static void renderMainMenu() {
               bindingLabel,
               sizeof(bindingLabel));
 
+      const bool largeText =
+          len <= 9;
+
+      const int textScale =
+          largeText
+              ? 2
+              : 1;
+
       const int textWidth =
           static_cast<int>(
               len) *
-          6;
+          6 *
+          textScale;
 
+      const int textHeight =
+          8 *
+          textScale;
+
+      tft->setTextSize(
+          textScale);
       tft->setTextColor(
           0xFFFF);
+
       tft->setCursor(
           x +
               max(
-                  8,
+                  6,
                   (cellW -
                    textWidth) /
                       2),
           y +
-              (cellH - 8) /
-                  2);
+              max(
+                  24,
+                  (cellH -
+                   textHeight) /
+                      2));
+
       tft->print(
           bindingLabel);
     }
