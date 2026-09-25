@@ -662,3 +662,18 @@ direct GIF/JPEG data, and the existing packed PXQ path.
 
 `SAVMEDIA` now includes `FORMAT=<n>` and `DEFAULT=0|1` so LumiPad can
 distinguish firmware fallback artwork from a stored custom screensaver.
+
+
+### Device-owned Main Menu persistence (firmware 1.10.8)
+
+PIXEL PRO is the authoritative store for the active Main Menu:
+
+- action IDs and labels are persisted in NVS and `MENUCFG` returns
+  `ERR|MENUCFG_SAVE` if the NVS write is not confirmed;
+- the active profile and base layer are persisted and restored after reboot;
+- Main Menu background/icon uploads are transactional: the current final asset
+  is kept until the new temporary file is complete and validated;
+- final replacement uses a `.bak` rollback file, and boot/FSREPAIR restores a
+  backup left by an interrupted replacement;
+- failed/cancelled uploads therefore no longer erase the previously working
+  background or icon.
