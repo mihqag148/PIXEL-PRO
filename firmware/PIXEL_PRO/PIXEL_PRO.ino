@@ -56,7 +56,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.1";
+static constexpr char FW_VERSION[] = "1.10.2";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -126,6 +126,10 @@ static constexpr uint32_t SAVER_THUMB_LIMIT_BYTES = 96UL * 1024UL;
 
 // LCD_RD is not driven by the MCU. Arduino_GFX does not require RD for
 // write-only parallel displays; wire the shield's LCD_RD directly to 3V3.
+// IMPORTANT: this shield also requires its 3V3 POWER pin tied to the S2 Mini
+// 3V3 rail. LCD_RD may share that same 3V3 rail. The shield 5V pin remains
+// connected to 5V/VBUS. Leaving shield 3V3 floating was measured at ~2.55 V
+// and produced a very dim panel even though GRAM writes still worked.
 // This frees D12 for the microSD bus.
 static constexpr int8_t TFT_RD = GFX_NOT_DEFINED;
 static constexpr int8_t TFT_WR = 13;
@@ -343,18 +347,12 @@ class PixelHX8357BMcufriend : public Arduino_TFT {
   bool begin(
       int32_t speed =
           GFX_NOT_DEFINED) override {
-    const bool ok =
-        Arduino_TFT::begin(
-            speed);
-
-    if (ok) {
-      // MCUFRIEND_kbv marks ID 0x8357 with REV_SCREEN. Its
-      // begin(ID) therefore finishes by enabling inversion for normal image
-      // polarity on this specific shield family.
-      invertDisplay(false);
-    }
-
-    return ok;
+    // Keep Arduino_GFX bus/display setup, but leave final rotation and
+    // REV_SCREEN polarity to initDisplay(). That preserves the exact
+    // BASELINE_V3 order proven on the real shield:
+    // DISPON -> MADCTL landscape -> INVON.
+    return Arduino_TFT::begin(
+        speed);
   }
 
   void writeAddrWindow(
@@ -473,7 +471,7 @@ class PixelHX8357BMcufriend : public Arduino_TFT {
     delay(150);
 
     _bus->sendCommand(0x29);
-    delay(20);
+    delay(50);
   }
 };
 
@@ -6379,13 +6377,23 @@ static void clearSaverBuffer() {
 }
 
 static void initDisplay() {
+  // LCD_RST is tied directly to EN. BASELINE_V3 proved this panel is reliable
+  // when it is allowed to settle for 1 second after the board reset before
+  // the first HX8357-B command.
+  delay(1000);
+
   displayReady = tft->begin();
 
   if (!displayReady) {
     return;
   }
 
+  // Match the exact final order from the proven BASELINE_V3:
+  // display-on happens in tftInit(), then landscape MADCTL, then REV_SCREEN
+  // polarity (INVON / 0x21).
   tft->setRotation(1);
+  tft->invertDisplay(false);
+  delay(20);
 
   // PixelHX8357BMcufriend intentionally mirrors MCUFRIEND_kbv's minimal
   // ID 0x8357 initialization. The native Arduino_HX8357B power/timing table
