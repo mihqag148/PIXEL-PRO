@@ -11586,6 +11586,11 @@ static bool finishAutomaticTouchCalibration() {
 
   TouchCalibration candidate = {};
 
+  uint16_t calibratedXMin = 0;
+  uint16_t calibratedXMax = 0;
+  uint16_t calibratedYMin = 0;
+  uint16_t calibratedYMax = 0;
+
   bool xRangeOk = false;
   bool yRangeOk = false;
 
@@ -11599,8 +11604,8 @@ static bool finishAutomaticTouchCalibration() {
             40,
             TFT_WIDTH - 41,
             TFT_WIDTH - 1,
-            candidate.xMin,
-            candidate.xMax);
+            calibratedXMin,
+            calibratedXMax);
 
     yRangeOk =
         setTouchRangeFromPair(
@@ -11609,8 +11614,8 @@ static bool finishAutomaticTouchCalibration() {
             40,
             TFT_HEIGHT - 41,
             TFT_HEIGHT - 1,
-            candidate.yMin,
-            candidate.yMax);
+            calibratedYMin,
+            calibratedYMax);
 
     if (rightX <
         leftX) {
@@ -11634,8 +11639,8 @@ static bool finishAutomaticTouchCalibration() {
             40,
             TFT_HEIGHT - 41,
             TFT_HEIGHT - 1,
-            candidate.xMin,
-            candidate.xMax);
+            calibratedXMin,
+            calibratedXMax);
 
     yRangeOk =
         setTouchRangeFromPair(
@@ -11644,8 +11649,8 @@ static bool finishAutomaticTouchCalibration() {
             40,
             TFT_WIDTH - 41,
             TFT_WIDTH - 1,
-            candidate.yMin,
-            candidate.yMax);
+            calibratedYMin,
+            calibratedYMax);
 
     if (rightY <
         leftY) {
@@ -11660,6 +11665,14 @@ static bool finishAutomaticTouchCalibration() {
     }
   }
 
+  candidate.xMin =
+      calibratedXMin;
+  candidate.xMax =
+      calibratedXMax;
+  candidate.yMin =
+      calibratedYMin;
+  candidate.yMax =
+      calibratedYMax;
   candidate.flags =
       flags;
 
