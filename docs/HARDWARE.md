@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.10.1**.
+Firmware: **1.10.2**.
 
 All controller pins below use the board silk-screen names **Dxx**. Do not convert
 this document to raw ESP32 pin naming when wiring.
@@ -41,7 +41,7 @@ this document to raw ESP32 pin naming when wiring.
 | D39 | LCD_D6 + touch XP |
 | D40 | LCD_D7 + touch YM |
 | EN | LCD_RST + PCA9546A RESET |
-| 3V3 | LCD_RD + PCA9546A VDD + I2C pull-ups |
+| 3V3 | TFT shield 3V3 POWER + LCD_RD + PCA9546A VDD + I2C pull-ups |
 | 5V/VBUS | TFT + RGB + magnetic module power |
 | GND | Common ground |
 
@@ -123,7 +123,7 @@ Firmware 1.10.0 uses the controller ID measured directly from the user's panel.
 The diagnostic read returned `00 01 62 83 57 FF` from register `0xBF`, which
 MCUFRIEND identifies as **0x8357 = HX8357-B**.
 
-Firmware 1.10.1 keeps the verified **HX8357-B / ID 0x8357** controller but no
+Firmware 1.10.2 keeps the verified **HX8357-B / ID 0x8357** controller and no
 longer uses Arduino_GFX's full HX8357-B voltage/timing table. This shield revision
 behaves like MCUFRIEND_kbv's 0x8357 path, which intentionally uses only the
 generic reset/pixel-format/sleep-out/display-on sequence plus REV_SCREEN polarity.
@@ -146,11 +146,15 @@ the user's display to become dark and flicker.
 | LCD_CS | D16 |
 | LCD_RST | **EN** |
 | LCD_RD | **3V3** |
+| 3V3 POWER | **3V3** |
 | 5V | 5V / VBUS |
 | GND | GND |
 
-**Final wiring after the ID test:** move LCD_RD back from D15 to **3V3**, and
-reconnect RGB DATA to **D15**. All other display wires stay unchanged.
+**Final wiring after the ID and power tests:** connect both the shield **3V3 POWER** pin
+and **LCD_RD** to the S2 Mini **3V3** rail, keep shield **5V** on **5V/VBUS**, and
+reconnect RGB DATA to **D15**. The shield 3V3 pin is not optional on this board:
+when it was left floating it measured about **2.55 V** and the panel was extremely
+dim; tying it to the S2 Mini 3V3 rail restored normal brightness.
 
 ### LCD_RST wiring
 
@@ -160,10 +164,22 @@ Connect **LCD_RST directly to EN** on the S2 Mini. EN goes LOW when the main
 controller resets, so the TFT receives a reset at the same time. Firmware sets the
 Arduino_GFX reset pin to undefined because reset is now hardware-linked.
 
-### LCD_RD
+### TFT power and LCD_RD
 
-PIXEL PRO uses a write-only parallel display path. Connect **LCD_RD directly to
-3V3**. Do not connect LCD_RD to D12.
+This shield requires both supply rails from the S2 Mini:
+
+- shield **5V** -> S2 Mini **5V/VBUS**
+- shield **3V3** -> S2 Mini **3V3**
+- shield **GND** -> common **GND**
+- **LCD_RD** -> the same **3V3** rail
+
+PIXEL PRO uses a write-only parallel display path, so LCD_RD is held HIGH and is
+not assigned to a GPIO. Do not connect LCD_RD to D12.
+
+On the tested hardware, leaving the shield 3V3 pin unpowered allowed it to float
+at about 2.55 V through the rest of the circuit. The controller could still accept
+GRAM writes, but the display was extremely dim. Supplying the shield 3V3 pin from
+the S2 Mini restored normal brightness.
 
 ## Resistive touch
 
@@ -193,7 +209,7 @@ panel, then restores the 8-bit LCD bus.
 
 ## RGB
 
-RGB data stays on **D15** in firmware 1.10.1.
+RGB data stays on **D15** in firmware 1.10.2.
 
 | RGB connection | S2 Mini |
 |---|---|
