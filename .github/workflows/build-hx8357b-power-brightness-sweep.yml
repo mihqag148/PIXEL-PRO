@@ -1,4 +1,4 @@
-name: Build HX8357B power brightness sweep
+name: Build HX8357B power brightness sweep v2
 
 on:
   push:
@@ -43,11 +43,7 @@ jobs:
       - name: Compile
         run: |
           mkdir -p build dist/raw
-          arduino-cli compile \
-            --fqbn "esp32:esp32:esp32s2:PSRAM=enabled,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,FlashMode=dio" \
-            --build-path build \
-            --output-dir dist/raw \
-            diagnostics/HX8357B_POWER_BRIGHTNESS_SWEEP
+          arduino-cli compile             --fqbn "esp32:esp32:esp32s2:PSRAM=enabled,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,FlashMode=dio"             --build-path build             --output-dir dist/raw             diagnostics/HX8357B_POWER_BRIGHTNESS_SWEEP
 
       - name: Package merged image
         run: |
@@ -59,41 +55,21 @@ jobs:
 
           test -n "$APP_BIN" && test -n "$BOOT_BIN" && test -n "$PART_BIN" && test -f "$BOOT_APP0"
 
-          cp "$APP_BIN" dist/PIXEL_PRO_HX8357B_POWER_SWEEP_app.bin
-          cp "$BOOT_BIN" dist/PIXEL_PRO_HX8357B_POWER_SWEEP_bootloader.bin
-          cp "$PART_BIN" dist/PIXEL_PRO_HX8357B_POWER_SWEEP_partitions.bin
+          cp "$APP_BIN" dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_app.bin
+          cp "$BOOT_BIN" dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_bootloader.bin
+          cp "$PART_BIN" dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_partitions.bin
           cp "$BOOT_APP0" dist/boot_app0.bin
 
-          esptool --chip esp32s2 merge-bin \
-            -o dist/PIXEL_PRO_HX8357B_POWER_SWEEP_merged.bin \
-            0x1000 dist/PIXEL_PRO_HX8357B_POWER_SWEEP_bootloader.bin \
-            0x8000 dist/PIXEL_PRO_HX8357B_POWER_SWEEP_partitions.bin \
-            0xe000 dist/boot_app0.bin \
-            0x10000 dist/PIXEL_PRO_HX8357B_POWER_SWEEP_app.bin
+          esptool --chip esp32s2 merge-bin             -o dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_merged.bin             0x1000 dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_bootloader.bin             0x8000 dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_partitions.bin             0xe000 dist/boot_app0.bin             0x10000 dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_app.bin
 
-          cat > dist/README-HX8357B-POWER-SWEEP.txt <<'EOF'
-          PIXEL PRO HX8357-B POWER / VCOM / BRIGHTNESS SWEEP v1
+          cat > dist/README-HX8357B-POWER-SWEEP-V2.txt <<'EOF'
+          PIXEL PRO HX8357-B POWER / VCOM / BRIGHTNESS SWEEP v2
 
-          Keep RGB DATA disconnected from D15.
+          This v2 fixes the v1 test path by starting with the exact known-good
+          static-white INVON sequence and the exact constant-0xFF full-screen
+          write method that previously produced a bright stable frame.
 
-          The test repeats forever, 8 seconds per phase.
-          The screen background is always 0xFFFF white.
-          A 20-pixel bar at the top identifies the phase:
-
-          RED BAR:
-            Minimal MCUFRIEND-style init + INVON.
-
-          GREEN BAR:
-            Full Adafruit HX8357-B panel/power/VCOM/gamma init + INVON.
-
-          BLUE BAR:
-            Same full Adafruit-style init + force:
-              Display brightness = 0xFF
-              CTRL Display = 0x2C
-              CABC = OFF
-
-          Report which bar phase is brightest/full-bright, and whether any phase
-          flickers.
+          D15 is not used. If nothing is connected to D15, leave it that way.
 
           Normal wiring:
             LCD_RD  -> 3V3
@@ -102,17 +78,32 @@ jobs:
             LCD_DC  -> D14
             LCD_CS  -> D16
             LCD_D0..D7 -> D33..D40
+
+          Flash PIXEL_PRO_HX8357B_POWER_SWEEP_V2_merged.bin at offset 0x0000.
+
+          The test runs cumulatively and DOES NOT reset between phases:
+            RED bar   (10 s): exact proven baseline + INVON
+            GREEN bar (10 s): baseline + POWER/VCOM D0/D1/D2
+            CYAN bar  (10 s): previous + panel-driving/gamma registers
+            BLUE bar  (10 s): previous + brightness=0xFF, CTRL=0x2C, CABC off
+
+          After BLUE it stays in the final state and redraws BLUE every 10 s.
+
+          Report:
+            1. Does RED show a full-screen bright white frame?
+            2. At which first bar does brightness/dimming/black/flicker change?
+            3. Which of RED/GREEN/CYAN/BLUE is brightest?
           EOF
 
-          sha256sum dist/PIXEL_PRO_HX8357B_POWER_SWEEP_merged.bin > dist/SHA256SUMS-HX8357B-POWER-SWEEP
+          sha256sum dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_merged.bin > dist/SHA256SUMS-HX8357B-POWER-SWEEP-V2
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PIXEL-PRO-HX8357B-POWER-SWEEP
+          name: PIXEL-PRO-HX8357B-POWER-SWEEP-V2
           path: |
-            dist/PIXEL_PRO_HX8357B_POWER_SWEEP_*.bin
-            dist/README-HX8357B-POWER-SWEEP.txt
-            dist/SHA256SUMS-HX8357B-POWER-SWEEP
+            dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_*.bin
+            dist/README-HX8357B-POWER-SWEEP-V2.txt
+            dist/SHA256SUMS-HX8357B-POWER-SWEEP-V2
           if-no-files-found: error
 
   pr-checks:
@@ -133,25 +124,16 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: PIXEL-PRO-HX8357B-POWER-SWEEP
+          name: PIXEL-PRO-HX8357B-POWER-SWEEP-V2
           path: dist
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="tft-hx8357b-power-sweep-v1"
+          TAG="tft-hx8357b-power-sweep-v2"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-              dist/PIXEL_PRO_HX8357B_POWER_SWEEP_*.bin \
-              dist/README-HX8357B-POWER-SWEEP.txt \
-              dist/SHA256SUMS-HX8357B-POWER-SWEEP
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber               dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_*.bin               dist/README-HX8357B-POWER-SWEEP-V2.txt               dist/SHA256SUMS-HX8357B-POWER-SWEEP-V2
           else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "PIXEL PRO HX8357-B Power Brightness Sweep v1" \
-              --notes "Three repeating white-screen phases compare minimal init, full HX8357-B power/VCOM init, and forced max display-brightness control." \
-              dist/PIXEL_PRO_HX8357B_POWER_SWEEP_*.bin \
-              dist/README-HX8357B-POWER-SWEEP.txt \
-              dist/SHA256SUMS-HX8357B-POWER-SWEEP
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY"               --target "$GITHUB_SHA"               --title "PIXEL PRO HX8357-B Power Brightness Sweep v2"               --notes "Known-good static-white baseline first, then cumulative power/VCOM, panel/gamma, and brightness-control stages without reset between phases."               dist/PIXEL_PRO_HX8357B_POWER_SWEEP_V2_*.bin               dist/README-HX8357B-POWER-SWEEP-V2.txt               dist/SHA256SUMS-HX8357B-POWER-SWEEP-V2
           fi
