@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.17";
+static constexpr char FW_VERSION[] = "1.10.18";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -223,8 +223,13 @@ static constexpr uint16_t TOUCH_X_MAX_DEFAULT = 907;  // tp.x TS_LEFT
 static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 139;  // tp.y TS_BOT
 static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // tp.y TS_TOP
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
-static constexpr uint32_t TOUCH_POLL_MS = 12;
-static constexpr uint8_t TOUCH_RELEASE_MISS_COUNT = 3;
+static constexpr uint32_t TOUCH_POLL_MS = 16;
+static constexpr uint8_t TOUCH_PRESS_CONFIRM_COUNT = 3;
+static constexpr uint8_t TOUCH_RELEASE_MISS_COUNT = 4;
+static constexpr uint16_t TOUCH_SAMPLE_STABILITY_MAX = 120;
+static constexpr uint16_t TOUCH_CONFIRM_MOVE_MAX = 90;
+static constexpr uint16_t TOUCH_CONTACT_RAIL_MARGIN = 6;
+static constexpr uint16_t TOUCH_CONTACT_DELTA_MIN = 6;
 static constexpr uint8_t TOUCH_CAL_VERSION = 6;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
@@ -609,7 +614,10 @@ static bool touchAffineValid = false;
 static bool touchCalibrationRequired = false;
 static bool touchRawPressed = false;
 static bool touchStablePressed = false;
+static uint8_t touchPressConfirmations = 0;
 static uint8_t touchReleaseMisses = 0;
+static uint16_t touchCandidateRawX = 0;
+static uint16_t touchCandidateRawY = 0;
 static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
 static int8_t touchFeedbackSlot = -1;
@@ -11135,6 +11143,11 @@ static void restoreTouchSharedPins() {
   digitalWrite(
       TFT_CS,
       HIGH);
+
+  // Give the 8080 bus a few microseconds to settle after the ADC pins have
+  // been switched back to push-pull outputs. This prevents the next LCD write
+  // from seeing a transient WR/DC/data state.
+  delayMicroseconds(4);
 }
 
 static uint16_t readTouchAdc10(
@@ -11210,6 +11223,31 @@ static uint16_t touchDelta(
       : static_cast<uint16_t>(b - a);
 }
 
+static uint16_t touchMedian3(
+    uint16_t a,
+    uint16_t b,
+    uint16_t c) {
+  if (a > b) {
+    const uint16_t t = a;
+    a = b;
+    b = t;
+  }
+
+  if (b > c) {
+    const uint16_t t = b;
+    b = c;
+    c = t;
+  }
+
+  if (a > b) {
+    const uint16_t t = a;
+    a = b;
+    b = t;
+  }
+
+  return b;
+}
+
 static bool readTouchRaw(
     uint16_t &rawX,
     uint16_t &rawY,
@@ -11218,40 +11256,77 @@ static bool readTouchRaw(
     return false;
   }
 
-  // MCUFRIEND clone panels vary a lot in plate resistance and pressure
-  // polarity. Coordinate stability is therefore the primary contact test.
-  // Two consecutive samples reject floating/open-circuit noise without
-  // requiring z1/z2 to match a particular shield revision.
+  // Three coordinate samples are intentionally used here. An untouched
+  // resistive panel can leave the ADC inputs charged by the shared TFT bus
+  // and two samples may look deceptively stable. A real finger contact must
+  // survive all three samples before it is allowed into the press filter.
   uint16_t x1 = 0;
   uint16_t y1 = 0;
   uint16_t x2 = 0;
   uint16_t y2 = 0;
+  uint16_t x3 = 0;
+  uint16_t y3 = 0;
 
   sampleTouchCoordinates(
       x1,
       y1);
 
-  delayMicroseconds(60);
+  delayMicroseconds(70);
 
   sampleTouchCoordinates(
       x2,
       y2);
 
+  delayMicroseconds(70);
+
+  sampleTouchCoordinates(
+      x3,
+      y3);
+
   rawX =
-      static_cast<uint16_t>(
-          (static_cast<uint32_t>(x1) +
-           static_cast<uint32_t>(x2)) /
-          2U);
+      touchMedian3(
+          x1,
+          x2,
+          x3);
 
   rawY =
-      static_cast<uint16_t>(
-          (static_cast<uint32_t>(y1) +
-           static_cast<uint32_t>(y2)) /
-          2U);
+      touchMedian3(
+          y1,
+          y2,
+          y3);
 
-  // Keep pressure only as diagnostics. Do not reject a real touch solely
-  // because a clone shield exposes the divider with a different polarity or
-  // plate resistance.
+  const uint16_t minX =
+      min(
+          x1,
+          min(
+              x2,
+              x3));
+
+  const uint16_t maxX =
+      max(
+          x1,
+          max(
+              x2,
+              x3));
+
+  const uint16_t minY =
+      min(
+          y1,
+          min(
+              y2,
+              y3));
+
+  const uint16_t maxY =
+      max(
+          y1,
+          max(
+              y2,
+              y3));
+
+  // Pressure/contact divider. The absolute polarity differs between some
+  // MCUFRIEND clones, so use the magnitude of z1-z2. Unlike 1.10.17, do not
+  // accept coordinate stability alone: both divider nodes must also be away
+  // from the ADC rails, which is the key rejection for floating ghost taps.
   pinMode(TOUCH_XP_PIN, OUTPUT);
   digitalWrite(TOUCH_XP_PIN, LOW);
   pinMode(TOUCH_YM_PIN, OUTPUT);
@@ -11260,7 +11335,7 @@ static bool readTouchRaw(
   digitalWrite(TOUCH_YP_PIN, LOW);
   pinMode(TOUCH_XM_PIN, INPUT);
   pinMode(TOUCH_YP_PIN, INPUT);
-  delayMicroseconds(28);
+  delayMicroseconds(32);
 
   const uint16_t z1 =
       readTouchAdc10(
@@ -11270,12 +11345,12 @@ static bool readTouchRaw(
       readTouchAdc10(
           TOUCH_YP_PIN);
 
-  pressure = 0;
-
   const uint16_t zDelta =
       touchDelta(
           z1,
           z2);
+
+  pressure = 0;
 
   if (z1 > 0 &&
       zDelta > 0) {
@@ -11297,25 +11372,43 @@ static bool readTouchRaw(
 
   restoreTouchSharedPins();
 
-  // Open circuit normally collapses one/both axes to the ADC rails.
   const bool axesInsidePanel =
       rawX >= 24 &&
       rawX <= TOUCH_ADC_MAX - 24 &&
       rawY >= 24 &&
       rawY <= TOUCH_ADC_MAX - 24;
 
-  // A real press should produce two nearby coordinate samples. The generous
-  // tolerance keeps finger movement valid while rejecting floating inputs.
   const bool stableCoordinates =
-      touchDelta(
-          x1,
-          x2) <= 240 &&
-      touchDelta(
-          y1,
-          y2) <= 240;
+      static_cast<uint16_t>(
+          maxX - minX) <=
+          TOUCH_SAMPLE_STABILITY_MAX &&
+      static_cast<uint16_t>(
+          maxY - minY) <=
+          TOUCH_SAMPLE_STABILITY_MAX;
+
+  const bool z1Inside =
+      z1 >=
+          TOUCH_CONTACT_RAIL_MARGIN &&
+      z1 <=
+          TOUCH_ADC_MAX -
+              TOUCH_CONTACT_RAIL_MARGIN;
+
+  const bool z2Inside =
+      z2 >=
+          TOUCH_CONTACT_RAIL_MARGIN &&
+      z2 <=
+          TOUCH_ADC_MAX -
+              TOUCH_CONTACT_RAIL_MARGIN;
+
+  const bool contactDivider =
+      z1Inside &&
+      z2Inside &&
+      zDelta >=
+          TOUCH_CONTACT_DELTA_MIN;
 
   return axesInsidePanel &&
-         stableCoordinates;
+         stableCoordinates &&
+         contactDivider;
 }
 
 static uint16_t normalizeTouchAxis(
@@ -11899,7 +11992,10 @@ static void startAutomaticTouchCalibration() {
 
   touchRawPressed = false;
   touchStablePressed = false;
+  touchPressConfirmations = 0;
   touchReleaseMisses = 0;
+  touchCandidateRawX = 0;
+  touchCandidateRawY = 0;
   touchChangedAt = millis();
   touchWakeOnly = false;
   touchHeldFallbackSlot = -1;
@@ -11914,7 +12010,10 @@ static void cancelAutomaticTouchCalibration() {
   touchCalibrationPoint = 0;
   touchRawPressed = false;
   touchStablePressed = false;
+  touchPressConfirmations = 0;
   touchReleaseMisses = 0;
+  touchCandidateRawX = 0;
+  touchCandidateRawY = 0;
   touchChangedAt = millis();
   renderMainMenu();
 }
@@ -12011,7 +12110,10 @@ static void initTouch() {
 
   touchRawPressed = false;
   touchStablePressed = false;
+  touchPressConfirmations = 0;
   touchReleaseMisses = 0;
+  touchCandidateRawX = 0;
+  touchCandidateRawY = 0;
   touchWakeOnly = false;
   touchHeldFallbackSlot = -1;
   touchFeedbackSlot = -1;
@@ -12050,10 +12152,42 @@ static void pollTouch() {
       pressed;
 
   if (pressed) {
-    // The panel already passes two coordinate samples inside readTouchRaw().
-    // Treat the first valid poll as DOWN immediately. Requiring another
-    // debounce interval caused short/noisy resistive taps to disappear.
     touchReleaseMisses = 0;
+
+    if (!touchStablePressed) {
+      // A single electrically-plausible sample is not enough. Require three
+      // consecutive polls whose median coordinates stay close together.
+      // This is ~48 ms at the normal poll rate: fast enough for a tap, but
+      // long enough to reject TFT-bus transients and floating ADC ghosts.
+      if (touchPressConfirmations == 0) {
+        touchPressConfirmations = 1;
+      } else if (
+          touchDelta(
+              rawX,
+              touchCandidateRawX) <=
+              TOUCH_CONFIRM_MOVE_MAX &&
+          touchDelta(
+              rawY,
+              touchCandidateRawY) <=
+              TOUCH_CONFIRM_MOVE_MAX) {
+        if (touchPressConfirmations <
+            TOUCH_PRESS_CONFIRM_COUNT) {
+          touchPressConfirmations++;
+        }
+      } else {
+        touchPressConfirmations = 1;
+      }
+
+      touchCandidateRawX = rawX;
+      touchCandidateRawY = rawY;
+
+      if (touchPressConfirmations <
+          TOUCH_PRESS_CONFIRM_COUNT) {
+        return;
+      }
+
+      touchPressConfirmations = 0;
+    }
 
     touchRawX = rawX;
     touchRawY = rawY;
@@ -12203,9 +12337,13 @@ static void pollTouch() {
     return;
   }
 
-  // Resistive panels can drop an occasional sample while a finger is still
-  // down. Only emit UP after several consecutive misses, so a noisy sample
-  // cannot cancel a real press or prevent the following tap.
+  // A failed contact sample also cancels an unconfirmed DOWN candidate.
+  // Once DOWN is latched, tolerate a few misses before UP so one noisy ADC
+  // read cannot turn a held finger into repeated taps.
+  touchPressConfirmations = 0;
+  touchCandidateRawX = 0;
+  touchCandidateRawY = 0;
+
   if (!touchStablePressed) {
     touchReleaseMisses = 0;
     return;
