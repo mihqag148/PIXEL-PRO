@@ -1,6 +1,23 @@
 # Flash PIXEL PRO native USB firmware
 
-Artifact: PIXEL_PRO_merged.bin
+## Normal firmware update (preserve settings)
+
+Use `PIXEL_PRO_app.bin` for routine updates when the current PIXEL PRO
+partition table is already installed:
+
+```text
+python -m esptool --chip esp32s2 --port COMx write_flash 0x10000 PIXEL_PRO_app.bin
+```
+
+Writing only the application partition preserves the NVS settings at
+`0x9000` and the LittleFS media partition at `0x190000`.
+
+## First install / recovery image
+
+Use `PIXEL_PRO_merged.bin` at `0x0` only for a first install, partition-table
+recovery, or a deliberate factory-style reflash. Because a merged image spans
+the bootloader, partition table and application ranges, it also writes through
+the NVS address range and can reset settings stored there.
 
 1. Hold BOOT, tap RESET, release BOOT to enter ESP32-S2 ROM download mode.
 2. Find the ROM COM port. The ROM device commonly appears with Espressif VID 303A and a ROM PID such as 0002.
