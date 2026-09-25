@@ -12046,7 +12046,15 @@ static void pollTouch() {
           rawY,
           pressure);
 
+  touchRawPressed =
+      pressed;
+
   if (pressed) {
+    // The panel already passes two coordinate samples inside readTouchRaw().
+    // Treat the first valid poll as DOWN immediately. Requiring another
+    // debounce interval caused short/noisy resistive taps to disappear.
+    touchReleaseMisses = 0;
+
     touchRawX = rawX;
     touchRawY = rawY;
     touchPressure = pressure;
@@ -12058,27 +12066,16 @@ static void pollTouch() {
           touchX,
           touchY);
     }
-  }
 
-  if (pressed !=
-      touchRawPressed) {
-    touchRawPressed =
-        pressed;
-    touchChangedAt =
-        now;
-  }
+    if (touchStablePressed) {
+      return;
+    }
 
-  if (pressed !=
-          touchStablePressed &&
-      now -
-              touchChangedAt >=
-          TOUCH_DEBOUNCE_MS) {
-    touchStablePressed =
-        pressed;
+    touchStablePressed = true;
+    touchChangedAt = now;
 
     if (touchCalibrationMode) {
-      if (pressed &&
-          touchCalibrationPoint < 4) {
+      if (touchCalibrationPoint < 4) {
         touchCalibrationRawX[
             touchCalibrationPoint] =
             touchRawX;
@@ -12144,73 +12141,109 @@ static void pollTouch() {
       return;
     }
 
-    if (pressed) {
-      lastUserActivityAt =
-          now;
+    lastUserActivityAt =
+        now;
 
-      const bool wasSaverActive =
-          saverActive;
+    const bool wasSaverActive =
+        saverActive;
 
-      if (wasSaverActive) {
-        touchWakeOnly = true;
-        stopSaver();
-      } else {
-        touchWakeOnly = false;
-
-        const int8_t slot =
-            mainMenuSlotAt(
-                touchX,
-                touchY);
-
-        char out[96];
-        snprintf(
-            out,
-            sizeof(out),
-            "TOUCH|DOWN|X=%d|Y=%d|RAWX=%u|RAWY=%u|P=%u|SLOT=%d",
-            static_cast<int>(touchX),
-            static_cast<int>(touchY),
-            static_cast<unsigned>(touchRawX),
-            static_cast<unsigned>(touchRawY),
-            static_cast<unsigned>(touchPressure),
-            slot >= 0
-                ? static_cast<int>(slot + 1)
-                : 0);
-
-        cdcPrintln(out);
-
-        if (slot >= 0) {
-          drawTouchSlotFeedback(
-              slot);
-          const uint8_t touchedSlot =
-              static_cast<uint8_t>(
-                  slot);
-
-          // Prefer the dedicated Main Menu Action when one exists. If this
-          // slot is only the K1-K8 recovery fallback, execute the same binding
-          // as the physical key and keep it held until TOUCH UP.
-          if (!emitTouchAction(
-                  touchedSlot)) {
-            pressTouchFallbackKey(
-                touchedSlot);
-          }
-        }
-      }
-    } else {
-      if (!touchWakeOnly) {
-        releaseTouchFallbackKey();
-
-        if (touchFeedbackSlot >= 0) {
-          touchFeedbackSlot = -1;
-          renderMainMenu();
-        }
-
-        cdcPrintln(
-            "TOUCH|UP");
-      }
-
-      touchWakeOnly = false;
+    if (wasSaverActive) {
+      touchWakeOnly = true;
+      stopSaver();
+      return;
     }
+
+    touchWakeOnly = false;
+
+    const int8_t slot =
+        mainMenuSlotAt(
+            touchX,
+            touchY);
+
+    char out[112] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "TOUCH|DOWN|X=%d|Y=%d|RAWX=%u|RAWY=%u|P=%u|SLOT=%d",
+        static_cast<int>(
+            touchX),
+        static_cast<int>(
+            touchY),
+        static_cast<unsigned>(
+            touchRawX),
+        static_cast<unsigned>(
+            touchRawY),
+        static_cast<unsigned>(
+            touchPressure),
+        slot >= 0
+            ? static_cast<int>(
+                  slot + 1)
+            : 0);
+
+    cdcPrintln(
+        out);
+
+    if (slot >= 0) {
+      drawTouchSlotFeedback(
+          slot);
+
+      const uint8_t touchedSlot =
+          static_cast<uint8_t>(
+              slot);
+
+      // Dedicated Main Menu actions are app-owned. If there is no dedicated
+      // action, mirror the physical key binding exactly.
+      if (!emitTouchAction(
+              touchedSlot)) {
+        pressTouchFallbackKey(
+            touchedSlot);
+      }
+    }
+
+    return;
   }
+
+  // Resistive panels can drop an occasional sample while a finger is still
+  // down. Only emit UP after several consecutive misses, so a noisy sample
+  // cannot cancel a real press or prevent the following tap.
+  if (!touchStablePressed) {
+    touchReleaseMisses = 0;
+    return;
+  }
+
+  if (touchReleaseMisses <
+      TOUCH_RELEASE_MISS_COUNT) {
+    touchReleaseMisses++;
+  }
+
+  if (touchReleaseMisses <
+      TOUCH_RELEASE_MISS_COUNT) {
+    return;
+  }
+
+  touchReleaseMisses = 0;
+  touchStablePressed = false;
+  touchChangedAt = now;
+
+  // In calibration mode release simply arms the next target. One held finger
+  // can therefore never advance through multiple calibration points.
+  if (touchCalibrationMode) {
+    return;
+  }
+
+  if (!touchWakeOnly) {
+    releaseTouchFallbackKey();
+
+    if (touchFeedbackSlot >= 0) {
+      touchFeedbackSlot = -1;
+      renderMainMenu();
+    }
+
+    cdcPrintln(
+        "TOUCH|UP");
+  }
+
+  touchWakeOnly = false;
 }
 
 // D15 now carries WS2812/SK6812 data. The WEMOS onboard LED remains
