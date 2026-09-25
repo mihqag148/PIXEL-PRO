@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.13";
+static constexpr char FW_VERSION[] = "1.10.14";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -599,6 +599,7 @@ static bool touchRawPressed = false;
 static bool touchStablePressed = false;
 static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
+static int8_t touchFeedbackSlot = -1;
 static uint32_t touchChangedAt = 0;
 static uint32_t touchLastPollAt = 0;
 static uint16_t touchRawX = 0;
@@ -10621,21 +10622,15 @@ static uint16_t readTouchAdc10(
       sum / 3U);
 }
 
-static bool readTouchRaw(
+static void sampleTouchCoordinates(
     uint16_t &rawX,
-    uint16_t &rawY,
-    uint16_t &pressure) {
-  if (!displayReady) {
-    return false;
-  }
-
-  // Deselect LCD while the four shared touch/LCD lines are repurposed.
+    uint16_t &rawY) {
+  // Deselect LCD while the shared resistive-touch lines are sampled.
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
 
   // TouchScreen.h X read:
-  // YP/YM Hi-Z with pull-ups disabled, XP=HIGH, XM=LOW, sample YP,
-  // then invert the 10-bit ADC.
+  // YP/YM Hi-Z, XP=HIGH, XM=LOW, sample YP.
   digitalWrite(TOUCH_YP_PIN, LOW);
   digitalWrite(TOUCH_YM_PIN, LOW);
   pinMode(TOUCH_YP_PIN, INPUT);
@@ -10644,7 +10639,7 @@ static bool readTouchRaw(
   pinMode(TOUCH_XM_PIN, OUTPUT);
   digitalWrite(TOUCH_XP_PIN, HIGH);
   digitalWrite(TOUCH_XM_PIN, LOW);
-  delayMicroseconds(24);
+  delayMicroseconds(28);
 
   rawX =
       static_cast<uint16_t>(
@@ -10653,8 +10648,7 @@ static bool readTouchRaw(
               TOUCH_YP_PIN));
 
   // TouchScreen.h Y read:
-  // XP/XM Hi-Z with pull-ups disabled, YP=HIGH, YM=LOW, sample XM,
-  // then invert the 10-bit ADC.
+  // XP/XM Hi-Z, YP=HIGH, YM=LOW, sample XM.
   digitalWrite(TOUCH_XP_PIN, LOW);
   digitalWrite(TOUCH_XM_PIN, LOW);
   pinMode(TOUCH_XP_PIN, INPUT);
@@ -10663,44 +10657,89 @@ static bool readTouchRaw(
   pinMode(TOUCH_YM_PIN, OUTPUT);
   digitalWrite(TOUCH_YP_PIN, HIGH);
   digitalWrite(TOUCH_YM_PIN, LOW);
-  delayMicroseconds(24);
+  delayMicroseconds(28);
 
   rawY =
       static_cast<uint16_t>(
           TOUCH_ADC_MAX -
           readTouchAdc10(
               TOUCH_XM_PIN));
+}
 
-  // TouchScreen.h pressure read with the shop's 300-ohm plate value:
-  // XP=LOW, YM=HIGH, XM/YP Hi-Z.
+static uint16_t touchDelta(
+    uint16_t a,
+    uint16_t b) {
+  return a >= b
+      ? static_cast<uint16_t>(a - b)
+      : static_cast<uint16_t>(b - a);
+}
+
+static bool readTouchRaw(
+    uint16_t &rawX,
+    uint16_t &rawY,
+    uint16_t &pressure) {
+  if (!displayReady) {
+    return false;
+  }
+
+  // MCUFRIEND clone panels vary a lot in plate resistance and pressure
+  // polarity. Coordinate stability is therefore the primary contact test.
+  // Two consecutive samples reject floating/open-circuit noise without
+  // requiring z1/z2 to match a particular shield revision.
+  uint16_t x1 = 0;
+  uint16_t y1 = 0;
+  uint16_t x2 = 0;
+  uint16_t y2 = 0;
+
+  sampleTouchCoordinates(
+      x1,
+      y1);
+
+  delayMicroseconds(60);
+
+  sampleTouchCoordinates(
+      x2,
+      y2);
+
+  rawX =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(x1) +
+           static_cast<uint32_t>(x2)) /
+          2U);
+
+  rawY =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(y1) +
+           static_cast<uint32_t>(y2)) /
+          2U);
+
+  // Keep pressure only as diagnostics. Do not reject a real touch solely
+  // because a clone shield exposes the divider with a different polarity or
+  // plate resistance.
   pinMode(TOUCH_XP_PIN, OUTPUT);
   digitalWrite(TOUCH_XP_PIN, LOW);
   pinMode(TOUCH_YM_PIN, OUTPUT);
   digitalWrite(TOUCH_YM_PIN, HIGH);
-  // Explicit LOW before INPUT disables ESP32 pull-ups on these shared lines.
   digitalWrite(TOUCH_XM_PIN, LOW);
   digitalWrite(TOUCH_YP_PIN, LOW);
   pinMode(TOUCH_XM_PIN, INPUT);
   pinMode(TOUCH_YP_PIN, INPUT);
-  delayMicroseconds(24);
+  delayMicroseconds(28);
 
   const uint16_t z1 =
       readTouchAdc10(
           TOUCH_XM_PIN);
+
   const uint16_t z2 =
       readTouchAdc10(
           TOUCH_YP_PIN);
 
   pressure = 0;
 
-  // Some MCUFRIEND-compatible clone panels expose the pressure divider with
-  // the opposite polarity from the original AVR shield. X/Y are still valid,
-  // but z2 can be lower than z1. Use the magnitude of the divider delta so
-  // both electrical orientations register a real press.
   const uint16_t zDelta =
-      z2 >= z1
-          ? static_cast<uint16_t>(z2 - z1)
-          : static_cast<uint16_t>(z1 - z2);
+      touchDelta(
+          z1,
+          z2);
 
   if (z1 > 0 &&
       zDelta > 0) {
@@ -10720,40 +10759,27 @@ static bool readTouchRaw(
                 : rtouch);
   }
 
-  // Require a stable resistive divider, but do not assume z2 > z1. That
-  // assumption rejected every touch on some clone shields.
-  const bool contact =
-      z1 >= 8 &&
-      z1 <= TOUCH_ADC_MAX - 8 &&
-      z2 >= 8 &&
-      z2 <= TOUCH_ADC_MAX - 8 &&
-      zDelta > 2;
-
   restoreTouchSharedPins();
 
-  if (!contact) {
-    return false;
-  }
+  // Open circuit normally collapses one/both axes to the ADC rails.
+  const bool axesInsidePanel =
+      rawX >= 24 &&
+      rawX <= TOUCH_ADC_MAX - 24 &&
+      rawY >= 24 &&
+      rawY <= TOUCH_ADC_MAX - 24;
 
-  // Open-circuit rail readings are not valid touches.
-  if (rawX < 8 ||
-      rawX >
-          TOUCH_ADC_MAX - 8 ||
-      rawY < 8 ||
-      rawY >
-          TOUCH_ADC_MAX - 8) {
-    return false;
-  }
+  // A real press should produce two nearby coordinate samples. The generous
+  // tolerance keeps finger movement valid while rejecting floating inputs.
+  const bool stableCoordinates =
+      touchDelta(
+          x1,
+          x2) <= 140 &&
+      touchDelta(
+          y1,
+          y2) <= 140;
 
-  // Pressure is retained for diagnostics. Use a wider S2-safe window instead
-  // of the AVR-only threshold, while still discarding absurd values.
-  if (pressure > 0 &&
-      (pressure < TOUCH_PRESSURE_MIN ||
-       pressure > TOUCH_PRESSURE_MAX)) {
-    return false;
-  }
-
-  return true;
+  return axesInsidePanel &&
+         stableCoordinates;
 }
 
 static uint16_t normalizeTouchAxis(
@@ -10883,6 +10909,71 @@ static int8_t mainMenuSlotAt(
   return -1;
 }
 
+static void drawTouchSlotFeedback(
+    int8_t slot) {
+  if (!displayReady ||
+      slot < 0 ||
+      slot >= MENU_SLOT_COUNT) {
+    return;
+  }
+
+  const int statusY =
+      TFT_HEIGHT -
+      MENU_STATUS_HEIGHT;
+
+  const int marginX = 10;
+  const int marginY = 6;
+  const int gapX = 6;
+  const int gapY = 4;
+
+  const int cellW =
+      (TFT_WIDTH -
+       marginX * 2 -
+       gapX * 3) /
+      4;
+
+  const int cellH =
+      (statusY -
+       marginY * 2 -
+       gapY) /
+      2;
+
+  const int col =
+      slot % 4;
+
+  const int row =
+      slot / 4;
+
+  const int x =
+      marginX +
+      col *
+          (cellW + gapX);
+
+  const int y =
+      marginY +
+      row *
+          (cellH + gapY);
+
+  // A bright double border is visible on both empty K1-K8 fallback cells and
+  // user artwork. It is cleared by re-rendering the menu on TOUCH UP.
+  tft->drawRect(
+      x,
+      y,
+      cellW,
+      cellH,
+      0xFFFF);
+
+  tft->drawRect(
+      x + 1,
+      y + 1,
+      cellW - 2,
+      cellH - 2,
+      0xFFFF);
+
+  touchFeedbackSlot =
+      slot;
+}
+
 static bool emitTouchAction(
     uint8_t slot) {
   if (slot >= MENU_SLOT_COUNT) {
@@ -10977,6 +11068,7 @@ static void initTouch() {
   touchStablePressed = false;
   touchWakeOnly = false;
   touchHeldFallbackSlot = -1;
+  touchFeedbackSlot = -1;
   touchChangedAt = millis();
   touchLastPollAt = 0;
 }
@@ -11071,6 +11163,8 @@ static void pollTouch() {
         cdcPrintln(out);
 
         if (slot >= 0) {
+          drawTouchSlotFeedback(
+              slot);
           const uint8_t touchedSlot =
               static_cast<uint8_t>(
                   slot);
@@ -11088,6 +11182,11 @@ static void pollTouch() {
     } else {
       if (!touchWakeOnly) {
         releaseTouchFallbackKey();
+
+        if (touchFeedbackSlot >= 0) {
+          touchFeedbackSlot = -1;
+          renderMainMenu();
+        }
 
         cdcPrintln(
             "TOUCH|UP");
