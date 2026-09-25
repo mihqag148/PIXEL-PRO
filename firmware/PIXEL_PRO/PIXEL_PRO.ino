@@ -11473,11 +11473,13 @@ static void pollTouch() {
     touchRawY = rawY;
     touchPressure = pressure;
 
-    mapTouchCoordinates(
-        rawX,
-        rawY,
-        touchX,
-        touchY);
+    if (!touchCalibrationMode) {
+      mapTouchCoordinates(
+          rawX,
+          rawY,
+          touchX,
+          touchY);
+    }
   }
 
   if (pressed !=
@@ -11495,6 +11497,72 @@ static void pollTouch() {
           TOUCH_DEBOUNCE_MS) {
     touchStablePressed =
         pressed;
+
+    if (touchCalibrationMode) {
+      if (pressed &&
+          touchCalibrationPoint < 4) {
+        touchCalibrationRawX[
+            touchCalibrationPoint] =
+            touchRawX;
+
+        touchCalibrationRawY[
+            touchCalibrationPoint] =
+            touchRawY;
+
+        char pointOut[96] = {};
+        snprintf(
+            pointOut,
+            sizeof(pointOut),
+            "TOUCH_CAL_AUTO|POINT=%u|RAWX=%u|RAWY=%u",
+            static_cast<unsigned>(
+                touchCalibrationPoint + 1),
+            static_cast<unsigned>(
+                touchRawX),
+            static_cast<unsigned>(
+                touchRawY));
+        cdcPrintln(
+            pointOut);
+
+        touchCalibrationPoint++;
+
+        if (touchCalibrationPoint >= 4) {
+          const bool ok =
+              finishAutomaticTouchCalibration();
+
+          touchCalibrationMode = false;
+          touchCalibrationPoint = 0;
+
+          if (ok) {
+            char done[112] = {};
+            snprintf(
+                done,
+                sizeof(done),
+                "TOUCH_CAL_AUTO|DONE|%u|%u|%u|%u|%u",
+                static_cast<unsigned>(
+                    touchCalibration.xMin),
+                static_cast<unsigned>(
+                    touchCalibration.xMax),
+                static_cast<unsigned>(
+                    touchCalibration.yMin),
+                static_cast<unsigned>(
+                    touchCalibration.yMax),
+                static_cast<unsigned>(
+                    touchCalibration.flags));
+            cdcPrintln(
+                done);
+          } else {
+            cdcPrintln(
+                "TOUCH_CAL_AUTO|ERR|BAD_GEOMETRY");
+          }
+
+          renderMainMenu();
+        } else {
+          drawTouchCalibrationTarget();
+        }
+      }
+
+      return;
+    }
 
     if (pressed) {
       lastUserActivityAt =
