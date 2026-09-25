@@ -56,7 +56,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.3";
+static constexpr char FW_VERSION[] = "1.10.4";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -471,6 +471,99 @@ class PixelHX8357BMcufriend : public Arduino_TFT {
     _bus->sendCommand(0x11);
     delay(150);
 
+
+    _bus->sendCommand(0x29);
+    delay(50);
+
+    // With the shield 3V3 rail now correctly powered, apply the standard
+    // HX8357-B analog power/VCOM/panel/gamma sequence after the proven
+    // MCUFRIEND wake path. Earlier analog tests were done while shield 3V3
+    // floated near 2.55 V, so they could not validate these settings.
+    _bus->sendCommand(0x28);
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xD0);
+    _bus->write(0x44);
+    _bus->write(0x41);
+    _bus->write(0x06);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xD1);
+    _bus->write(0x40);
+    _bus->write(0x10);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xD2);
+    _bus->write(0x05);
+    _bus->write(0x12);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xC0);
+    _bus->write(0x14);
+    _bus->write(0x3B);
+    _bus->write(0x00);
+    _bus->write(0x02);
+    _bus->write(0x11);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xC5);
+    _bus->write(0x0C);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xE9);
+    _bus->write(0x01);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xEA);
+    _bus->write(0x03);
+    _bus->write(0x00);
+    _bus->write(0x00);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xEB);
+    _bus->write(0x40);
+    _bus->write(0x54);
+    _bus->write(0x26);
+    _bus->write(0xDB);
+    _bus->endWrite();
+
+    static const uint8_t gamma8357b[12] = {
+        0x00, 0x15, 0x00, 0x22,
+        0x00, 0x08, 0x77, 0x26,
+        0x66, 0x22, 0x04, 0x00};
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xC8);
+    for (uint8_t value : gamma8357b) {
+      _bus->write(value);
+    }
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0xB4);
+    _bus->write(0x00);
+    _bus->endWrite();
+
+    // Restore the production write format, landscape MADCTL and REV_SCREEN
+    // polarity after analog tuning.
+    _bus->beginWrite();
+    _bus->writeCommand(0x3A);
+    _bus->write(0x55);
+    _bus->endWrite();
+
+    _bus->beginWrite();
+    _bus->writeCommand(0x36);
+    _bus->write(0x28);
+    _bus->endWrite();
+
+    _bus->sendCommand(0x21);
     _bus->sendCommand(0x29);
     delay(50);
   }
@@ -4493,6 +4586,9 @@ static bool decodeNextGifFrame() {
             sizeof(uint16_t));
   }
 
+  const uint32_t frameStartedAt =
+      millis();
+
   int delayMs = 0;
 
   int hasMore =
@@ -4516,7 +4612,7 @@ static bool decodeNextGifFrame() {
           : static_cast<uint32_t>(delayMs);
 
   gifNextFrameAt =
-      millis() + holdMs;
+      frameStartedAt + holdMs;
 
   return true;
 }
@@ -5523,37 +5619,72 @@ static bool readPackedSingleCode(
 }
 
 static void setPackedScaledPixel(
+    uint16_t sourceY,
     uint16_t sourceX,
     uint16_t color) {
+  if (renderBuffer == nullptr ||
+      packedStorageWidth == 0 ||
+      packedStorageHeight == 0) {
+    return;
+  }
+
   uint16_t dx0 =
       static_cast<uint16_t>(
-          (static_cast<uint32_t>(
-               sourceX) *
+          (static_cast<uint32_t>(sourceX) *
            TFT_WIDTH) /
           packedStorageWidth);
 
   uint16_t dx1 =
       static_cast<uint16_t>(
-          (static_cast<uint32_t>(
-               sourceX + 1U) *
+          (static_cast<uint32_t>(sourceX + 1U) *
            TFT_WIDTH) /
           packedStorageWidth);
 
+  uint16_t dy0 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(sourceY) *
+           TFT_HEIGHT) /
+          packedStorageHeight);
+
+  uint16_t dy1 =
+      static_cast<uint16_t>(
+          (static_cast<uint32_t>(sourceY + 1U) *
+           TFT_HEIGHT) /
+          packedStorageHeight);
+
   if (dx1 <= dx0) {
+    uint32_t next =
+        static_cast<uint32_t>(dx0) + 1U;
     dx1 =
         static_cast<uint16_t>(
-            dx0 + 1U >
-                    TFT_WIDTH
+            next > TFT_WIDTH
                 ? TFT_WIDTH
-                : dx0 + 1U);
+                : next);
   }
 
-  for (uint16_t x = dx0;
-       x < dx1 &&
-       x < TFT_WIDTH;
-       ++x) {
-    packedLineBuffer[x] =
-        color;
+  if (dy1 <= dy0) {
+    uint32_t next =
+        static_cast<uint32_t>(dy0) + 1U;
+    dy1 =
+        static_cast<uint16_t>(
+            next > TFT_HEIGHT
+                ? TFT_HEIGHT
+                : next);
+  }
+
+  for (uint16_t y = dy0;
+       y < dy1 && y < TFT_HEIGHT;
+       ++y) {
+    uint16_t *row =
+        renderBuffer +
+        static_cast<size_t>(y) *
+            TFT_WIDTH;
+
+    for (uint16_t x = dx0;
+         x < dx1 && x < TFT_WIDTH;
+         ++x) {
+      row[x] = color;
+    }
   }
 }
 
@@ -5562,13 +5693,11 @@ static bool decodePackedSpan(
     uint16_t sourceY,
     uint16_t sourceX,
     uint16_t sourceCount) {
-  if (sourceY >=
-          packedStorageHeight ||
-      sourceX >=
-          packedStorageWidth ||
+  if (renderBuffer == nullptr ||
+      sourceY >= packedStorageHeight ||
+      sourceX >= packedStorageWidth ||
       sourceCount == 0 ||
-      static_cast<uint32_t>(
-          sourceX) +
+      static_cast<uint32_t>(sourceX) +
               sourceCount >
           packedStorageWidth) {
     return false;
@@ -5576,26 +5705,21 @@ static bool decodePackedSpan(
 
   uint16_t produced = 0;
 
-  while (produced <
-         sourceCount) {
-    int controlRead =
-        file.read();
+  while (produced < sourceCount) {
+    int controlRead = file.read();
 
     if (controlRead < 0) {
       return false;
     }
 
     uint8_t control =
-        static_cast<uint8_t>(
-            controlRead);
+        static_cast<uint8_t>(controlRead);
 
     uint16_t packetCount =
         static_cast<uint16_t>(
-            (control & 0x7F) +
-            1U);
+            (control & 0x7F) + 1U);
 
-    if (produced +
-            packetCount >
+    if (produced + packetCount >
         sourceCount) {
       return false;
     }
@@ -5617,16 +5741,13 @@ static bool decodePackedSpan(
            i < packetCount;
            ++i) {
         setPackedScaledPixel(
+            sourceY,
             static_cast<uint16_t>(
-                sourceX +
-                produced +
-                i),
+                sourceX + produced + i),
             color);
       }
 
-      produced +=
-          packetCount;
-
+      produced += packetCount;
       continue;
     }
 
@@ -5644,16 +5765,13 @@ static bool decodePackedSpan(
         }
 
         setPackedScaledPixel(
+            sourceY,
             static_cast<uint16_t>(
-                sourceX +
-                produced +
-                i),
+                sourceX + produced + i),
             color);
       }
 
-      produced +=
-          packetCount;
-
+      produced += packetCount;
       continue;
     }
 
@@ -5665,16 +5783,14 @@ static bool decodePackedSpan(
                 : 1;
 
     size_t packedBytes =
-        (static_cast<size_t>(
-             packetCount) *
+        (static_cast<size_t>(packetCount) *
              bits +
          7U) /
         8U;
 
     uint8_t packed[64] = {};
 
-    if (packedBytes >
-            sizeof(packed) ||
+    if (packedBytes > sizeof(packed) ||
         file.read(
             packed,
             packedBytes) !=
@@ -5684,25 +5800,21 @@ static bool decodePackedSpan(
 
     uint8_t mask =
         static_cast<uint8_t>(
-            (1U << bits) -
-            1U);
+            (1U << bits) - 1U);
 
     for (uint16_t i = 0;
          i < packetCount;
          ++i) {
       uint16_t bitPosition =
           static_cast<uint16_t>(
-              i *
-              bits);
+              i * bits);
 
       uint16_t byteIndex =
-          bitPosition /
-          8U;
+          bitPosition / 8U;
 
       uint8_t shift =
           static_cast<uint8_t>(
-              bitPosition %
-              8U);
+              bitPosition % 8U);
 
       uint8_t paletteIndex =
           static_cast<uint8_t>(
@@ -5716,64 +5828,14 @@ static bool decodePackedSpan(
       }
 
       setPackedScaledPixel(
+          sourceY,
           static_cast<uint16_t>(
-              sourceX +
-              produced +
-              i),
+              sourceX + produced + i),
           packedPalette565[
               paletteIndex]);
     }
 
-    produced +=
-        packetCount;
-  }
-
-  uint16_t dx0 =
-      static_cast<uint16_t>(
-          (static_cast<uint32_t>(
-               sourceX) *
-           TFT_WIDTH) /
-          packedStorageWidth);
-
-  uint16_t dx1 =
-      static_cast<uint16_t>(
-          (static_cast<uint32_t>(
-               sourceX +
-               sourceCount) *
-           TFT_WIDTH) /
-          packedStorageWidth);
-
-  uint16_t dy0 =
-      static_cast<uint16_t>(
-          (static_cast<uint32_t>(
-               sourceY) *
-           TFT_HEIGHT) /
-          packedStorageHeight);
-
-  uint16_t dy1 =
-      static_cast<uint16_t>(
-          (static_cast<uint32_t>(
-               sourceY + 1U) *
-           TFT_HEIGHT) /
-          packedStorageHeight);
-
-  if (dx1 <= dx0 ||
-      dy1 <= dy0 ||
-      dx1 > TFT_WIDTH ||
-      dy1 > TFT_HEIGHT) {
-    return false;
-  }
-
-  for (uint16_t y = dy0;
-       y < dy1;
-       ++y) {
-    tft->draw16bitRGBBitmap(
-        dx0,
-        y,
-        packedLineBuffer +
-            dx0,
-        dx1 - dx0,
-        1);
+    produced += packetCount;
   }
 
   return true;
@@ -5784,7 +5846,8 @@ static bool openPackedPlayback() {
 
   if (!littleFsReady ||
       !LittleFS.exists(
-          PACKED_PATH)) {
+          PACKED_PATH) ||
+      renderBuffer == nullptr) {
     return false;
   }
 
@@ -5804,8 +5867,14 @@ static bool openPackedPlayback() {
     return false;
   }
 
-  packedFrameIndex =
-      0;
+  packedFrameIndex = 0;
+
+  memset(
+      renderBuffer,
+      0,
+      static_cast<size_t>(TFT_WIDTH) *
+          TFT_HEIGHT *
+          sizeof(uint16_t));
 
   packedNextFrameAt =
       millis();
@@ -5815,7 +5884,9 @@ static bool openPackedPlayback() {
 
 static bool decodeNextPackedFrame() {
   if (!packedPlaybackFile ||
-      packedFrameCount == 0) {
+      packedFrameCount == 0 ||
+      renderBuffer == nullptr ||
+      !displayReady) {
     return false;
   }
 
@@ -5826,12 +5897,20 @@ static bool decodeNextPackedFrame() {
       return false;
     }
 
-    packedFrameIndex =
-        0;
+    packedFrameIndex = 0;
 
-    tft->fillScreen(
-        RGB565_BLACK);
+    memset(
+        renderBuffer,
+        0,
+        static_cast<size_t>(TFT_WIDTH) *
+            TFT_HEIGHT *
+            sizeof(uint16_t));
   }
+
+  // Use an absolute deadline. The old code added the hold time after
+  // decoding and TFT writes, so every frame also paid the render cost.
+  const uint32_t frameStartedAt =
+      millis();
 
   uint16_t durationMs = 0;
   uint16_t spanCount = 0;
@@ -5845,6 +5924,7 @@ static bool decodeNextPackedFrame() {
     return false;
   }
 
+  // Assemble the complete delta frame in PSRAM first.
   for (uint16_t span = 0;
        span < spanCount;
        ++span) {
@@ -5870,14 +5950,25 @@ static bool decodeNextPackedFrame() {
     }
   }
 
+  // Present one completed frame instead of exposing hundreds of small span
+  // writes while the image is still being assembled.
+  tft->draw16bitRGBBitmap(
+      0,
+      0,
+      renderBuffer,
+      TFT_WIDTH,
+      TFT_HEIGHT);
+
   packedFrameIndex++;
 
+  const uint32_t holdMs =
+      durationMs == 0
+          ? 1U
+          : static_cast<uint32_t>(
+                durationMs);
+
   packedNextFrameAt =
-      millis() +
-      (durationMs == 0
-           ? 1U
-           : static_cast<uint32_t>(
-                 durationMs));
+      frameStartedAt + holdMs;
 
   return true;
 }
