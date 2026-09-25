@@ -41,7 +41,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.9";
+static constexpr char FW_VERSION[] = "1.10.10";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -83,6 +83,7 @@ static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 0;
+static constexpr char MENU_CONFIG_FILE_PATH[] = "/menu_cfg.bin";
 
 // PIXEL PRO has no firmware-resident Main Menu background or screensaver.
 // User-uploaded assets are the only persistent visual media.
@@ -1766,6 +1767,117 @@ static void setDefaultMainMenuConfig() {
   mainMenuConfig.version = MENU_STORAGE_VERSION;
 }
 
+static bool mainMenuConfigIsValid(
+    MainMenuConfig &config) {
+  if (config.version !=
+      MENU_STORAGE_VERSION) {
+    return false;
+  }
+
+  for (uint8_t profile = 0;
+       profile < PROFILE_COUNT;
+       ++profile) {
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
+      if (config.actions[profile][slot] >
+          ACTION_COUNT) {
+        return false;
+      }
+
+      config.labels[profile][slot]
+          [MENU_LABEL_MAX_LEN] = '\0';
+    }
+  }
+
+  return true;
+}
+
+static bool saveMainMenuConfigFile() {
+  if (!littleFsReady) {
+    return false;
+  }
+
+  File file =
+      LittleFS.open(
+          MENU_CONFIG_FILE_PATH,
+          "w");
+
+  if (!file) {
+    return false;
+  }
+
+  size_t written =
+      file.write(
+          reinterpret_cast<
+              const uint8_t *>(
+              &mainMenuConfig),
+          sizeof(mainMenuConfig));
+
+  file.flush();
+  file.close();
+
+  return written ==
+             sizeof(mainMenuConfig) &&
+         LittleFS.exists(
+             MENU_CONFIG_FILE_PATH);
+}
+
+static bool loadMainMenuConfigFile() {
+  if (!littleFsReady ||
+      !LittleFS.exists(
+          MENU_CONFIG_FILE_PATH)) {
+    return false;
+  }
+
+  File file =
+      LittleFS.open(
+          MENU_CONFIG_FILE_PATH,
+          "r");
+
+  if (!file ||
+      file.size() !=
+          sizeof(MainMenuConfig)) {
+    if (file) {
+      file.close();
+    }
+
+    return false;
+  }
+
+  MainMenuConfig stored = {};
+
+  size_t read =
+      file.read(
+          reinterpret_cast<uint8_t *>(
+              &stored),
+          sizeof(stored));
+
+  file.close();
+
+  if (read != sizeof(stored) ||
+      !mainMenuConfigIsValid(
+          stored)) {
+    return false;
+  }
+
+  memcpy(
+      &mainMenuConfig,
+      &stored,
+      sizeof(mainMenuConfig));
+
+  preferences.putUChar(
+      "menuver",
+      MENU_STORAGE_VERSION);
+
+  preferences.putBytes(
+      "menucfg",
+      &mainMenuConfig,
+      sizeof(mainMenuConfig));
+
+  return true;
+}
+
 static bool saveMainMenuConfig() {
   mainMenuConfig.version =
       MENU_STORAGE_VERSION;
@@ -1781,11 +1893,19 @@ static bool saveMainMenuConfig() {
           &mainMenuConfig,
           sizeof(mainMenuConfig));
 
-  return versionWritten == sizeof(uint8_t) &&
-         configWritten == sizeof(mainMenuConfig) &&
-         preferences.getBytesLength(
-             "menucfg") ==
-             sizeof(mainMenuConfig);
+  bool nvsSaved =
+      versionWritten == sizeof(uint8_t) &&
+      configWritten == sizeof(mainMenuConfig) &&
+      preferences.getBytesLength(
+          "menucfg") ==
+          sizeof(mainMenuConfig);
+
+  if (littleFsReady) {
+    return saveMainMenuConfigFile() &&
+           nvsSaved;
+  }
+
+  return nvsSaved;
 }
 
 static void loadMainMenuConfig() {
@@ -2771,6 +2891,8 @@ static void renderMainMenu() {
        gapY) /
       2;
 
+  bool hasVisibleMenuItem = false;
+
   for (uint8_t slot = 0;
        slot < MENU_SLOT_COUNT;
        ++slot) {
@@ -2812,6 +2934,11 @@ static void renderMainMenu() {
     uint8_t action =
         mainMenuConfig
             .actions[profile][slot];
+
+    if (drewIcon ||
+        action > 0) {
+      hasVisibleMenuItem = true;
+    }
 
     // Match the requested eezBotFun behavior: custom icons stand alone.
     // The action name is shown only as a fallback when no icon is assigned.
@@ -2878,6 +3005,36 @@ static void renderMainMenu() {
       tft->print(
           label);
     }
+  }
+
+  if (!hasVisibleMenuItem) {
+    const char *title =
+        "MAIN MENU EMPTY";
+
+    const char *hint =
+        "Connect LumiPad to sync";
+
+    tft->setTextSize(2);
+    tft->setTextColor(
+        0xFFFF);
+
+    tft->setCursor(
+        156,
+        132);
+
+    tft->print(
+        title);
+
+    tft->setTextSize(1);
+    tft->setTextColor(
+        0xC618);
+
+    tft->setCursor(
+        174,
+        160);
+
+    tft->print(
+        hint);
   }
 
   renderMainMenuStatusBar();
@@ -10712,6 +10869,10 @@ void setup() {
   // Stage 3: mount LittleFS and load saver metadata/media only.
   littleFsReady = mountPersistentStorage(true);
   if (littleFsReady) {
+    if (!loadMainMenuConfigFile()) {
+      (void)saveMainMenuConfig();
+    }
+
     recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
@@ -10809,6 +10970,10 @@ void setup() {
 
   littleFsReady = mountPersistentStorage(true);
   if (littleFsReady) {
+    if (!loadMainMenuConfigFile()) {
+      (void)saveMainMenuConfig();
+    }
+
     recoverMainMenuAssets();
     loadPersistedMedia();
   } else {

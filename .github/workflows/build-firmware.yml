@@ -115,7 +115,7 @@ jobs:
           python - <<'PY'
           import json, pathlib, os
           v=pathlib.Path("VERSION").read_text().strip()
-          data={"version":v,"framework":"arduino-esp32","core":"3.3.12","asset":"PIXEL_PRO_merged.bin","flashOffset":"0x0"}
+          data={"version":v,"framework":"arduino-esp32","core":"3.3.12","asset":"PIXEL_PRO_app.bin","flashOffset":"0x10000","fullAsset":"PIXEL_PRO_merged.bin","fullFlashOffset":"0x0"}
           pathlib.Path("dist/firmware-manifest.json").write_text(json.dumps(data,indent=2))
           PY
 
