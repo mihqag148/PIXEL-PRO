@@ -694,3 +694,15 @@ media.
 - An empty saver state never auto-starts after the inactivity timeout.
 - LittleFS mount failure also leaves media empty; no compiled artwork is
   substituted.
+
+
+## Main Menu persistence (firmware 1.10.10)
+
+Firmware 1.10.10 keeps the Main Menu action/label configuration in both NVS and
+LittleFS. After LittleFS mounts, a valid `/menu_cfg.bin` copy is preferred and
+is mirrored back to NVS. This prevents routine application updates from leaving
+the Main Menu without its action map if NVS was reset.
+
+When all eight menu slots truly have neither an icon nor an action, the display
+shows a small `MAIN MENU EMPTY` sync hint instead of a completely black screen.
+This is not a factory background or factory screensaver.
