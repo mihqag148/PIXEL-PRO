@@ -1118,6 +1118,9 @@ static void setDefaultTouchCalibration() {
   touchCalibration.yMin = TOUCH_Y_MIN_DEFAULT;
   touchCalibration.yMax = TOUCH_Y_MAX_DEFAULT;
   touchCalibration.flags = TOUCH_DEFAULT_FLAGS;
+
+  touchAffine = {};
+  touchAffineValid = false;
 }
 
 static bool touchCalibrationIsValid(
@@ -1144,10 +1147,46 @@ static bool touchCalibrationIsValid(
   return true;
 }
 
+static bool touchAffineIsValid(
+    const TouchAffineCalibration &affine) {
+  const float values[6] = {
+      affine.ax,
+      affine.bx,
+      affine.cx,
+      affine.ay,
+      affine.by,
+      affine.cy};
+
+  for (float value : values) {
+    if (!isfinite(value)) {
+      return false;
+    }
+  }
+
+  // Touch-panel scale is normally well below 1 px/raw-count. Keep generous
+  // limits while rejecting corrupted NVS values.
+  if (fabsf(affine.ax) > 10.0f ||
+      fabsf(affine.bx) > 10.0f ||
+      fabsf(affine.ay) > 10.0f ||
+      fabsf(affine.by) > 10.0f ||
+      fabsf(affine.cx) > 10000.0f ||
+      fabsf(affine.cy) > 10000.0f) {
+    return false;
+  }
+
+  return fabsf(affine.ax) +
+             fabsf(affine.bx) >
+         0.02f &&
+         fabsf(affine.ay) +
+             fabsf(affine.by) >
+         0.02f;
+}
+
 static void saveTouchCalibration() {
   preferences.putUChar(
       "tcver",
       TOUCH_CAL_VERSION);
+
   preferences.putUShort(
       "tcxmin",
       touchCalibration.xMin);
@@ -1163,14 +1202,42 @@ static void saveTouchCalibration() {
   preferences.putUChar(
       "tcflags",
       touchCalibration.flags);
+
+  preferences.putBool(
+      "tcaff",
+      touchAffineValid);
+
+  preferences.putFloat(
+      "tcax",
+      touchAffine.ax);
+  preferences.putFloat(
+      "tcbx",
+      touchAffine.bx);
+  preferences.putFloat(
+      "tccx",
+      touchAffine.cx);
+  preferences.putFloat(
+      "tcay",
+      touchAffine.ay);
+  preferences.putFloat(
+      "tcby",
+      touchAffine.by);
+  preferences.putFloat(
+      "tccy",
+      touchAffine.cy);
 }
 
 static void loadTouchCalibration() {
   setDefaultTouchCalibration();
 
-  if (preferences.getUChar(
+  const uint8_t storedVersion =
+      preferences.getUChar(
           "tcver",
-          0) != TOUCH_CAL_VERSION) {
+          0);
+
+  if (storedVersion !=
+      TOUCH_CAL_VERSION) {
+    touchCalibrationRequired = true;
     saveTouchCalibration();
     return;
   }
@@ -1197,12 +1264,59 @@ static void loadTouchCalibration() {
           "tcflags",
           TOUCH_DEFAULT_FLAGS);
 
-  if (!touchCalibrationIsValid(stored)) {
-    saveTouchCalibration();
-    return;
+  if (touchCalibrationIsValid(
+          stored)) {
+    touchCalibration =
+        stored;
   }
 
-  touchCalibration = stored;
+  TouchAffineCalibration storedAffine = {};
+  storedAffine.ax =
+      preferences.getFloat(
+          "tcax",
+          0.0f);
+  storedAffine.bx =
+      preferences.getFloat(
+          "tcbx",
+          0.0f);
+  storedAffine.cx =
+      preferences.getFloat(
+          "tccx",
+          0.0f);
+  storedAffine.ay =
+      preferences.getFloat(
+          "tcay",
+          0.0f);
+  storedAffine.by =
+      preferences.getFloat(
+          "tcby",
+          0.0f);
+  storedAffine.cy =
+      preferences.getFloat(
+          "tccy",
+          0.0f);
+
+  const bool storedAffineValid =
+      preferences.getBool(
+          "tcaff",
+          false);
+
+  if (storedAffineValid &&
+      touchAffineIsValid(
+          storedAffine)) {
+    touchAffine =
+        storedAffine;
+
+    touchAffineValid =
+        true;
+
+    touchCalibrationRequired =
+        false;
+  } else {
+    touchAffine = {};
+    touchAffineValid = false;
+    touchCalibrationRequired = true;
+  }
 }
 
 static void setDefaultRgbProfiles() {
