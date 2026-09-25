@@ -7943,8 +7943,7 @@ static void handleCommand(String command) {
         file.close();
       } else {
         custom = false;
-        bytes =
-            PIXEL_FACTORY_MENU_JPEG_SIZE;
+        bytes = 0;
       }
     }
 
