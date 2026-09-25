@@ -56,7 +56,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.4";
+static constexpr char FW_VERSION[] = "1.10.5";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -227,11 +227,11 @@ static constexpr int8_t TOUCH_XM_PIN = TFT_DC;  // D14
 static constexpr int8_t TOUCH_XP_PIN = TFT_D6;  // D39
 static constexpr int8_t TOUCH_YM_PIN = TFT_D7;  // D40
 // Touch calibration copied from the shop's known-working MCUFRIEND sketch.
-// Firmware converts the ESP32-S2 12-bit ADC reading to the same 0..1023
-// scale used by TouchScreen.h before applying these values.
+// Run the ESP32-S2 ADC itself at 10-bit so readings are in the exact 0..1023
+// domain used by TouchScreen.h and the supplied calibration values.
 static constexpr uint16_t TOUCH_ADC_MAX = 1023;
-static constexpr uint16_t TOUCH_PRESSURE_MIN = 200;
-static constexpr uint16_t TOUCH_PRESSURE_MAX = 1000;
+static constexpr uint16_t TOUCH_PRESSURE_MIN = 20;
+static constexpr uint16_t TOUCH_PRESSURE_MAX = 5000;
 static constexpr uint16_t TOUCH_RXPLATE_OHMS = 300;
 // rawX is TouchScreen.h tp.x (sampled on YP); rawY is tp.y (sampled on XM).
 // Keep the calibrated edge pairs with their real raw axes.
@@ -7180,6 +7180,44 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "GET_TOUCH_RAW") {
+    uint16_t rawX = 0;
+    uint16_t rawY = 0;
+    uint16_t pressure = 0;
+
+    const bool pressed =
+        readTouchRaw(
+            rawX,
+            rawY,
+            pressure);
+
+    int16_t x = -1;
+    int16_t y = -1;
+
+    if (pressed) {
+      mapTouchCoordinates(
+          rawX,
+          rawY,
+          x,
+          y);
+    }
+
+    char out[128] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "TOUCHRAW|DOWN=%u|RAWX=%u|RAWY=%u|P=%u|X=%d|Y=%d",
+        pressed ? 1U : 0U,
+        static_cast<unsigned>(rawX),
+        static_cast<unsigned>(rawY),
+        static_cast<unsigned>(pressure),
+        static_cast<int>(x),
+        static_cast<int>(y));
+
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper == "GET_TOUCH_CAL") {
     char out[96];
     snprintf(
@@ -7578,6 +7616,63 @@ static void handleCommand(String command) {
     }
 
     cdcPrintln("OK|MENUCFG");
+    return;
+  }
+
+  if (upper.startsWith("MENUICONSTATE|")) {
+    uint16_t profile = 0;
+    int sep = command.indexOf('|');
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln("ERR|MENUICONSTATE");
+      return;
+    }
+
+    uint8_t mask = 0;
+
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
+      char path[24] = {};
+      menuIconPath(
+          static_cast<uint8_t>(profile),
+          slot,
+          false,
+          path,
+          sizeof(path));
+
+      if (littleFsReady &&
+          LittleFS.exists(path)) {
+        File icon =
+            LittleFS.open(path, "r");
+
+        if (icon &&
+            icon.size() ==
+                MENU_ICON_ASSET_BYTES) {
+          mask |=
+              static_cast<uint8_t>(
+                  1U << slot);
+        }
+
+        if (icon) {
+          icon.close();
+        }
+      }
+    }
+
+    char out[64] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "MENUICONSTATE|PROFILE=%u|MASK=%02X",
+        static_cast<unsigned>(profile),
+        static_cast<unsigned>(mask));
+
+    cdcPrintln(out);
     return;
   }
 
@@ -10230,8 +10325,8 @@ static void restoreTouchSharedPins() {
 
 static uint16_t readTouchAdc10(
     int8_t pin) {
-  // Match TouchScreen.h's 10-bit calibration domain while keeping the S2 ADC
-  // at 12 bits internally. Discard the first sample after each network change.
+  // ADC is configured to 10-bit in initTouch(). Discard the first sample
+  // after re-wiring the resistive network, then average three stable samples.
   (void)analogRead(pin);
 
   uint32_t sum = 0;
@@ -10245,12 +10340,8 @@ static uint16_t readTouchAdc10(
     delayMicroseconds(8);
   }
 
-  const uint16_t adc12 =
-      static_cast<uint16_t>(
-          sum / 3U);
-
   return static_cast<uint16_t>(
-      (adc12 + 2U) >> 2);
+      sum / 3U);
 }
 
 static bool readTouchRaw(
@@ -10343,13 +10434,19 @@ static bool readTouchRaw(
                 : rtouch);
   }
 
+  // ESP32-S2 ADC transfer characteristics differ from the AVR used by the
+  // shop sketch, so do not reject every press solely on the AVR's narrow
+  // 200..1000 pressure window. A real resistive contact must produce valid
+  // non-rail X/Y coordinates plus two finite pressure-node readings.
+  const bool contact =
+      z1 >= 8 &&
+      z1 <= TOUCH_ADC_MAX - 8 &&
+      z2 > z1 + 2 &&
+      z2 <= TOUCH_ADC_MAX;
+
   restoreTouchSharedPins();
 
-  // Use the same valid pressure window as the supplied shop sketch.
-  if (pressure <=
-          TOUCH_PRESSURE_MIN ||
-      pressure >=
-          TOUCH_PRESSURE_MAX) {
+  if (!contact) {
     return false;
   }
 
@@ -10360,6 +10457,14 @@ static bool readTouchRaw(
       rawY < 8 ||
       rawY >
           TOUCH_ADC_MAX - 8) {
+    return false;
+  }
+
+  // Pressure is retained for diagnostics. Use a wider S2-safe window instead
+  // of the AVR-only threshold, while still discarding absurd values.
+  if (pressure > 0 &&
+      (pressure < TOUCH_PRESSURE_MIN ||
+       pressure > TOUCH_PRESSURE_MAX)) {
     return false;
   }
 
@@ -10528,7 +10633,7 @@ static void emitTouchAction(
 }
 
 static void initTouch() {
-  analogReadResolution(12);
+  analogReadResolution(10);
   restoreTouchSharedPins();
 
   touchRawPressed = false;
