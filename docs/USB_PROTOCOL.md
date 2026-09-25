@@ -706,3 +706,26 @@ the Main Menu without its action map if NVS was reset.
 When all eight menu slots truly have neither an icon nor an action, the display
 shows a small `MAIN MENU EMPTY` sync hint instead of a completely black screen.
 This is not a factory background or factory screensaver.
+
+
+## Stable Main Menu transaction and reset telemetry (firmware 1.10.11)
+
+LumiPad can wrap one profile update in:
+
+- `MENUBATCHBEGIN|<profile>`
+- background/config/icon commands
+- `MENUBATCHEND|<profile>`
+
+During the batch, committed files and configuration are stored normally but the
+active 480x320 Main Menu redraw is deferred. `MENUBATCHEND` performs at most one
+final redraw. An abandoned batch expires after 20 seconds so a lost CDC
+connection cannot leave rendering suppressed indefinitely.
+
+`RESETINFO` returns
+`RESETINFO|REASON=<name>|CODE=<esp_reset_reason>|BOOT=<rtc_counter>`.
+The boot notification also includes the reset reason. This distinguishes real
+MCU resets such as BROWNOUT/WDT/PANIC from a display-only redraw or Windows COM
+re-enumeration.
+
+RGB LEDs remain off during early boot and are restored only after native USB is
+up, reducing the power step while the ESP32-S2 and TFT are starting.
