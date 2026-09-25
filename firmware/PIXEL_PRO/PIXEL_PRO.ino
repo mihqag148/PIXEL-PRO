@@ -56,7 +56,7 @@ extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
 
 static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
 
-static constexpr char FW_VERSION[] = "1.10.7";
+static constexpr char FW_VERSION[] = "1.10.8";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -1795,10 +1795,26 @@ static void setDefaultMainMenuConfig() {
   mainMenuConfig.version = MENU_STORAGE_VERSION;
 }
 
-static void saveMainMenuConfig() {
-  mainMenuConfig.version = MENU_STORAGE_VERSION;
-  preferences.putUChar("menuver", MENU_STORAGE_VERSION);
-  preferences.putBytes("menucfg", &mainMenuConfig, sizeof(mainMenuConfig));
+static bool saveMainMenuConfig() {
+  mainMenuConfig.version =
+      MENU_STORAGE_VERSION;
+
+  size_t versionWritten =
+      preferences.putUChar(
+          "menuver",
+          MENU_STORAGE_VERSION);
+
+  size_t configWritten =
+      preferences.putBytes(
+          "menucfg",
+          &mainMenuConfig,
+          sizeof(mainMenuConfig));
+
+  return versionWritten == sizeof(uint8_t) &&
+         configWritten == sizeof(mainMenuConfig) &&
+         preferences.getBytesLength(
+             "menucfg") ==
+             sizeof(mainMenuConfig);
 }
 
 static void loadMainMenuConfig() {
@@ -1882,6 +1898,42 @@ static void loadMainMenuConfig() {
       sizeof(mainMenuConfig));
 }
 
+static void loadActiveProfileState() {
+  activeProfile =
+      preferences.getUChar(
+          "activeprof",
+          0);
+
+  baseLayer =
+      preferences.getUChar(
+          "activelayer",
+          0);
+
+  if (activeProfile >= PROFILE_COUNT) {
+    activeProfile = 0;
+  }
+
+  if (baseLayer >= LAYER_COUNT) {
+    baseLayer = 0;
+  }
+}
+
+static bool saveActiveProfileState() {
+  size_t profileWritten =
+      preferences.putUChar(
+          "activeprof",
+          activeProfile);
+
+  size_t layerWritten =
+      preferences.putUChar(
+          "activelayer",
+          baseLayer);
+
+  return profileWritten == sizeof(uint8_t) &&
+         layerWritten == sizeof(uint8_t);
+}
+
+
 static void menuBackgroundPath(
     uint8_t profile,
     bool temporary,
@@ -1907,6 +1959,31 @@ static void menuIconPath(
       static_cast<unsigned>(profile),
       static_cast<unsigned>(slot));
 }
+
+static void menuBackgroundBackupPath(
+    uint8_t profile,
+    char *out,
+    size_t outSize) {
+  snprintf(
+      out,
+      outSize,
+      "/mb%u.bak",
+      static_cast<unsigned>(profile));
+}
+
+static void menuIconBackupPath(
+    uint8_t profile,
+    uint8_t slot,
+    char *out,
+    size_t outSize) {
+  snprintf(
+      out,
+      outSize,
+      "/mi%u_%u.bak",
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(slot));
+}
+
 
 static void menuLegacyIconJpegPath(
     uint8_t profile,
@@ -3436,6 +3513,131 @@ static void closeMenuUpload() {
   menuUploadReceivedBytes = 0;
 }
 
+static bool replaceLittleFsFileAtomically(
+    const char *tempPath,
+    const char *finalPath,
+    const char *backupPath) {
+  if (!littleFsReady ||
+      tempPath == nullptr ||
+      finalPath == nullptr ||
+      backupPath == nullptr ||
+      !LittleFS.exists(tempPath)) {
+    return false;
+  }
+
+  LittleFS.remove(backupPath);
+
+  const bool hadFinal =
+      LittleFS.exists(finalPath);
+
+  if (hadFinal &&
+      !LittleFS.rename(
+          finalPath,
+          backupPath)) {
+    return false;
+  }
+
+  if (!LittleFS.rename(
+          tempPath,
+          finalPath)) {
+    if (hadFinal) {
+      (void)LittleFS.rename(
+          backupPath,
+          finalPath);
+    }
+
+    return false;
+  }
+
+  if (hadFinal) {
+    LittleFS.remove(backupPath);
+  }
+
+  return true;
+}
+
+static void recoverMainMenuAssets() {
+  if (!littleFsReady) {
+    return;
+  }
+
+  for (uint8_t profile = 0;
+       profile < PROFILE_COUNT;
+       ++profile) {
+    char bgFinal[24] = {};
+    char bgTemp[24] = {};
+    char bgBackup[24] = {};
+
+    menuBackgroundPath(
+        profile,
+        false,
+        bgFinal,
+        sizeof(bgFinal));
+
+    menuBackgroundPath(
+        profile,
+        true,
+        bgTemp,
+        sizeof(bgTemp));
+
+    menuBackgroundBackupPath(
+        profile,
+        bgBackup,
+        sizeof(bgBackup));
+
+    if (!LittleFS.exists(bgFinal) &&
+        LittleFS.exists(bgBackup)) {
+      (void)LittleFS.rename(
+          bgBackup,
+          bgFinal);
+    } else if (LittleFS.exists(bgFinal)) {
+      LittleFS.remove(bgBackup);
+    }
+
+    // A .tmp is never authoritative. It belongs to an interrupted upload.
+    LittleFS.remove(bgTemp);
+
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
+      char iconFinal[24] = {};
+      char iconTemp[24] = {};
+      char iconBackup[24] = {};
+
+      menuIconPath(
+          profile,
+          slot,
+          false,
+          iconFinal,
+          sizeof(iconFinal));
+
+      menuIconPath(
+          profile,
+          slot,
+          true,
+          iconTemp,
+          sizeof(iconTemp));
+
+      menuIconBackupPath(
+          profile,
+          slot,
+          iconBackup,
+          sizeof(iconBackup));
+
+      if (!LittleFS.exists(iconFinal) &&
+          LittleFS.exists(iconBackup)) {
+        (void)LittleFS.rename(
+            iconBackup,
+            iconFinal);
+      } else if (LittleFS.exists(iconFinal)) {
+        LittleFS.remove(iconBackup);
+      }
+
+      LittleFS.remove(iconTemp);
+    }
+  }
+}
+
 static bool beginMenuBackgroundUpload(
     uint8_t profile,
     uint32_t expectedBytes) {
@@ -3450,30 +3652,60 @@ static bool beginMenuBackgroundUpload(
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+  char backupPath[24] = {};
+
   menuBackgroundPath(
       profile,
       false,
       finalPath,
       sizeof(finalPath));
+
   menuBackgroundPath(
       profile,
       true,
       tempPath,
       sizeof(tempPath));
 
-  // Reclaim this profile's old background before checking free space.
+  menuBackgroundBackupPath(
+      profile,
+      backupPath,
+      sizeof(backupPath));
+
+  // Recover any interrupted previous replacement before starting another one.
+  if (!LittleFS.exists(finalPath) &&
+      LittleFS.exists(backupPath)) {
+    (void)LittleFS.rename(
+        backupPath,
+        finalPath);
+  } else if (LittleFS.exists(finalPath)) {
+    LittleFS.remove(backupPath);
+  }
+
+  // Never delete the current final asset at BEGIN. It remains the device-owned
+  // fallback until the new upload has been fully written and validated.
   LittleFS.remove(tempPath);
-  LittleFS.remove(finalPath);
 
-  size_t total = LittleFS.totalBytes();
-  size_t used = LittleFS.usedBytes();
-  size_t freeBytes = total > used ? total - used : 0;
+  size_t total =
+      LittleFS.totalBytes();
 
-  if (expectedBytes + 4096 > freeBytes) {
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 4096 >
+      freeBytes) {
     return false;
   }
 
-  menuUploadFile = LittleFS.open(tempPath, "w");
+  menuUploadFile =
+      LittleFS.open(
+          tempPath,
+          "w");
+
   if (!menuUploadFile) {
     return false;
   }
@@ -3482,6 +3714,7 @@ static bool beginMenuBackgroundUpload(
   menuUploadProfile = profile;
   menuUploadExpectedBytes = expectedBytes;
   menuUploadReceivedBytes = 0;
+
   return true;
 }
 
@@ -3501,12 +3734,15 @@ static bool beginMenuIconUpload(
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+  char backupPath[24] = {};
+
   menuIconPath(
       profile,
       slot,
       false,
       finalPath,
       sizeof(finalPath));
+
   menuIconPath(
       profile,
       slot,
@@ -3514,35 +3750,44 @@ static bool beginMenuIconUpload(
       tempPath,
       sizeof(tempPath));
 
-  char legacyBinPath[24] = {};
-  snprintf(
-      legacyBinPath,
-      sizeof(legacyBinPath),
-      "/mi%u_%u.bin",
-      static_cast<unsigned>(profile),
-      static_cast<unsigned>(slot));
-
-  char legacyJpegPath[24] = {};
-  menuLegacyIconJpegPath(
+  menuIconBackupPath(
       profile,
       slot,
-      legacyJpegPath,
-      sizeof(legacyJpegPath));
+      backupPath,
+      sizeof(backupPath));
+
+  if (!LittleFS.exists(finalPath) &&
+      LittleFS.exists(backupPath)) {
+    (void)LittleFS.rename(
+        backupPath,
+        finalPath);
+  } else if (LittleFS.exists(finalPath)) {
+    LittleFS.remove(backupPath);
+  }
 
   LittleFS.remove(tempPath);
-  LittleFS.remove(finalPath);
-  LittleFS.remove(legacyBinPath);
-  LittleFS.remove(legacyJpegPath);
 
-  size_t total = LittleFS.totalBytes();
-  size_t used = LittleFS.usedBytes();
-  size_t freeBytes = total > used ? total - used : 0;
+  size_t total =
+      LittleFS.totalBytes();
 
-  if (expectedBytes + 1024 > freeBytes) {
+  size_t used =
+      LittleFS.usedBytes();
+
+  size_t freeBytes =
+      total > used
+          ? total - used
+          : 0;
+
+  if (expectedBytes + 1024 >
+      freeBytes) {
     return false;
   }
 
-  menuUploadFile = LittleFS.open(tempPath, "w");
+  menuUploadFile =
+      LittleFS.open(
+          tempPath,
+          "w");
+
   if (!menuUploadFile) {
     return false;
   }
@@ -3552,6 +3797,7 @@ static bool beginMenuIconUpload(
   menuUploadSlot = slot;
   menuUploadExpectedBytes = expectedBytes;
   menuUploadReceivedBytes = 0;
+
   return true;
 }
 
@@ -3609,7 +3855,8 @@ static bool finishMenuBackgroundUpload() {
   if (menuUploadKind != 1 ||
       !menuUploadFile ||
       menuUploadProfile >= PROFILE_COUNT ||
-      menuUploadReceivedBytes != menuUploadExpectedBytes) {
+      menuUploadReceivedBytes !=
+          menuUploadExpectedBytes) {
     closeMenuUpload();
     return false;
   }
@@ -3619,32 +3866,50 @@ static bool finishMenuBackgroundUpload() {
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+  char backupPath[24] = {};
+
   menuBackgroundPath(
       profile,
       false,
       finalPath,
       sizeof(finalPath));
+
   menuBackgroundPath(
       profile,
       true,
       tempPath,
       sizeof(tempPath));
 
+  menuBackgroundBackupPath(
+      profile,
+      backupPath,
+      sizeof(backupPath));
+
   menuUploadFile.flush();
   menuUploadFile.close();
 
-  File file = LittleFS.open(tempPath, "r");
+  File file =
+      LittleFS.open(
+          tempPath,
+          "r");
+
   if (!file) {
     closeMenuUpload();
     return false;
   }
 
   JPEGDEC decoder;
+
   bool valid =
-      decoder.open(file, mainMenuJpegDraw) &&
-      decoder.getWidth() == TFT_WIDTH &&
-      decoder.getHeight() == TFT_HEIGHT &&
-      file.size() == menuUploadExpectedBytes;
+      decoder.open(
+          file,
+          mainMenuJpegDraw) &&
+      decoder.getWidth() ==
+          TFT_WIDTH &&
+      decoder.getHeight() ==
+          TFT_HEIGHT &&
+      file.size() ==
+          menuUploadExpectedBytes;
 
   decoder.close();
   file.close();
@@ -3655,7 +3920,13 @@ static bool finishMenuBackgroundUpload() {
     return false;
   }
 
-  if (!LittleFS.rename(tempPath, finalPath)) {
+  bool committed =
+      replaceLittleFsFileAtomically(
+          tempPath,
+          finalPath,
+          backupPath);
+
+  if (!committed) {
     LittleFS.remove(tempPath);
     closeMenuUpload();
     return false;
@@ -3674,7 +3945,8 @@ static bool finishMenuIconUpload() {
   if (menuUploadKind != 2 ||
       !menuUploadFile ||
       menuUploadProfile >= PROFILE_COUNT ||
-      menuUploadReceivedBytes != menuUploadExpectedBytes) {
+      menuUploadReceivedBytes !=
+          menuUploadExpectedBytes) {
     closeMenuUpload();
     return false;
   }
@@ -3690,6 +3962,7 @@ static bool finishMenuIconUpload() {
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+  char backupPath[24] = {};
 
   menuIconPath(
       profile,
@@ -3705,13 +3978,18 @@ static bool finishMenuIconUpload() {
       tempPath,
       sizeof(tempPath));
 
+  menuIconBackupPath(
+      profile,
+      slot,
+      backupPath,
+      sizeof(backupPath));
+
   File verify =
       LittleFS.open(
           tempPath,
           "r");
 
-  bool valid =
-      false;
+  bool valid = false;
 
   if (verify) {
     uint8_t header[8] = {};
@@ -3750,16 +4028,26 @@ static bool finishMenuIconUpload() {
     verify.close();
   }
 
-  if (!valid ||
-      !LittleFS.rename(
+  if (!valid) {
+    LittleFS.remove(tempPath);
+    closeMenuUpload();
+    return false;
+  }
+
+  bool committed =
+      replaceLittleFsFileAtomically(
           tempPath,
-          finalPath)) {
+          finalPath,
+          backupPath);
+
+  if (!committed) {
     LittleFS.remove(tempPath);
     closeMenuUpload();
     return false;
   }
 
   char legacyJpegPath[24] = {};
+
   menuLegacyIconJpegPath(
       profile,
       slot,
@@ -3768,6 +4056,17 @@ static bool finishMenuIconUpload() {
 
   LittleFS.remove(
       legacyJpegPath);
+
+  char legacyBinPath[24] = {};
+  snprintf(
+      legacyBinPath,
+      sizeof(legacyBinPath),
+      "/mi%u_%u.bin",
+      static_cast<unsigned>(profile),
+      static_cast<unsigned>(slot));
+
+  LittleFS.remove(
+      legacyBinPath);
 
   closeMenuUpload();
 
@@ -3787,18 +4086,27 @@ static void clearMainMenuBackground(
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+  char backupPath[24] = {};
+
   menuBackgroundPath(
       profile,
       false,
       finalPath,
       sizeof(finalPath));
+
   menuBackgroundPath(
       profile,
       true,
       tempPath,
       sizeof(tempPath));
 
+  menuBackgroundBackupPath(
+      profile,
+      backupPath,
+      sizeof(backupPath));
+
   LittleFS.remove(tempPath);
+  LittleFS.remove(backupPath);
   LittleFS.remove(finalPath);
 }
 
@@ -3813,6 +4121,7 @@ static void clearMainMenuIcon(
 
   char finalPath[24] = {};
   char tempPath[24] = {};
+  char backupPath[24] = {};
 
   menuIconPath(
       profile,
@@ -3827,6 +4136,12 @@ static void clearMainMenuIcon(
       true,
       tempPath,
       sizeof(tempPath));
+
+  menuIconBackupPath(
+      profile,
+      slot,
+      backupPath,
+      sizeof(backupPath));
 
   char legacyBinPath[24] = {};
   snprintf(
@@ -3844,6 +4159,7 @@ static void clearMainMenuIcon(
       sizeof(legacyJpegPath));
 
   LittleFS.remove(tempPath);
+  LittleFS.remove(backupPath);
   LittleFS.remove(finalPath);
   LittleFS.remove(legacyBinPath);
   LittleFS.remove(legacyJpegPath);
@@ -7672,7 +7988,10 @@ static void handleCommand(String command) {
           comma + 1;
     }
 
-    saveMainMenuConfig();
+    if (!saveMainMenuConfig()) {
+      cdcPrintln("ERR|MENUCFG_SAVE");
+      return;
+    }
 
     if (profile == activeProfile &&
         !saverActive) {
@@ -8103,6 +8422,7 @@ static void handleCommand(String command) {
       return;
     }
 
+    recoverMainMenuAssets();
     loadPersistedMedia();
 
     if (displayReady &&
@@ -9137,6 +9457,7 @@ static void handleCommand(String command) {
     saveKeymap();
     activeProfile = 0;
     baseLayer = 0;
+    (void)saveActiveProfileState();
     momentaryLayer = -1;
     toggledLayerMask = 0;
     sendMappedReports();
@@ -9592,6 +9913,12 @@ static void handleCommand(String command) {
 
     activeProfile = static_cast<uint8_t>(profile);
     baseLayer = static_cast<uint8_t>(layer);
+
+    if (!saveActiveProfileState()) {
+      cdcPrintln("ERR|PROFILE_SAVE");
+      return;
+    }
+
     momentaryLayer = -1;
     toggledLayerMask = 0;
     sendMappedReports();
@@ -10973,6 +11300,7 @@ void setup() {
   loadMacros();
   loadRgbProfiles();
   loadMainMenuConfig();
+  loadActiveProfileState();
   loadTouchCalibration();
 
   menuHostOs =
@@ -11066,6 +11394,7 @@ void setup() {
   // Stage 3: mount LittleFS and load saver metadata/media only.
   littleFsReady = mountPersistentStorage(true);
   if (littleFsReady) {
+    recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
     activateDefaultSaver();
@@ -11160,6 +11489,7 @@ void setup() {
 
   littleFsReady = mountPersistentStorage(true);
   if (littleFsReady) {
+    recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
     // The factory visual is firmware-resident and remains available even
