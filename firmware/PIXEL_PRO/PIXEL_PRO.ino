@@ -11600,261 +11600,247 @@ static void drawTouchCalibrationTarget() {
       0xFFFF);
 }
 
-static int32_t extrapolateTouchEdge(
-    int32_t rawA,
-    int32_t rawB,
-    int32_t screenA,
-    int32_t screenB,
-    int32_t screenValue) {
-  const int32_t span =
-      screenB -
-      screenA;
-
-  if (span == 0) {
-    return rawA;
-  }
-
-  const int64_t numerator =
-      static_cast<int64_t>(
-          rawB - rawA) *
-      static_cast<int64_t>(
-          screenValue - screenA);
-
-  int32_t value =
-      rawA +
-      static_cast<int32_t>(
-          numerator /
-          span);
-
-  return constrain(
-      value,
-      0,
-      static_cast<int32_t>(
-          TOUCH_ADC_MAX));
-}
-
-static bool setTouchRangeFromPair(
-    int32_t rawA,
-    int32_t rawB,
-    int32_t screenA,
-    int32_t screenB,
-    int32_t screenMax,
-    uint16_t &minimum,
-    uint16_t &maximum) {
-  const int32_t edge0 =
-      extrapolateTouchEdge(
-          rawA,
-          rawB,
-          screenA,
-          screenB,
-          0);
-
-  const int32_t edge1 =
-      extrapolateTouchEdge(
-          rawA,
-          rawB,
-          screenA,
-          screenB,
-          screenMax);
-
-  const int32_t low =
-      min(
-          edge0,
-          edge1);
-
-  const int32_t high =
-      max(
-          edge0,
-          edge1);
-
-  if (high - low <
-      TOUCH_CAL_MIN_SPAN) {
-    return false;
-  }
-
-  minimum =
-      static_cast<uint16_t>(
-          low);
-
-  maximum =
-      static_cast<uint16_t>(
-          high);
-
-  return true;
-}
-
 static bool finishAutomaticTouchCalibration() {
-  const int32_t leftX =
-      (static_cast<int32_t>(
-           touchCalibrationRawX[0]) +
-       static_cast<int32_t>(
-           touchCalibrationRawX[3])) /
-      2;
+  // Targets are TL, TR, BR, BL at (40,40), (439,40), (439,279), (40,279).
+  // Model the raw panel as a 2D affine plane instead of assuming that raw X/Y
+  // are perfectly orthogonal. This corrects rotation, swapped axes and shear.
+  const float r0x =
+      static_cast<float>(
+          touchCalibrationRawX[0]);
+  const float r0y =
+      static_cast<float>(
+          touchCalibrationRawY[0]);
+  const float r1x =
+      static_cast<float>(
+          touchCalibrationRawX[1]);
+  const float r1y =
+      static_cast<float>(
+          touchCalibrationRawY[1]);
+  const float r2x =
+      static_cast<float>(
+          touchCalibrationRawX[2]);
+  const float r2y =
+      static_cast<float>(
+          touchCalibrationRawY[2]);
+  const float r3x =
+      static_cast<float>(
+          touchCalibrationRawX[3]);
+  const float r3y =
+      static_cast<float>(
+          touchCalibrationRawY[3]);
 
-  const int32_t rightX =
-      (static_cast<int32_t>(
-           touchCalibrationRawX[1]) +
-       static_cast<int32_t>(
-           touchCalibrationRawX[2])) /
-      2;
+  const float centerX =
+      (r0x + r1x + r2x + r3x) *
+      0.25f;
+  const float centerY =
+      (r0y + r1y + r2y + r3y) *
+      0.25f;
 
-  const int32_t topX =
-      (static_cast<int32_t>(
-           touchCalibrationRawX[0]) +
-       static_cast<int32_t>(
-           touchCalibrationRawX[1])) /
-      2;
+  // Raw half-axis corresponding to screen horizontal movement.
+  const float ux =
+      (r1x + r2x - r0x - r3x) *
+      0.25f;
+  const float uy =
+      (r1y + r2y - r0y - r3y) *
+      0.25f;
 
-  const int32_t bottomX =
-      (static_cast<int32_t>(
-           touchCalibrationRawX[2]) +
-       static_cast<int32_t>(
-           touchCalibrationRawX[3])) /
-      2;
+  // Raw half-axis corresponding to screen vertical movement.
+  const float vx =
+      (r2x + r3x - r0x - r1x) *
+      0.25f;
+  const float vy =
+      (r2y + r3y - r0y - r1y) *
+      0.25f;
 
-  const int32_t leftY =
-      (static_cast<int32_t>(
-           touchCalibrationRawY[0]) +
-       static_cast<int32_t>(
-           touchCalibrationRawY[3])) /
-      2;
+  const float determinant =
+      ux * vy -
+      uy * vx;
 
-  const int32_t rightY =
-      (static_cast<int32_t>(
-           touchCalibrationRawY[1]) +
-       static_cast<int32_t>(
-           touchCalibrationRawY[2])) /
-      2;
-
-  const int32_t topY =
-      (static_cast<int32_t>(
-           touchCalibrationRawY[0]) +
-       static_cast<int32_t>(
-           touchCalibrationRawY[1])) /
-      2;
-
-  const int32_t bottomY =
-      (static_cast<int32_t>(
-           touchCalibrationRawY[2]) +
-       static_cast<int32_t>(
-           touchCalibrationRawY[3])) /
-      2;
-
-  const int32_t horizontalX =
-      abs(
-          rightX -
-          leftX);
-
-  const int32_t horizontalY =
-      abs(
-          rightY -
-          leftY);
-
-  const bool swap =
-      horizontalY >
-      horizontalX;
-
-  TouchCalibration candidate = {};
-
-  uint16_t calibratedXMin = 0;
-  uint16_t calibratedXMax = 0;
-  uint16_t calibratedYMin = 0;
-  uint16_t calibratedYMax = 0;
-
-  bool xRangeOk = false;
-  bool yRangeOk = false;
-
-  uint8_t flags = 0;
-
-  if (!swap) {
-    xRangeOk =
-        setTouchRangeFromPair(
-            leftX,
-            rightX,
-            40,
-            TFT_WIDTH - 41,
-            TFT_WIDTH - 1,
-            calibratedXMin,
-            calibratedXMax);
-
-    yRangeOk =
-        setTouchRangeFromPair(
-            topY,
-            bottomY,
-            40,
-            TFT_HEIGHT - 41,
-            TFT_HEIGHT - 1,
-            calibratedYMin,
-            calibratedYMax);
-
-    if (rightX <
-        leftX) {
-      flags |=
-          TOUCH_FLAG_INVERT_X;
-    }
-
-    if (bottomY <
-        topY) {
-      flags |=
-          TOUCH_FLAG_INVERT_Y;
-    }
-  } else {
-    flags |=
-        TOUCH_FLAG_SWAP_XY;
-
-    xRangeOk =
-        setTouchRangeFromPair(
-            topX,
-            bottomX,
-            40,
-            TFT_HEIGHT - 41,
-            TFT_HEIGHT - 1,
-            calibratedXMin,
-            calibratedXMax);
-
-    yRangeOk =
-        setTouchRangeFromPair(
-            leftY,
-            rightY,
-            40,
-            TFT_WIDTH - 41,
-            TFT_WIDTH - 1,
-            calibratedYMin,
-            calibratedYMax);
-
-    if (rightY <
-        leftY) {
-      flags |=
-          TOUCH_FLAG_INVERT_X;
-    }
-
-    if (bottomX <
-        topX) {
-      flags |=
-          TOUCH_FLAG_INVERT_Y;
-    }
-  }
-
-  candidate.xMin =
-      calibratedXMin;
-  candidate.xMax =
-      calibratedXMax;
-  candidate.yMin =
-      calibratedYMin;
-  candidate.yMax =
-      calibratedYMax;
-  candidate.flags =
-      flags;
-
-  if (!xRangeOk ||
-      !yRangeOk ||
-      !touchCalibrationIsValid(
-          candidate)) {
+  if (!isfinite(
+          determinant) ||
+      fabsf(
+          determinant) <
+          1500.0f) {
     return false;
   }
 
-  touchCalibration =
-      candidate;
+  static constexpr float SCREEN_CENTER_X =
+      (40.0f +
+       static_cast<float>(
+           TFT_WIDTH - 41)) *
+      0.5f;
+
+  static constexpr float SCREEN_CENTER_Y =
+      (40.0f +
+       static_cast<float>(
+           TFT_HEIGHT - 41)) *
+      0.5f;
+
+  static constexpr float SCREEN_HALF_X =
+      (static_cast<float>(
+           TFT_WIDTH - 41) -
+       40.0f) *
+      0.5f;
+
+  static constexpr float SCREEN_HALF_Y =
+      (static_cast<float>(
+           TFT_HEIGHT - 41) -
+       40.0f) *
+      0.5f;
+
+  TouchAffineCalibration affine = {};
+
+  affine.ax =
+      SCREEN_HALF_X *
+      vy /
+      determinant;
+
+  affine.bx =
+      -SCREEN_HALF_X *
+      vx /
+      determinant;
+
+  affine.cx =
+      SCREEN_CENTER_X -
+      affine.ax *
+          centerX -
+      affine.bx *
+          centerY;
+
+  affine.ay =
+      -SCREEN_HALF_Y *
+      uy /
+      determinant;
+
+  affine.by =
+      SCREEN_HALF_Y *
+      ux /
+      determinant;
+
+  affine.cy =
+      SCREEN_CENTER_Y -
+      affine.ay *
+          centerX -
+      affine.by *
+          centerY;
+
+  if (!touchAffineIsValid(
+          affine)) {
+    return false;
+  }
+
+  static const float targetX[4] = {
+      40.0f,
+      static_cast<float>(
+          TFT_WIDTH - 41),
+      static_cast<float>(
+          TFT_WIDTH - 41),
+      40.0f};
+
+  static const float targetY[4] = {
+      40.0f,
+      40.0f,
+      static_cast<float>(
+          TFT_HEIGHT - 41),
+      static_cast<float>(
+          TFT_HEIGHT - 41)};
+
+  float worstError = 0.0f;
+
+  for (uint8_t i = 0;
+       i < 4;
+       ++i) {
+    const float mappedX =
+        affine.ax *
+            touchCalibrationRawX[i] +
+        affine.bx *
+            touchCalibrationRawY[i] +
+        affine.cx;
+
+    const float mappedY =
+        affine.ay *
+            touchCalibrationRawX[i] +
+        affine.by *
+            touchCalibrationRawY[i] +
+        affine.cy;
+
+    const float dx =
+        mappedX -
+        targetX[i];
+
+    const float dy =
+        mappedY -
+        targetY[i];
+
+    const float error =
+        sqrtf(
+            dx * dx +
+            dy * dy);
+
+    worstError =
+        max(
+            worstError,
+            error);
+  }
+
+  // If the four raw points cannot be represented reasonably by one affine
+  // plane, the user probably missed a target or a false press was captured.
+  if (!isfinite(
+          worstError) ||
+      worstError >
+          55.0f) {
+    return false;
+  }
+
+  touchAffine =
+      affine;
+  touchAffineValid =
+      true;
+  touchCalibrationRequired =
+      false;
+
+  // Keep legacy min/max populated for diagnostics/older commands. They are
+  // no longer used for normal mapping when affine calibration is valid.
+  uint16_t minX =
+      touchCalibrationRawX[0];
+  uint16_t maxX =
+      touchCalibrationRawX[0];
+  uint16_t minY =
+      touchCalibrationRawY[0];
+  uint16_t maxY =
+      touchCalibrationRawY[0];
+
+  for (uint8_t i = 1;
+       i < 4;
+       ++i) {
+    minX =
+        min(
+            minX,
+            touchCalibrationRawX[i]);
+    maxX =
+        max(
+            maxX,
+            touchCalibrationRawX[i]);
+    minY =
+        min(
+            minY,
+            touchCalibrationRawY[i]);
+    maxY =
+        max(
+            maxY,
+            touchCalibrationRawY[i]);
+  }
+
+  touchCalibration.xMin =
+      minX;
+  touchCalibration.xMax =
+      maxX;
+  touchCalibration.yMin =
+      minY;
+  touchCalibration.yMax =
+      maxY;
+  touchCalibration.flags =
+      0;
 
   saveTouchCalibration();
 
