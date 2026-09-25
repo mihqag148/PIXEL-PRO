@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.15";
+static constexpr char FW_VERSION[] = "1.10.16";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -225,7 +225,7 @@ static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // tp.y TS_TOP
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
 static constexpr uint32_t TOUCH_POLL_MS = 24;
 static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
-static constexpr uint8_t TOUCH_CAL_VERSION = 5;
+static constexpr uint8_t TOUCH_CAL_VERSION = 6;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
@@ -284,6 +284,15 @@ struct __attribute__((packed)) TouchCalibration {
   uint16_t yMin;
   uint16_t yMax;
   uint8_t flags;
+};
+
+struct TouchAffineCalibration {
+  float ax;
+  float bx;
+  float cx;
+  float ay;
+  float by;
+  float cy;
 };
 
 struct __attribute__((packed)) MainMenuConfig {
@@ -595,6 +604,9 @@ static uint8_t rollerLastAB = 0;
 static int8_t rollerTransitionAccumulator = 0;
 
 static TouchCalibration touchCalibration = {};
+static TouchAffineCalibration touchAffine = {};
+static bool touchAffineValid = false;
+static bool touchCalibrationRequired = false;
 static bool touchRawPressed = false;
 static bool touchStablePressed = false;
 static bool touchWakeOnly = false;
