@@ -41,22 +41,7 @@
 USBCDC USBSerial;
 #endif
 
-extern const char PIXEL_FACTORY_MENU_B64_0[];
-extern const char PIXEL_FACTORY_MENU_B64_1[];
-extern const char PIXEL_FACTORY_MENU_B64_2[];
-extern const char PIXEL_FACTORY_MENU_B64_3[];
-extern const char PIXEL_FACTORY_MENU_B64_4[];
-extern const char PIXEL_FACTORY_MENU_B64_5[];
-extern const size_t PIXEL_FACTORY_MENU_B64_0_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_1_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_2_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_3_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_4_LEN;
-extern const size_t PIXEL_FACTORY_MENU_B64_5_LEN;
-
-static constexpr size_t PIXEL_FACTORY_MENU_JPEG_SIZE = 18055;
-
-static constexpr char FW_VERSION[] = "1.10.8";
+static constexpr char FW_VERSION[] = "1.10.9";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -99,13 +84,9 @@ static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 0;
 
-// Firmware-resident fallback visuals. Main Menu uses the compiled red/orange
-// dune JPEG. The default screensaver renders the same dune visual language as
-// a smooth animated RGB565 scene, so it consumes no LittleFS space and cannot
-// be deleted by media commands. User uploads always take precedence.
-static constexpr uint8_t DEFAULT_SAVER_FPS = 20;
-static constexpr uint32_t DEFAULT_SAVER_FRAME_MS =
-    1000UL / DEFAULT_SAVER_FPS;
+// There is intentionally no firmware-resident Main Menu image and no
+// firmware-resident screensaver. Missing user assets render as an empty
+// background and an inactive screensaver instead of silently falling back.
 
 // Legacy raw-frame constants are kept only so older app builds can still
 // upload their previous 240x160 RGB332 format. New app builds upload the
@@ -769,7 +750,6 @@ static float gifOffsetX = 0.0f;
 static float gifOffsetY = 0.0f;
 
 static bool saverUsingDefault = false;
-static uint32_t defaultSaverNextFrameAt = 0;
 
 static void stopSaver();
 static void clearSaverBuffer();
@@ -2514,118 +2494,16 @@ static void renderDefaultVisual(
   }
 }
 
-static bool renderFactoryMenuJpeg() {
+static void renderFactoryMenuFallback() {
   if (!displayReady) {
-    return false;
+    return;
   }
 
-  const char *chunks[] = {
-      PIXEL_FACTORY_MENU_B64_0,
-      PIXEL_FACTORY_MENU_B64_1,
-      PIXEL_FACTORY_MENU_B64_2,
-      PIXEL_FACTORY_MENU_B64_3,
-      PIXEL_FACTORY_MENU_B64_4,
-      PIXEL_FACTORY_MENU_B64_5
-  };
-
-  const size_t chunkLengths[] = {
-      PIXEL_FACTORY_MENU_B64_0_LEN,
-      PIXEL_FACTORY_MENU_B64_1_LEN,
-      PIXEL_FACTORY_MENU_B64_2_LEN,
-      PIXEL_FACTORY_MENU_B64_3_LEN,
-      PIXEL_FACTORY_MENU_B64_4_LEN,
-      PIXEL_FACTORY_MENU_B64_5_LEN
-  };
-
-  size_t encodedSize = 0;
-  for (size_t i = 0;
-       i < sizeof(chunkLengths) / sizeof(chunkLengths[0]);
-       ++i) {
-    encodedSize += chunkLengths[i];
-  }
-
-  char *encoded =
-      static_cast<char *>(
-          malloc(encodedSize));
-
-  uint8_t *jpegBytes =
-      static_cast<uint8_t *>(
-          malloc(PIXEL_FACTORY_MENU_JPEG_SIZE));
-
-  if (encoded == nullptr ||
-      jpegBytes == nullptr) {
-    free(encoded);
-    free(jpegBytes);
-    return false;
-  }
-
-  size_t encodedOffset = 0;
-  for (size_t i = 0;
-       i < sizeof(chunkLengths) / sizeof(chunkLengths[0]);
-       ++i) {
-    memcpy(
-        encoded + encodedOffset,
-        chunks[i],
-        chunkLengths[i]);
-
-    encodedOffset +=
-        chunkLengths[i];
-  }
-
-  size_t decodedSize = 0;
-  int decodeStatus =
-      mbedtls_base64_decode(
-          jpegBytes,
-          PIXEL_FACTORY_MENU_JPEG_SIZE,
-          &decodedSize,
-          reinterpret_cast<const unsigned char *>(
-              encoded),
-          encodedSize);
-
-  free(encoded);
-
-  if (decodeStatus != 0 ||
-      decodedSize != PIXEL_FACTORY_MENU_JPEG_SIZE) {
-    free(jpegBytes);
-    return false;
-  }
-
-  JPEGDEC decoder;
-
-  if (!decoder.openRAM(
-          jpegBytes,
-          static_cast<int>(
-              decodedSize),
-          mainMenuJpegDraw) ||
-      decoder.getWidth() != TFT_WIDTH ||
-      decoder.getHeight() != TFT_HEIGHT) {
-    decoder.close();
-    free(jpegBytes);
-    return false;
-  }
-
+  // No compiled artwork fallback. An empty Main Menu background makes upload
+  // failures obvious and prevents firmware from masking the user's actual
+  // device-stored state.
   tft->fillScreen(
       RGB565_BLACK);
-
-  int result =
-      decoder.decode(
-          0,
-          0,
-          0);
-
-  decoder.close();
-  free(jpegBytes);
-
-  return result != 0;
-}
-
-static void renderFactoryMenuFallback() {
-  if (!renderFactoryMenuJpeg()) {
-    // Keep the procedural visual as a final emergency fallback only.
-    renderDefaultVisual(
-        0,
-        false);
-  }
 }
 
 static bool renderMainMenuBackground(
@@ -6746,25 +6624,28 @@ static bool loadPersistedJpeg() {
 }
 
 static void activateDefaultSaver() {
-  saverUsingDefault = true;
+  // Compatibility helper kept for older call sites/diagnostics. There is no
+  // factory saver anymore; "default" means no saver is ready.
+  saverUsingDefault = false;
   saverFormat = SAVER_NONE;
-  saverWidth = TFT_WIDTH;
-  saverHeight = TFT_HEIGHT;
+  saverWidth = 0;
+  saverHeight = 0;
   saverDataBytes = 0;
   saverFrameBytes = 0;
   saverBytesReceived = 0;
   saverFrameCount = 0;
   saverUploading = false;
-  saverReady = true;
+  saverReady = false;
   saverActive = false;
   saverFrameIndex = 0;
   saverFrameStartedAt = 0;
-  defaultSaverNextFrameAt = 0;
 }
 
 static void loadPersistedMedia() {
   saverUsingDefault = false;
   saverReady = false;
+  saverActive = false;
+  saverFormat = SAVER_NONE;
 
   if (loadPersistedPacked()) {
     return;
@@ -6776,9 +6657,7 @@ static void loadPersistedMedia() {
 
   loadPersistedGif();
 
-  if (!saverReady) {
-    activateDefaultSaver();
-  }
+  // Intentionally leave saverReady=false when no user media is stored.
 }
 
 static void clearSaverBuffer() {
@@ -6849,8 +6728,7 @@ static void clearSaverBuffer() {
 
   memset(saverDurations, 0, sizeof(saverDurations));
 
-  // Clearing user media must never remove the firmware-owned fallback.
-  activateDefaultSaver();
+  saverUsingDefault = false;
 }
 
 static void initDisplay() {
@@ -6966,21 +6844,6 @@ static void startSaverNow() {
     return;
   }
 
-  if (saverUsingDefault) {
-    saverActive = true;
-    saverFrameIndex = 0;
-    saverFrameStartedAt = millis();
-
-    renderDefaultVisual(
-        saverFrameStartedAt,
-        true);
-
-    defaultSaverNextFrameAt =
-        saverFrameStartedAt +
-        DEFAULT_SAVER_FRAME_MS;
-
-    return;
-  }
 
   if (saverFormat == SAVER_PACKED) {
     if (!openPackedPlayback()) {
@@ -7077,21 +6940,6 @@ static void pollSaver() {
     return;
   }
 
-  if (saverUsingDefault) {
-    if (static_cast<int32_t>(
-            now -
-            defaultSaverNextFrameAt) >= 0) {
-      renderDefaultVisual(
-          now,
-          true);
-
-      defaultSaverNextFrameAt =
-          now +
-          DEFAULT_SAVER_FRAME_MS;
-    }
-
-    return;
-  }
 
   if (saverFormat == SAVER_PACKED) {
     if (static_cast<int32_t>(
@@ -8083,8 +7931,7 @@ static void handleCommand(String command) {
         littleFsReady &&
         LittleFS.exists(path);
 
-    size_t bytes =
-        PIXEL_FACTORY_MENU_JPEG_SIZE;
+    size_t bytes = 0;
 
     if (custom) {
       File file =
@@ -8099,8 +7946,6 @@ static void handleCommand(String command) {
         file.close();
       } else {
         custom = false;
-        bytes =
-            PIXEL_FACTORY_MENU_JPEG_SIZE;
       }
     }
 
@@ -8113,10 +7958,10 @@ static void handleCommand(String command) {
         static_cast<unsigned>(profile),
         custom
             ? "CUSTOM"
-            : "FACTORY",
+            : "EMPTY",
         custom
             ? "USER_JPEG"
-            : "DUNE_RED_ORANGE",
+            : "NONE",
         static_cast<unsigned long>(bytes),
         static_cast<unsigned>(TFT_WIDTH),
         static_cast<unsigned>(TFT_HEIGHT));
@@ -8399,9 +8244,9 @@ static void handleCommand(String command) {
         static_cast<unsigned long>(used),
         static_cast<unsigned long>(freeBytes),
         static_cast<unsigned>(activeProfile),
-        customBackground ? "CUSTOM" : "FACTORY",
+        customBackground ? "CUSTOM" : "EMPTY",
         static_cast<unsigned>(iconMask),
-        saverUsingDefault ? "DEFAULT" : (saverReady ? "CUSTOM" : "EMPTY"),
+        saverReady ? "CUSTOM" : "EMPTY",
         FW_VERSION);
 
     cdcPrintln(out);
@@ -8482,11 +8327,6 @@ static void handleCommand(String command) {
       return;
     }
 
-    if (saverUsingDefault) {
-      cdcPrintln(
-          "SAVMEDIA|STATE=READY|KIND=DEFAULT|FORMAT=0|DEFAULT=1|ASSET=DUNE_RED_ORANGE_ANIM|NAME=UElYRUwgUFJPIEZhY3RvcnkgRHVuZSBBbmltYXRpb24=|BYTES=0|W=480|H=320|FPS=20|DUR=0|THUMB=0");
-      return;
-    }
 
     String kind =
         preferences.getString(
@@ -11492,8 +11332,7 @@ void setup() {
     recoverMainMenuAssets();
     loadPersistedMedia();
   } else {
-    // The factory visual is firmware-resident and remains available even
-    // when LittleFS cannot be mounted.
+    // No filesystem means no user media and no fallback screensaver.
     activateDefaultSaver();
   }
 
