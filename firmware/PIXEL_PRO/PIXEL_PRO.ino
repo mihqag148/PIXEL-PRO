@@ -10,6 +10,7 @@
 #include <JPEGDEC.h>
 #include <Adafruit_NeoPixel.h>
 #include <mbedtls/base64.h>
+#include <esp_system.h>
 #include "USB.h"
 #include "USBHID.h"
 #include "USBHIDKeyboard.h"
@@ -41,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.10";
+static constexpr char FW_VERSION[] = "1.10.11";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -84,6 +85,7 @@ static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 0;
 static constexpr char MENU_CONFIG_FILE_PATH[] = "/menu_cfg.bin";
+static constexpr uint32_t MENU_BATCH_TIMEOUT_MS = 20000UL;
 
 // PIXEL PRO has no firmware-resident Main Menu background or screensaver.
 // User-uploaded assets are the only persistent visual media.
@@ -614,6 +616,13 @@ static uint8_t menuUploadProfile = 0;
 static uint8_t menuUploadSlot = 0;
 static uint32_t menuUploadExpectedBytes = 0;
 static uint32_t menuUploadReceivedBytes = 0;
+static bool menuBatchActive = false;
+static bool menuBatchDirty = false;
+static uint8_t menuBatchProfile = 0;
+static uint32_t menuBatchLastActivityAt = 0;
+
+RTC_DATA_ATTR static uint32_t bootSequence = 0;
+static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 
 static int16_t menuCpuLoad = -1;
 static int16_t menuCpuTemp = -1;
@@ -3040,6 +3049,123 @@ static void renderMainMenu() {
   renderMainMenuStatusBar();
 }
 
+static const char *resetReasonName(
+    esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "POWERON";
+    case ESP_RST_EXT:
+      return "EXT";
+    case ESP_RST_SW:
+      return "SW";
+    case ESP_RST_PANIC:
+      return "PANIC";
+    case ESP_RST_INT_WDT:
+      return "INT_WDT";
+    case ESP_RST_TASK_WDT:
+      return "TASK_WDT";
+    case ESP_RST_WDT:
+      return "WDT";
+    case ESP_RST_DEEPSLEEP:
+      return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:
+      return "BROWNOUT";
+    case ESP_RST_SDIO:
+      return "SDIO";
+    case ESP_RST_UNKNOWN:
+    default:
+      return "UNKNOWN";
+  }
+}
+
+static void requestMainMenuRender(
+    uint8_t profile) {
+  if (profile >= PROFILE_COUNT ||
+      profile != activeProfile ||
+      saverActive ||
+      !displayReady) {
+    return;
+  }
+
+  if (menuBatchActive &&
+      profile == menuBatchProfile) {
+    menuBatchDirty = true;
+    menuBatchLastActivityAt =
+        millis();
+    return;
+  }
+
+  renderMainMenu();
+}
+
+static void beginMainMenuBatch(
+    uint8_t profile) {
+  menuBatchActive = true;
+  menuBatchDirty = false;
+  menuBatchProfile =
+      profile < PROFILE_COUNT
+          ? profile
+          : 0;
+  menuBatchLastActivityAt =
+      millis();
+}
+
+static void endMainMenuBatch(
+    uint8_t profile) {
+  if (!menuBatchActive) {
+    requestMainMenuRender(
+        profile);
+    return;
+  }
+
+  const uint8_t batchProfile =
+      menuBatchProfile;
+
+  const bool render =
+      menuBatchDirty &&
+      batchProfile == profile;
+
+  menuBatchActive = false;
+  menuBatchDirty = false;
+  menuBatchLastActivityAt = 0;
+
+  if (render) {
+    requestMainMenuRender(
+        batchProfile);
+  }
+}
+
+static void pollMainMenuBatchTimeout() {
+  if (!menuBatchActive) {
+    return;
+  }
+
+  const uint32_t now =
+      millis();
+
+  if (static_cast<uint32_t>(
+          now -
+          menuBatchLastActivityAt) <
+      MENU_BATCH_TIMEOUT_MS) {
+    return;
+  }
+
+  const uint8_t profile =
+      menuBatchProfile;
+
+  const bool render =
+      menuBatchDirty;
+
+  menuBatchActive = false;
+  menuBatchDirty = false;
+  menuBatchLastActivityAt = 0;
+
+  if (render) {
+    requestMainMenuRender(
+        profile);
+  }
+}
+
 static void closeMenuUpload() {
   if (menuUploadFile) {
     menuUploadFile.close();
@@ -3385,6 +3511,11 @@ static bool writeMenuAssetChunk(
   menuUploadReceivedBytes +=
       decodedLength;
 
+  if (menuBatchActive) {
+    menuBatchLastActivityAt =
+        millis();
+  }
+
   return true;
 }
 
@@ -3471,9 +3602,8 @@ static bool finishMenuBackgroundUpload() {
 
   closeMenuUpload();
 
-  if (profile == activeProfile) {
-    renderMainMenu();
-  }
+  requestMainMenuRender(
+      profile);
 
   return true;
 }
@@ -3607,9 +3737,8 @@ static bool finishMenuIconUpload() {
 
   closeMenuUpload();
 
-  if (profile == activeProfile) {
-    renderMainMenu();
-  }
+  requestMainMenuRender(
+      profile);
 
   return true;
 }
@@ -7322,6 +7451,88 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("MENUBATCHBEGIN|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|MENUBATCHBEGIN");
+      return;
+    }
+
+    closeMenuUpload();
+    beginMainMenuBatch(
+        static_cast<uint8_t>(
+            profile));
+
+    char out[48] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|MENUBATCHBEGIN|%u",
+        static_cast<unsigned>(
+            profile));
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper.startsWith("MENUBATCHEND|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|MENUBATCHEND");
+      return;
+    }
+
+    closeMenuUpload();
+    endMainMenuBatch(
+        static_cast<uint8_t>(
+            profile));
+
+    char out[48] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|MENUBATCHEND|%u",
+        static_cast<unsigned>(
+            profile));
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "RESETINFO") {
+    char out[96] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "RESETINFO|REASON=%s|CODE=%u|BOOT=%lu",
+        resetReasonName(
+            bootResetReason),
+        static_cast<unsigned>(
+            bootResetReason),
+        static_cast<unsigned long>(
+            bootSequence));
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper.startsWith("GET_MENUCFG|")) {
     uint16_t profile = 0;
     int sep = command.indexOf('|');
@@ -7471,10 +7682,9 @@ static void handleCommand(String command) {
       return;
     }
 
-    if (profile == activeProfile &&
-        !saverActive) {
-      renderMainMenu();
-    }
+    requestMainMenuRender(
+        static_cast<uint8_t>(
+            profile));
 
     cdcPrintln("OK|MENUCFG");
     return;
@@ -7687,10 +7897,9 @@ static void handleCommand(String command) {
     clearMainMenuBackground(
         static_cast<uint8_t>(profile));
 
-    if (profile == activeProfile &&
-        !saverActive) {
-      renderMainMenu();
-    }
+    requestMainMenuRender(
+        static_cast<uint8_t>(
+            profile));
 
     cdcPrintln("OK|MENUBGCLEAR");
     return;
@@ -7793,16 +8002,18 @@ static void handleCommand(String command) {
         static_cast<uint8_t>(profile),
         static_cast<uint8_t>(slot));
 
-    if (profile == activeProfile &&
-        !saverActive) {
-      renderMainMenu();
-    }
+    requestMainMenuRender(
+        static_cast<uint8_t>(
+            profile));
 
     cdcPrintln("OK|MENUICONCLEAR");
     return;
   }
 
   if (upper == "MENUSHOW") {
+    menuBatchActive = false;
+    menuBatchDirty = false;
+    menuBatchLastActivityAt = 0;
     stopSaver();
     renderMainMenu();
     cdcPrintln("OK|MENUSHOW");
@@ -9399,8 +9610,9 @@ static void handleCommand(String command) {
     sendMappedReports();
     applyRgbProfile();
 
-    if (profileChanged && !saverActive) {
-      renderMainMenu();
+    if (profileChanged) {
+      requestMainMenuRender(
+          activeProfile);
     }
 
     char out[40];
@@ -10770,6 +10982,10 @@ static void pollKeys() {
 }
 
 void setup() {
+  bootResetReason =
+      esp_reset_reason();
+  bootSequence++;
+
   preferences.begin("pixelpro", false);
   loadKeymap();
   loadMacros();
@@ -10790,7 +11006,7 @@ void setup() {
 
   rgbStrip.begin();
   rgbStrip.clear();
-  applyRgbProfile();
+  rgbStrip.show();
 
   initKeys();
   initRoller();
@@ -10926,6 +11142,7 @@ void setup() {
   holdStage(7000, true, false, false, false);
 
   // Stage 7: add RGB runtime. D15 must remain physically disconnected.
+  applyRgbProfile();
   showStage(0xFD20, "7 RGB POLL");
   holdStage(7000, true, true, false, false);
 
@@ -11011,13 +11228,21 @@ void setup() {
   USB.begin();
 
   delay(500);
+  applyRgbProfile();
   sendMappedReports();
-  char bootLine[48] = {};
+
+  char bootLine[112] = {};
   snprintf(
       bootLine,
       sizeof(bootLine),
-      "BOOT|PIXELPRO|%s",
-      FW_VERSION);
+      "BOOT|PIXELPRO|%s|RESET=%s|CODE=%u|BOOT=%lu",
+      FW_VERSION,
+      resetReasonName(
+          bootResetReason),
+      static_cast<unsigned>(
+          bootResetReason),
+      static_cast<unsigned long>(
+          bootSequence));
   cdcPrintln(bootLine);
 }
 
@@ -11025,6 +11250,7 @@ void loop() {
   pollKeys();
   pollRoller();
   pollCdc();
+  pollMainMenuBatchTimeout();
   pollRgbEffect();
   pollSaver();
   if (!PIXEL_DIAG_TOUCH_OFF) {
