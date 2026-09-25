@@ -677,3 +677,18 @@ PIXEL PRO is the authoritative store for the active Main Menu:
   backup left by an interrupted replacement;
 - failed/cancelled uploads therefore no longer erase the previously working
   background or icon.
+
+
+### No firmware fallback artwork (firmware 1.10.9)
+
+PIXEL PRO no longer embeds a factory Main Menu image or a factory
+screensaver.
+
+- If a profile has no uploaded Main Menu background, `MENUBGSTATE` reports
+  `STATE=EMPTY|ASSET=NONE|BYTES=0` and the LCD background is solid black.
+- If no custom screensaver is stored, `SAVERSTATE` and `SAVMEDIA` report
+  `EMPTY`; the idle timeout does not start any saver.
+- `SAVCLEAR` leaves the saver empty instead of re-enabling a protected
+  firmware fallback.
+- This makes storage/upload failures visible instead of being hidden by a
+  factory visual.
