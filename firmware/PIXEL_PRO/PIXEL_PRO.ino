@@ -762,6 +762,8 @@ static void stopSaver();
 static void clearSaverBuffer();
 static void closeJpegUploadFile();
 static void closePackedFiles();
+static void startAutomaticTouchCalibration();
+static void cancelAutomaticTouchCalibration();
 
 static void cdcPrintln(const String &line) {
   USBSerial.println(line);
@@ -7263,6 +7265,34 @@ static void handleCommand(String command) {
         ok
             ? "OK|MODULE_TX"
             : "ERR|MODULE_TX");
+    return;
+  }
+
+  if (upper == "TOUCH_CAL_START") {
+    startAutomaticTouchCalibration();
+    cdcPrintln(
+        "OK|TOUCH_CAL_START");
+    return;
+  }
+
+  if (upper == "TOUCH_CAL_CANCEL") {
+    cancelAutomaticTouchCalibration();
+    cdcPrintln(
+        "OK|TOUCH_CAL_CANCEL");
+    return;
+  }
+
+  if (upper == "GET_TOUCH_CAL_STATE") {
+    char out[64] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "TOUCH_CAL_STATE|ACTIVE=%u|POINT=%u",
+        touchCalibrationMode ? 1U : 0U,
+        static_cast<unsigned>(
+            touchCalibrationPoint));
+    cdcPrintln(
+        out);
     return;
   }
 
