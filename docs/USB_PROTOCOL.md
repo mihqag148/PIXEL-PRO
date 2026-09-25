@@ -650,3 +650,15 @@ matching animated red/orange dune scene.
 - `SAVMEDIA` reports the factory saver as:
   `STATE=READY|KIND=DEFAULT|ASSET=DUNE_RED_ORANGE_ANIM|...|W=480|H=320|FPS=20`.
 - The factory animation cannot be deleted by media-management commands.
+
+
+### Retry-safe media writes (firmware 1.10.7)
+
+The host may repeat the immediately previous DATA chunk if its USB CDC ACK was
+lost. Firmware accepts an exact replay where
+`offset + decodedLength == currentReceivedBytes` without writing the payload
+twice. This applies to Main Menu background/icon data, saver thumbnails,
+direct GIF/JPEG data, and the existing packed PXQ path.
+
+`SAVMEDIA` now includes `FORMAT=<n>` and `DEFAULT=0|1` so LumiPad can
+distinguish firmware fallback artwork from a stored custom screensaver.
