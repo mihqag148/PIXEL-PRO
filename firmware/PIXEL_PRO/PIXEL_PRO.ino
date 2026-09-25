@@ -1779,6 +1779,10 @@ static uint8_t currentLayer() {
 }
 
 
+static KeyBinding resolveBinding(
+    uint8_t layer,
+    uint8_t keyIndex);
+
 static bool saveMainMenuConfig();
 
 static uint8_t effectiveMainMenuAction(
@@ -2953,6 +2957,308 @@ static void renderMainMenuStatusBar() {
       tileY);
 }
 
+static const char *fallbackConsumerName(
+    uint16_t usage) {
+  switch (usage) {
+    case 0x00E9:
+      return "Volume +";
+    case 0x00EA:
+      return "Volume -";
+    case 0x00E2:
+      return "Mute";
+    case 0x00CD:
+      return "Play/Pause";
+    case 0x00B5:
+      return "Next";
+    case 0x00B6:
+      return "Previous";
+    case 0x00B7:
+      return "Stop";
+    default:
+      return nullptr;
+  }
+}
+
+static void fallbackKeyboardName(
+    uint8_t keyCode,
+    char *out,
+    size_t outSize) {
+  if (keyCode >= 0x04 &&
+      keyCode <= 0x1D) {
+    snprintf(
+        out,
+        outSize,
+        "%c",
+        static_cast<char>(
+            'A' +
+            keyCode -
+            0x04));
+    return;
+  }
+
+  if (keyCode >= 0x1E &&
+      keyCode <= 0x26) {
+    snprintf(
+        out,
+        outSize,
+        "%u",
+        static_cast<unsigned>(
+            keyCode -
+            0x1D));
+    return;
+  }
+
+  if (keyCode == 0x27) {
+    snprintf(
+        out,
+        outSize,
+        "0");
+    return;
+  }
+
+  if (keyCode >= 0x3A &&
+      keyCode <= 0x45) {
+    snprintf(
+        out,
+        outSize,
+        "F%u",
+        static_cast<unsigned>(
+            keyCode -
+            0x39));
+    return;
+  }
+
+  const char *name = nullptr;
+
+  switch (keyCode) {
+    case 0x28:
+      name = "Enter";
+      break;
+    case 0x29:
+      name = "Esc";
+      break;
+    case 0x2A:
+      name = "Backspace";
+      break;
+    case 0x2B:
+      name = "Tab";
+      break;
+    case 0x2C:
+      name = "Space";
+      break;
+    case 0x4A:
+      name = "Home";
+      break;
+    case 0x4B:
+      name = "Page Up";
+      break;
+    case 0x4D:
+      name = "End";
+      break;
+    case 0x4E:
+      name = "Page Down";
+      break;
+    case 0x4F:
+      name = "Right";
+      break;
+    case 0x50:
+      name = "Left";
+      break;
+    case 0x51:
+      name = "Down";
+      break;
+    case 0x52:
+      name = "Up";
+      break;
+    case 0x49:
+      name = "Insert";
+      break;
+    case 0x4C:
+      name = "Delete";
+      break;
+    default:
+      break;
+  }
+
+  if (name != nullptr) {
+    snprintf(
+        out,
+        outSize,
+        "%s",
+        name);
+    return;
+  }
+
+  snprintf(
+      out,
+      outSize,
+      "Key %02X",
+      static_cast<unsigned>(
+          keyCode));
+}
+
+static void fallbackBindingLabel(
+    uint8_t slot,
+    char *out,
+    size_t outSize) {
+  if (out == nullptr ||
+      outSize == 0 ||
+      slot >= KEY_COUNT) {
+    return;
+  }
+
+  const KeyBinding binding =
+      resolveBinding(
+          currentLayer(),
+          slot);
+
+  out[0] = '\0';
+
+  switch (binding.type) {
+    case BIND_KEYBOARD: {
+      char keyName[18] = {};
+      fallbackKeyboardName(
+          binding.keyCode,
+          keyName,
+          sizeof(keyName));
+
+      char mods[12] = {};
+
+      if ((binding.modifiers & 0x01U) != 0) {
+        strncat(
+            mods,
+            "Ctrl+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      if ((binding.modifiers & 0x02U) != 0) {
+        strncat(
+            mods,
+            "Shift+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      if ((binding.modifiers & 0x04U) != 0) {
+        strncat(
+            mods,
+            "Alt+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      if ((binding.modifiers & 0x08U) != 0) {
+        strncat(
+            mods,
+            "Win+",
+            sizeof(mods) -
+                strlen(mods) -
+                1);
+      }
+
+      snprintf(
+          out,
+          outSize,
+          "%s%s",
+          mods,
+          keyName);
+      break;
+    }
+
+    case BIND_CONSUMER: {
+      const char *name =
+          fallbackConsumerName(
+              binding.consumerCode);
+
+      if (name != nullptr) {
+        snprintf(
+            out,
+            outSize,
+            "%s",
+            name);
+      } else {
+        snprintf(
+            out,
+            outSize,
+            "Media %04X",
+            static_cast<unsigned>(
+                binding.consumerCode));
+      }
+      break;
+    }
+
+    case BIND_LAYER: {
+      const char *mode =
+          binding.modifiers ==
+                  LAYER_MO
+              ? "Hold"
+              : binding.modifiers ==
+                        LAYER_TG
+                    ? "Toggle"
+                    : "Layer";
+
+      snprintf(
+          out,
+          outSize,
+          "%s L%u",
+          mode,
+          static_cast<unsigned>(
+              binding.keyCode));
+      break;
+    }
+
+    case BIND_MACRO:
+      snprintf(
+          out,
+          outSize,
+          "Macro %u",
+          static_cast<unsigned>(
+              binding.keyCode + 1));
+      break;
+
+    case BIND_ACTION: {
+      const char *label =
+          mainMenuConfig
+              .labels[activeProfile][slot];
+
+      if (label[0] != '\0') {
+        snprintf(
+            out,
+            outSize,
+            "%s",
+            label);
+      } else {
+        snprintf(
+            out,
+            outSize,
+            "Action %u",
+            static_cast<unsigned>(
+                binding.keyCode));
+      }
+      break;
+    }
+
+    case BIND_TRANSPARENT:
+      snprintf(
+          out,
+          outSize,
+          "Transparent");
+      break;
+
+    case BIND_DISABLED:
+    default:
+      snprintf(
+          out,
+          outSize,
+          "Not assigned");
+      break;
+  }
+}
+
 static void renderMainMenu() {
   if (!displayReady ||
       saverActive) {
@@ -3106,9 +3412,8 @@ static void renderMainMenu() {
   }
 
   if (!hasVisibleMenuItem) {
-    // No factory background/screensaver is reintroduced. When persistent
-    // artwork/action metadata is genuinely empty, keep a usable 2x4 key grid
-    // instead of the previous MAIN MENU EMPTY error screen.
+    // If user artwork was erased, keep the display useful by reflecting the
+    // live keymap instead of showing eight anonymous K labels.
     for (uint8_t slot = 0;
          slot < MENU_SLOT_COUNT;
          ++slot) {
@@ -3126,24 +3431,61 @@ static void renderMainMenu() {
           row *
               (cellH + gapY);
 
-      char label[6] = {};
+      tft->drawRoundRect(
+          x + 3,
+          y + 3,
+          cellW - 6,
+          cellH - 6,
+          10,
+          0x7BEF);
+
+      char keyLabel[6] = {};
       snprintf(
-          label,
-          sizeof(label),
+          keyLabel,
+          sizeof(keyLabel),
           "K%u",
           static_cast<unsigned>(
               slot + 1));
 
-      tft->setTextSize(2);
+      tft->setTextSize(1);
       tft->setTextColor(
           0x7BEF);
       tft->setCursor(
-          x +
-              (cellW - 24) / 2,
-          y +
-              (cellH - 16) / 2);
+          x + 10,
+          y + 10);
       tft->print(
-          label);
+          keyLabel);
+
+      char bindingLabel[30] = {};
+      fallbackBindingLabel(
+          slot,
+          bindingLabel,
+          sizeof(bindingLabel));
+
+      size_t len =
+          strnlen(
+              bindingLabel,
+              sizeof(bindingLabel));
+
+      const int textWidth =
+          static_cast<int>(
+              len) *
+          6;
+
+      tft->setTextColor(
+          0xFFFF);
+      tft->setCursor(
+          x +
+              max(
+                  8,
+                  (cellW -
+                   textWidth) /
+                      2),
+          y +
+              (cellH - 8) /
+                  2);
+      tft->print(
+          bindingLabel);
     }
   }
 
