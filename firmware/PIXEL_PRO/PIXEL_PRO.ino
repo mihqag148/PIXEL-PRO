@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.16";
+static constexpr char FW_VERSION[] = "1.10.17";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -223,8 +223,8 @@ static constexpr uint16_t TOUCH_X_MAX_DEFAULT = 907;  // tp.x TS_LEFT
 static constexpr uint16_t TOUCH_Y_MIN_DEFAULT = 139;  // tp.y TS_BOT
 static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // tp.y TS_TOP
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
-static constexpr uint32_t TOUCH_POLL_MS = 24;
-static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
+static constexpr uint32_t TOUCH_POLL_MS = 12;
+static constexpr uint32_t TOUCH_DEBOUNCE_MS = 0;
 static constexpr uint8_t TOUCH_CAL_VERSION = 6;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
@@ -609,6 +609,7 @@ static bool touchAffineValid = false;
 static bool touchCalibrationRequired = false;
 static bool touchRawPressed = false;
 static bool touchStablePressed = false;
+static uint8_t touchReleaseMisses = 0;
 static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
 static int8_t touchFeedbackSlot = -1;
