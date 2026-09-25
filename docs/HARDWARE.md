@@ -2,7 +2,7 @@
 
 Controller: **LOLIN/WEMOS ESP32-S2 Mini**.
 
-Firmware: **1.10.3**.
+Firmware: **1.10.4**.
 
 All controller pins below use the board silk-screen names **Dxx**. Do not convert
 this document to raw ESP32 pin naming when wiring.
@@ -123,13 +123,15 @@ Firmware 1.10.0 uses the controller ID measured directly from the user's panel.
 The diagnostic read returned `00 01 62 83 57 FF` from register `0xBF`, which
 MCUFRIEND identifies as **0x8357 = HX8357-B**.
 
-Firmware 1.10.3 keeps the verified **HX8357-B / ID 0x8357** controller and no
-longer uses Arduino_GFX's full HX8357-B voltage/timing table. This shield revision
-behaves like MCUFRIEND_kbv's 0x8357 path, which intentionally uses only the
-generic reset/pixel-format/sleep-out/display-on sequence plus REV_SCREEN polarity.
+Firmware 1.10.4 keeps the verified **HX8357-B / ID 0x8357** controller and
+the proven MCUFRIEND reset/pixel-format/sleep-out/display-on sequence. After the
+shield 3V3 rail was corrected, the firmware now applies the standard HX8357-B
+power/VCOM/panel/gamma registers after wake-up, then restores landscape MADCTL
+and REV_SCREEN polarity.
 
-This change avoids overwriting panel-specific power/timing values that caused
-the user's display to become dark and flicker.
+Earlier analog-register tests were performed while the shield 3V3 rail was
+floating around 2.55 V, so those results were not representative of the final
+powered hardware.
 
 | TFT shield signal | S2 Mini |
 |---|---|
@@ -353,3 +355,11 @@ For clean hand wiring:
 6. Module bus: D17 + D18 -> PCA9546A
 7. USB: leave D19/D20 dedicated
 8. TFT 8-bit data: D33-D40
+
+
+## 1.10.4 animation playback
+
+PXQ delta frames are assembled in the 480x320 PSRAM framebuffer and transferred
+to the TFT only after the complete frame is ready. PXQ and direct-GIF playback
+also use frame-start deadlines so decode and TFT transfer time is not added to
+the requested frame delay.
