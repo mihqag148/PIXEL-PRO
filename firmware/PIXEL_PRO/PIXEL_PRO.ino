@@ -7819,6 +7819,7 @@ static void handleCommand(String command) {
 
   if (upper == "RESET_TOUCH_CAL") {
     setDefaultTouchCalibration();
+    touchCalibrationRequired = true;
     saveTouchCalibration();
     cdcPrintln("OK|TOUCH_CAL_RESET");
     return;
@@ -7881,6 +7882,9 @@ static void handleCommand(String command) {
     }
 
     touchCalibration = candidate;
+    touchAffine = {};
+    touchAffineValid = false;
+    touchCalibrationRequired = false;
     saveTouchCalibration();
     cdcPrintln("OK|TOUCH_CAL");
     return;
@@ -12074,21 +12078,23 @@ static void pollTouch() {
           touchCalibrationPoint = 0;
 
           if (ok) {
-            char done[112] = {};
+            char done[192] = {};
             snprintf(
                 done,
                 sizeof(done),
-                "TOUCH_CAL_AUTO|DONE|%u|%u|%u|%u|%u",
-                static_cast<unsigned>(
-                    touchCalibration.xMin),
-                static_cast<unsigned>(
-                    touchCalibration.xMax),
-                static_cast<unsigned>(
-                    touchCalibration.yMin),
-                static_cast<unsigned>(
-                    touchCalibration.yMax),
-                static_cast<unsigned>(
-                    touchCalibration.flags));
+                "TOUCH_CAL_AUTO|DONE|AFFINE|%.6f|%.6f|%.3f|%.6f|%.6f|%.3f",
+                static_cast<double>(
+                    touchAffine.ax),
+                static_cast<double>(
+                    touchAffine.bx),
+                static_cast<double>(
+                    touchAffine.cx),
+                static_cast<double>(
+                    touchAffine.ay),
+                static_cast<double>(
+                    touchAffine.by),
+                static_cast<double>(
+                    touchAffine.cy));
             cdcPrintln(
                 done);
           } else {
@@ -12480,6 +12486,13 @@ void setup() {
       static_cast<unsigned long>(
           bootSequence));
   cdcPrintln(bootLine);
+
+  if (!PIXEL_DIAG_TOUCH_OFF &&
+      touchCalibrationRequired) {
+    cdcPrintln(
+        "TOUCH_CAL_REQUIRED|AFFINE");
+    startAutomaticTouchCalibration();
+  }
 }
 
 void loop() {
