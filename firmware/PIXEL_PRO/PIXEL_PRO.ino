@@ -42,7 +42,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.14";
+static constexpr char FW_VERSION[] = "1.10.15";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -225,7 +225,7 @@ static constexpr uint16_t TOUCH_Y_MAX_DEFAULT = 942;  // tp.y TS_TOP
 static constexpr uint16_t TOUCH_CAL_MIN_SPAN = 400;
 static constexpr uint32_t TOUCH_POLL_MS = 24;
 static constexpr uint32_t TOUCH_DEBOUNCE_MS = 28;
-static constexpr uint8_t TOUCH_CAL_VERSION = 4;
+static constexpr uint8_t TOUCH_CAL_VERSION = 5;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
@@ -600,6 +600,10 @@ static bool touchStablePressed = false;
 static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
 static int8_t touchFeedbackSlot = -1;
+static bool touchCalibrationMode = false;
+static uint8_t touchCalibrationPoint = 0;
+static uint16_t touchCalibrationRawX[4] = {};
+static uint16_t touchCalibrationRawY[4] = {};
 static uint32_t touchChangedAt = 0;
 static uint32_t touchLastPollAt = 0;
 static uint16_t touchRawX = 0;
@@ -10972,6 +10976,370 @@ static void drawTouchSlotFeedback(
 
   touchFeedbackSlot =
       slot;
+}
+
+static void drawTouchCalibrationTarget() {
+  if (!displayReady ||
+      !touchCalibrationMode ||
+      touchCalibrationPoint >= 4) {
+    return;
+  }
+
+  static const int16_t targetX[4] = {
+      40,
+      TFT_WIDTH - 41,
+      TFT_WIDTH - 41,
+      40
+  };
+
+  static const int16_t targetY[4] = {
+      40,
+      40,
+      TFT_HEIGHT - 41,
+      TFT_HEIGHT - 41
+  };
+
+  const int16_t x =
+      targetX[touchCalibrationPoint];
+
+  const int16_t y =
+      targetY[touchCalibrationPoint];
+
+  tft->fillScreen(
+      RGB565_BLACK);
+
+  tft->setTextSize(2);
+  tft->setTextColor(
+      0xFFFF);
+
+  tft->setCursor(
+      118,
+      12);
+
+  tft->print(
+      "TOUCH CALIBRATION");
+
+  char step[32] = {};
+  snprintf(
+      step,
+      sizeof(step),
+      "Touch target %u / 4",
+      static_cast<unsigned>(
+          touchCalibrationPoint + 1));
+
+  tft->setTextSize(1);
+  tft->setCursor(
+      184,
+      38);
+  tft->print(
+      step);
+
+  tft->drawCircle(
+      x,
+      y,
+      14,
+      0xFFFF);
+  tft->drawCircle(
+      x,
+      y,
+      15,
+      0xFFFF);
+  tft->drawLine(
+      x - 24,
+      y,
+      x + 24,
+      y,
+      0xFFFF);
+  tft->drawLine(
+      x,
+      y - 24,
+      x,
+      y + 24,
+      0xFFFF);
+}
+
+static int32_t extrapolateTouchEdge(
+    int32_t rawA,
+    int32_t rawB,
+    int32_t screenA,
+    int32_t screenB,
+    int32_t screenValue) {
+  const int32_t span =
+      screenB -
+      screenA;
+
+  if (span == 0) {
+    return rawA;
+  }
+
+  const int64_t numerator =
+      static_cast<int64_t>(
+          rawB - rawA) *
+      static_cast<int64_t>(
+          screenValue - screenA);
+
+  int32_t value =
+      rawA +
+      static_cast<int32_t>(
+          numerator /
+          span);
+
+  return constrain(
+      value,
+      0,
+      static_cast<int32_t>(
+          TOUCH_ADC_MAX));
+}
+
+static bool setTouchRangeFromPair(
+    int32_t rawA,
+    int32_t rawB,
+    int32_t screenA,
+    int32_t screenB,
+    int32_t screenMax,
+    uint16_t &minimum,
+    uint16_t &maximum) {
+  const int32_t edge0 =
+      extrapolateTouchEdge(
+          rawA,
+          rawB,
+          screenA,
+          screenB,
+          0);
+
+  const int32_t edge1 =
+      extrapolateTouchEdge(
+          rawA,
+          rawB,
+          screenA,
+          screenB,
+          screenMax);
+
+  const int32_t low =
+      min(
+          edge0,
+          edge1);
+
+  const int32_t high =
+      max(
+          edge0,
+          edge1);
+
+  if (high - low <
+      TOUCH_CAL_MIN_SPAN) {
+    return false;
+  }
+
+  minimum =
+      static_cast<uint16_t>(
+          low);
+
+  maximum =
+      static_cast<uint16_t>(
+          high);
+
+  return true;
+}
+
+static bool finishAutomaticTouchCalibration() {
+  const int32_t leftX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[3])) /
+      2;
+
+  const int32_t rightX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[1]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[2])) /
+      2;
+
+  const int32_t topX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[1])) /
+      2;
+
+  const int32_t bottomX =
+      (static_cast<int32_t>(
+           touchCalibrationRawX[2]) +
+       static_cast<int32_t>(
+           touchCalibrationRawX[3])) /
+      2;
+
+  const int32_t leftY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[3])) /
+      2;
+
+  const int32_t rightY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[1]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[2])) /
+      2;
+
+  const int32_t topY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[0]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[1])) /
+      2;
+
+  const int32_t bottomY =
+      (static_cast<int32_t>(
+           touchCalibrationRawY[2]) +
+       static_cast<int32_t>(
+           touchCalibrationRawY[3])) /
+      2;
+
+  const int32_t horizontalX =
+      abs(
+          rightX -
+          leftX);
+
+  const int32_t horizontalY =
+      abs(
+          rightY -
+          leftY);
+
+  const bool swap =
+      horizontalY >
+      horizontalX;
+
+  TouchCalibration candidate = {};
+
+  bool xRangeOk = false;
+  bool yRangeOk = false;
+
+  uint8_t flags = 0;
+
+  if (!swap) {
+    xRangeOk =
+        setTouchRangeFromPair(
+            leftX,
+            rightX,
+            40,
+            TFT_WIDTH - 41,
+            TFT_WIDTH - 1,
+            candidate.xMin,
+            candidate.xMax);
+
+    yRangeOk =
+        setTouchRangeFromPair(
+            topY,
+            bottomY,
+            40,
+            TFT_HEIGHT - 41,
+            TFT_HEIGHT - 1,
+            candidate.yMin,
+            candidate.yMax);
+
+    if (rightX <
+        leftX) {
+      flags |=
+          TOUCH_FLAG_INVERT_X;
+    }
+
+    if (bottomY <
+        topY) {
+      flags |=
+          TOUCH_FLAG_INVERT_Y;
+    }
+  } else {
+    flags |=
+        TOUCH_FLAG_SWAP_XY;
+
+    xRangeOk =
+        setTouchRangeFromPair(
+            topX,
+            bottomX,
+            40,
+            TFT_HEIGHT - 41,
+            TFT_HEIGHT - 1,
+            candidate.xMin,
+            candidate.xMax);
+
+    yRangeOk =
+        setTouchRangeFromPair(
+            leftY,
+            rightY,
+            40,
+            TFT_WIDTH - 41,
+            TFT_WIDTH - 1,
+            candidate.yMin,
+            candidate.yMax);
+
+    if (rightY <
+        leftY) {
+      flags |=
+          TOUCH_FLAG_INVERT_X;
+    }
+
+    if (bottomX <
+        topX) {
+      flags |=
+          TOUCH_FLAG_INVERT_Y;
+    }
+  }
+
+  candidate.flags =
+      flags;
+
+  if (!xRangeOk ||
+      !yRangeOk ||
+      !touchCalibrationIsValid(
+          candidate)) {
+    return false;
+  }
+
+  touchCalibration =
+      candidate;
+
+  saveTouchCalibration();
+
+  return true;
+}
+
+static void startAutomaticTouchCalibration() {
+  touchCalibrationMode = true;
+  touchCalibrationPoint = 0;
+
+  memset(
+      touchCalibrationRawX,
+      0,
+      sizeof(
+          touchCalibrationRawX));
+
+  memset(
+      touchCalibrationRawY,
+      0,
+      sizeof(
+          touchCalibrationRawY));
+
+  touchRawPressed = false;
+  touchStablePressed = false;
+  touchChangedAt = millis();
+  touchWakeOnly = false;
+  touchHeldFallbackSlot = -1;
+  touchFeedbackSlot = -1;
+
+  stopSaver();
+  drawTouchCalibrationTarget();
+}
+
+static void cancelAutomaticTouchCalibration() {
+  touchCalibrationMode = false;
+  touchCalibrationPoint = 0;
+  touchRawPressed = false;
+  touchStablePressed = false;
+  touchChangedAt = millis();
+  renderMainMenu();
 }
 
 static bool emitTouchAction(
