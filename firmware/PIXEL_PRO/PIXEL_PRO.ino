@@ -4136,6 +4136,7 @@ static void recoverMainMenuAssets() {
 
       LittleFS.remove(iconTemp);
     }
+  }
 
   for (uint8_t profile = 0;
        profile < PROFILE_COUNT;
