@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.21";
+static constexpr char FW_VERSION[] = "1.10.22";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -233,9 +233,13 @@ static constexpr uint16_t TOUCH_CONFIRM_MOVE_MAX = 70;
 static constexpr uint16_t TOUCH_CONTACT_RAIL_MARGIN = 24;
 static constexpr uint16_t TOUCH_CONTACT_DELTA_MIN = 10;
 static constexpr uint16_t TOUCH_CONTACT_STABILITY_MAX = 90;
+// Calibration and the on-screen pixel test use a deliberately looser
+// coordinate-only reader. Normal menu taps still use the strict contact gate.
+static constexpr uint16_t TOUCH_CAL_SAMPLE_STABILITY_MAX = 180;
+static constexpr uint16_t TOUCH_CAL_RAW_MARGIN = 36;
 static constexpr uint32_t TOUCH_TAP_MIN_MS = 45;
 static constexpr uint32_t TOUCH_TAP_MAX_MS = 1600;
-static constexpr uint8_t TOUCH_CAL_VERSION = 6;
+static constexpr uint8_t TOUCH_CAL_VERSION = 7;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
@@ -544,6 +548,7 @@ static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
 static int8_t touchFeedbackSlot = -1;
 static bool touchCalibrationMode = false;
+static bool touchPixelTestMode = false;
 static uint8_t touchCalibrationPoint = 0;
 static bool touchCalibrationPointCaptured = false;
 static uint16_t touchCalibrationRawX[4] = {};
@@ -570,6 +575,8 @@ static bool menuBatchActive = false;
 static bool menuBatchDirty = false;
 static uint8_t menuBatchProfile = 0;
 static uint32_t menuBatchLastActivityAt = 0;
+static uint8_t menuLastContentProfile = 0;
+static uint8_t menuRenderedProfile = 0;
 
 RTC_DATA_ATTR static uint32_t bootSequence = 0;
 static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
@@ -632,6 +639,8 @@ enum GifScaleMode : uint8_t {
 
 static bool displayReady = false;
 static uint16_t *renderBuffer = nullptr;
+static uint16_t displayVividLine[TFT_WIDTH] = {};
+
 
 static uint8_t *saverData = nullptr;
 static size_t saverDataBytes = 0;
@@ -2248,6 +2257,181 @@ static void menuLegacyIconJpegPath(
       static_cast<unsigned>(slot));
 }
 
+
+static uint8_t vividClamp8(
+    int value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 255) {
+    return 255;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+static uint16_t vividRgb565(
+    uint16_t color) {
+  int r =
+      static_cast<int>((color >> 11) & 0x1F) *
+      255 / 31;
+  int g =
+      static_cast<int>((color >> 5) & 0x3F) *
+      255 / 63;
+  int b =
+      static_cast<int>(color & 0x1F) *
+      255 / 31;
+
+  const int luma =
+      (r * 77 +
+       g * 150 +
+       b * 29) >>
+      8;
+
+  r = luma + (r - luma) * 118 / 100;
+  g = luma + (g - luma) * 118 / 100;
+  b = luma + (b - luma) * 118 / 100;
+
+  r = 128 + (r - 128) * 112 / 100;
+  g = 128 + (g - 128) * 112 / 100;
+  b = 128 + (b - 128) * 112 / 100;
+
+  const uint8_t rr = vividClamp8(r);
+  const uint8_t gg = vividClamp8(g);
+  const uint8_t bb = vividClamp8(b);
+
+  return static_cast<uint16_t>(
+      ((static_cast<uint16_t>(rr) * 31U / 255U) << 11) |
+      ((static_cast<uint16_t>(gg) * 63U / 255U) << 5) |
+      (static_cast<uint16_t>(bb) * 31U / 255U));
+}
+
+static void drawVividRgb565Row(
+    int16_t x,
+    int16_t y,
+    const uint16_t *pixels,
+    uint16_t width) {
+  if (pixels == nullptr ||
+      width == 0 ||
+      width > TFT_WIDTH) {
+    return;
+  }
+
+  for (uint16_t i = 0;
+       i < width;
+       ++i) {
+    displayVividLine[i] =
+        vividRgb565(
+            pixels[i]);
+  }
+
+  tft->draw16bitRGBBitmap(
+      x,
+      y,
+      displayVividLine,
+      width,
+      1);
+}
+
+static bool profileHasMainMenuContent(
+    uint8_t profile) {
+  if (profile >= PROFILE_COUNT) {
+    return false;
+  }
+
+  for (uint8_t slot = 0;
+       slot < MENU_SLOT_COUNT;
+       ++slot) {
+    if (effectiveMainMenuAction(
+            profile,
+            slot) > 0) {
+      return true;
+    }
+  }
+
+  if (!littleFsReady) {
+    return false;
+  }
+
+  char bgPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      bgPath,
+      sizeof(bgPath));
+
+  if (LittleFS.exists(bgPath)) {
+    return true;
+  }
+
+  for (uint8_t slot = 0;
+       slot < MENU_SLOT_COUNT;
+       ++slot) {
+    char iconPath[24] = {};
+    menuIconPath(
+        profile,
+        slot,
+        false,
+        iconPath,
+        sizeof(iconPath));
+
+    if (LittleFS.exists(iconPath)) {
+      return true;
+    }
+
+    char legacyPath[24] = {};
+    menuLegacyIconJpegPath(
+        profile,
+        slot,
+        legacyPath,
+        sizeof(legacyPath));
+
+    if (LittleFS.exists(legacyPath)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static void rememberMainMenuContentProfile(
+    uint8_t profile) {
+  if (profile >= PROFILE_COUNT) {
+    return;
+  }
+
+  menuLastContentProfile = profile;
+  preferences.putUChar(
+      "menulast",
+      profile);
+}
+
+static uint8_t resolveMainMenuRenderProfile() {
+  if (activeProfile < PROFILE_COUNT &&
+      profileHasMainMenuContent(
+          activeProfile)) {
+    return activeProfile;
+  }
+
+  if (menuLastContentProfile < PROFILE_COUNT &&
+      profileHasMainMenuContent(
+          menuLastContentProfile)) {
+    return menuLastContentProfile;
+  }
+
+  for (uint8_t profile = 0;
+       profile < PROFILE_COUNT;
+       ++profile) {
+    if (profileHasMainMenuContent(
+            profile)) {
+      return profile;
+    }
+  }
+
+  return activeProfile < PROFILE_COUNT
+      ? activeProfile
+      : 0;
+}
+
 static int mainMenuJpegDraw(JPEGDRAW *draw) {
   if (draw == nullptr ||
       draw->pPixels == nullptr ||
@@ -2270,14 +2454,14 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
   for (int row = 0;
        row < draw->iHeight;
        ++row) {
-    tft->draw16bitRGBBitmap(
+    drawVividRgb565Row(
         draw->x,
         draw->y + row,
         draw->pPixels +
             static_cast<size_t>(row) *
                 draw->iWidth,
-        width,
-        1);
+        static_cast<uint16_t>(
+            width));
   }
 
   return 1;
@@ -2421,6 +2605,17 @@ static bool renderMainMenuIcon(
               sizeof(rowPixels)) {
             valid = false;
             break;
+          }
+
+          for (uint16_t col = 0;
+               col < MENU_ICON_WIDTH;
+               ++col) {
+            if (rowPixels[col] !=
+                MENU_ICON_TRANSPARENT) {
+              rowPixels[col] =
+                  vividRgb565(
+                      rowPixels[col]);
+            }
           }
 
           int runStart = -1;
@@ -3324,9 +3519,15 @@ static void renderMainMenu() {
   }
 
   const uint8_t profile =
-      activeProfile < PROFILE_COUNT
-          ? activeProfile
-          : 0;
+      resolveMainMenuRenderProfile();
+
+  menuRenderedProfile = profile;
+
+  if (profileHasMainMenuContent(
+          profile)) {
+    rememberMainMenuContentProfile(
+        profile);
+  }
 
   renderMainMenuBackground(
       profile);
@@ -4132,6 +4333,9 @@ static bool finishMenuBackgroundUpload() {
 
   closeMenuUpload();
 
+  rememberMainMenuContentProfile(
+      profile);
+
   requestMainMenuRender(
       profile);
 
@@ -4266,6 +4470,9 @@ static bool finishMenuIconUpload() {
       legacyBinPath);
 
   closeMenuUpload();
+
+  rememberMainMenuContentProfile(
+      profile);
 
   requestMainMenuRender(
       profile);
@@ -4963,7 +5170,9 @@ static void gifDraw(GIFDRAW *draw) {
             ? TFT_HEIGHT - 1
             : dy1;
 
-    uint16_t color = pixels[x];
+    uint16_t color =
+        vividRgb565(
+            pixels[x]);
 
     for (int dy = dy0; dy <= dy1; ++dy) {
       uint16_t *row =
@@ -6194,6 +6403,10 @@ static void setPackedScaledPixel(
     return;
   }
 
+  color =
+      vividRgb565(
+          color);
+
   uint16_t dx0 =
       static_cast<uint16_t>(
           (static_cast<uint32_t>(sourceX) *
@@ -6572,14 +6785,16 @@ static int jpegDraw(JPEGDRAW *draw) {
   // iWidthUsed can be smaller than the MCU row stride on odd image widths.
   // Draw row-by-row so edge padding never writes outside the centered image.
   for (int row = 0; row < height; ++row) {
-    tft->draw16bitRGBBitmap(
-        x,
-        y + row,
+    drawVividRgb565Row(
+        static_cast<int16_t>(
+            x),
+        static_cast<int16_t>(
+            y + row),
         draw->pPixels +
             static_cast<size_t>(row) *
             sourceStride,
-        width,
-        1);
+        static_cast<uint16_t>(
+            width));
   }
 
   return 1;
@@ -7074,7 +7289,11 @@ static uint16_t rgb332To565(uint8_t value) {
   uint16_t g6 = static_cast<uint16_t>((g3 * 63 + 3) / 7);
   uint16_t b5 = static_cast<uint16_t>((b2 * 31 + 1) / 3);
 
-  return static_cast<uint16_t>((r5 << 11) | (g6 << 5) | b5);
+  return vividRgb565(
+      static_cast<uint16_t>(
+          (r5 << 11) |
+          (g6 << 5) |
+          b5));
 }
 
 static void renderSaverFrame(uint8_t index) {
@@ -7135,7 +7354,8 @@ static void renderSaverFrame(uint8_t index) {
 static void startSaverNow() {
   // Calibration owns the display until all four targets have been captured
   // and the final finger release is observed.
-  if (touchCalibrationMode) {
+  if (touchCalibrationMode ||
+      touchPixelTestMode) {
     return;
   }
 
@@ -7217,7 +7437,8 @@ static void stopSaver() {
 
   if (wasActive &&
       displayReady &&
-      !touchCalibrationMode) {
+      !touchCalibrationMode &&
+      !touchPixelTestMode) {
     renderMainMenu();
   }
 }
@@ -7227,7 +7448,8 @@ static void pollSaver() {
 
   // Never allow inactivity timing or playback to take ownership of the TFT
   // while touch calibration is active.
-  if (touchCalibrationMode) {
+  if (touchCalibrationMode ||
+      touchPixelTestMode) {
     return;
   }
 
@@ -7712,6 +7934,69 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "TOUCH_TEST_START") {
+    touchCalibrationMode = false;
+    touchPixelTestMode = true;
+    touchCalibrationPoint = 0;
+    touchCalibrationPointCaptured = false;
+    touchRawPressed = false;
+    touchStablePressed = false;
+    touchPressConfirmations = 0;
+    touchReleaseMisses = 0;
+    touchCandidateRawX = 0;
+    touchCandidateRawY = 0;
+    touchPressStartedAt = 0;
+    touchPendingSlot = -1;
+    touchWakeOnly = false;
+    touchHeldFallbackSlot = -1;
+    touchChangedAt = millis();
+    lastUserActivityAt =
+        touchChangedAt;
+
+    stopSaver();
+    drawTouchPixelTestScreen();
+
+    cdcPrintln(
+        "OK|TOUCH_TEST_START|480|320");
+    return;
+  }
+
+  if (upper == "TOUCH_TEST_STOP") {
+    touchPixelTestMode = false;
+    touchRawPressed = false;
+    touchStablePressed = false;
+    touchPressConfirmations = 0;
+    touchReleaseMisses = 0;
+    touchCandidateRawX = 0;
+    touchCandidateRawY = 0;
+    touchPressStartedAt = 0;
+    touchPendingSlot = -1;
+    touchChangedAt = millis();
+    lastUserActivityAt =
+        touchChangedAt;
+
+    renderMainMenu();
+
+    cdcPrintln(
+        "OK|TOUCH_TEST_STOP");
+    return;
+  }
+
+  if (upper == "GET_TOUCH_TEST_STATE") {
+    char out[80] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "TOUCH_TEST_STATE|ACTIVE=%u|W=%u|H=%u",
+        touchPixelTestMode ? 1U : 0U,
+        static_cast<unsigned>(
+            TFT_WIDTH),
+        static_cast<unsigned>(
+            TFT_HEIGHT));
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper == "TOUCH_CAL_START") {
     startAutomaticTouchCalibration();
     cdcPrintln(
@@ -7746,7 +8031,7 @@ static void handleCommand(String command) {
     uint16_t pressure = 0;
 
     const bool pressed =
-        readTouchRaw(
+        readTouchRawCalibration(
             rawX,
             rawY,
             pressure);
@@ -7755,7 +8040,7 @@ static void handleCommand(String command) {
     int16_t y = -1;
 
     if (pressed) {
-      mapTouchCoordinates(
+      mapTouchDefaultPixels(
           rawX,
           rawY,
           x,
@@ -7886,7 +8171,7 @@ static void handleCommand(String command) {
   }
 
   if (upper == "PANEL") {
-    cdcPrintln("PANEL|HX8357B-MCUFRIEND|60|0|60");
+    cdcPrintln("PANEL|HX8357B-MCUFRIEND|60|0|60|VIVID=1|TOUCHTEST=480x320");
     return;
   }
 
@@ -8257,6 +8542,22 @@ static void handleCommand(String command) {
     if (!saveMainMenuConfig()) {
       cdcPrintln("ERR|MENUCFG_SAVE");
       return;
+    }
+
+    bool hasAction = false;
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
+      if (mainMenuConfig.actions[profile][slot] > 0) {
+        hasAction = true;
+        break;
+      }
+    }
+
+    if (hasAction) {
+      rememberMainMenuContentProfile(
+          static_cast<uint8_t>(
+              profile));
     }
 
     requestMainMenuRender(
@@ -10187,7 +10488,8 @@ static void handleCommand(String command) {
     sendMappedReports();
     applyRgbProfile();
 
-    if (profileChanged) {
+    if (profileChanged ||
+        !saverActive) {
       requestMainMenuRender(
           activeProfile);
     }
@@ -11426,6 +11728,165 @@ static bool readTouchRaw(
          stableCoordinates;
 }
 
+
+static bool readTouchRawCalibration(
+    uint16_t &rawX,
+    uint16_t &rawY,
+    uint16_t &pressure) {
+  if (!displayReady) {
+    return false;
+  }
+
+  // For calibration/testing do not depend on the pressure-divider thresholds
+  // that have been rejecting real presses on this shield. We still demand
+  // three coherent coordinate samples so floating-bus noise is filtered.
+  pinMode(
+      TFT_CS,
+      OUTPUT);
+  digitalWrite(
+      TFT_CS,
+      HIGH);
+
+  uint16_t x1 = 0;
+  uint16_t y1 = 0;
+  uint16_t x2 = 0;
+  uint16_t y2 = 0;
+  uint16_t x3 = 0;
+  uint16_t y3 = 0;
+
+  sampleTouchCoordinates(
+      x1,
+      y1);
+  delayMicroseconds(90);
+
+  sampleTouchCoordinates(
+      x2,
+      y2);
+  delayMicroseconds(90);
+
+  sampleTouchCoordinates(
+      x3,
+      y3);
+
+  rawX =
+      touchMedian3(
+          x1,
+          x2,
+          x3);
+
+  rawY =
+      touchMedian3(
+          y1,
+          y2,
+          y3);
+
+  const uint16_t minX =
+      min(
+          x1,
+          min(
+              x2,
+              x3));
+
+  const uint16_t maxX =
+      max(
+          x1,
+          max(
+              x2,
+              x3));
+
+  const uint16_t minY =
+      min(
+          y1,
+          min(
+              y2,
+              y3));
+
+  const uint16_t maxY =
+      max(
+          y1,
+          max(
+              y2,
+              y3));
+
+  restoreTouchSharedPins();
+
+  const bool inside =
+      rawX >=
+          TOUCH_CAL_RAW_MARGIN &&
+      rawX <=
+          TOUCH_ADC_MAX -
+              TOUCH_CAL_RAW_MARGIN &&
+      rawY >=
+          TOUCH_CAL_RAW_MARGIN &&
+      rawY <=
+          TOUCH_ADC_MAX -
+              TOUCH_CAL_RAW_MARGIN;
+
+  const bool stable =
+      static_cast<uint16_t>(
+          maxX - minX) <=
+          TOUCH_CAL_SAMPLE_STABILITY_MAX &&
+      static_cast<uint16_t>(
+          maxY - minY) <=
+          TOUCH_CAL_SAMPLE_STABILITY_MAX;
+
+  pressure =
+      inside && stable
+          ? 1
+          : 0;
+
+  return inside &&
+         stable;
+}
+
+static void mapTouchDefaultPixels(
+    uint16_t rawX,
+    uint16_t rawY,
+    int16_t &screenX,
+    int16_t &screenY) {
+  // Known-working MCUFRIEND Orientation=1 mapping for this exact 480x320
+  // shield: screen X follows tp.y reversed, screen Y follows tp.x.
+  long mappedX =
+      map(
+          static_cast<long>(
+              rawY),
+          static_cast<long>(
+              TOUCH_Y_MAX_DEFAULT),
+          static_cast<long>(
+              TOUCH_Y_MIN_DEFAULT),
+          0L,
+          static_cast<long>(
+              TFT_WIDTH - 1));
+
+  long mappedY =
+      map(
+          static_cast<long>(
+              rawX),
+          static_cast<long>(
+              TOUCH_X_MIN_DEFAULT),
+          static_cast<long>(
+              TOUCH_X_MAX_DEFAULT),
+          0L,
+          static_cast<long>(
+              TFT_HEIGHT - 1));
+
+  screenX =
+      static_cast<int16_t>(
+          constrain(
+              mappedX,
+              0L,
+              static_cast<long>(
+                  TFT_WIDTH - 1)));
+
+  screenY =
+      static_cast<int16_t>(
+          constrain(
+              mappedY,
+              0L,
+              static_cast<long>(
+                  TFT_HEIGHT - 1)));
+}
+
 static uint16_t normalizeTouchAxis(
     uint16_t raw,
     uint16_t minimum,
@@ -11742,6 +12203,156 @@ static void drawTouchCalibrationTarget() {
       0xFFFF);
 }
 
+static void drawTouchPixelTestScreen() {
+  if (!displayReady ||
+      !touchPixelTestMode) {
+    return;
+  }
+
+  tft->fillScreen(
+      RGB565_BLACK);
+
+  tft->drawRect(
+      0,
+      0,
+      TFT_WIDTH,
+      TFT_HEIGHT,
+      0xFFFF);
+
+  for (int x = 80;
+       x < TFT_WIDTH;
+       x += 80) {
+    tft->drawLine(
+        x,
+        0,
+        x,
+        TFT_HEIGHT - 1,
+        0x2104);
+  }
+
+  for (int y = 80;
+       y < TFT_HEIGHT;
+       y += 80) {
+    tft->drawLine(
+        0,
+        y,
+        TFT_WIDTH - 1,
+        y,
+        0x2104);
+  }
+
+  tft->drawLine(
+      TFT_WIDTH / 2,
+      0,
+      TFT_WIDTH / 2,
+      TFT_HEIGHT - 1,
+      0x39E7);
+
+  tft->drawLine(
+      0,
+      TFT_HEIGHT / 2,
+      TFT_WIDTH - 1,
+      TFT_HEIGHT / 2,
+      0x39E7);
+
+  tft->setTextSize(2);
+  tft->setTextColor(
+      0xFFFF);
+  tft->setCursor(
+      12,
+      10);
+  tft->print(
+      "TOUCH PIXEL TEST 480x320");
+
+  tft->setTextSize(1);
+  tft->setCursor(
+      12,
+      34);
+  tft->print(
+      "Touch anywhere - green crosshair is mapped pixel");
+}
+
+static void drawTouchPixelPoint(
+    int16_t x,
+    int16_t y,
+    uint16_t rawX,
+    uint16_t rawY) {
+  if (!displayReady ||
+      !touchPixelTestMode) {
+    return;
+  }
+
+  drawTouchPixelTestScreen();
+
+  const int left =
+      max(
+          0,
+          static_cast<int>(x) - 16);
+
+  const int right =
+      min(
+          static_cast<int>(
+              TFT_WIDTH - 1),
+          static_cast<int>(x) + 16);
+
+  const int top =
+      max(
+          0,
+          static_cast<int>(y) - 16);
+
+  const int bottom =
+      min(
+          static_cast<int>(
+              TFT_HEIGHT - 1),
+          static_cast<int>(y) + 16);
+
+  tft->drawCircle(
+      x,
+      y,
+      9,
+      0x07E0);
+
+  tft->drawLine(
+      left,
+      y,
+      right,
+      y,
+      0x07E0);
+
+  tft->drawLine(
+      x,
+      top,
+      x,
+      bottom,
+      0x07E0);
+
+  char line[88] = {};
+  snprintf(
+      line,
+      sizeof(line),
+      "PIXEL X=%d Y=%d   RAW X=%u Y=%u",
+      static_cast<int>(x),
+      static_cast<int>(y),
+      static_cast<unsigned>(rawX),
+      static_cast<unsigned>(rawY));
+
+  tft->fillRect(
+      8,
+      TFT_HEIGHT - 24,
+      TFT_WIDTH - 16,
+      18,
+      RGB565_BLACK);
+
+  tft->setTextSize(1);
+  tft->setTextColor(
+      0xFFFF);
+  tft->setCursor(
+      12,
+      TFT_HEIGHT - 20);
+  tft->print(
+      line);
+}
+
 static bool finishAutomaticTouchCalibration() {
   // Targets are TL, TR, BR, BL at (40,40), (439,40), (439,279), (40,279).
   // Model the raw panel as a 2D affine plane instead of assuming that raw X/Y
@@ -11990,6 +12601,7 @@ static bool finishAutomaticTouchCalibration() {
 }
 
 static void startAutomaticTouchCalibration() {
+  touchPixelTestMode = false;
   touchCalibrationMode = true;
   touchCalibrationPoint = 0;
   touchCalibrationPointCaptured = false;
@@ -12048,10 +12660,13 @@ static bool emitTouchAction(
   }
 
   const uint8_t profile =
-      activeProfile <
+      menuRenderedProfile <
               PROFILE_COUNT
-          ? activeProfile
-          : 0;
+          ? menuRenderedProfile
+          : (activeProfile <
+                     PROFILE_COUNT
+                 ? activeProfile
+                 : 0);
 
   const uint8_t action =
       effectiveMainMenuAction(
@@ -12179,10 +12794,16 @@ static void pollTouch() {
   uint16_t pressure = 0;
 
   const bool pressed =
-      readTouchRaw(
-          rawX,
-          rawY,
-          pressure);
+      (touchCalibrationMode ||
+       touchPixelTestMode)
+          ? readTouchRawCalibration(
+                rawX,
+                rawY,
+                pressure)
+          : readTouchRaw(
+                rawX,
+                rawY,
+                pressure);
 
   touchRawPressed =
       pressed;
@@ -12229,7 +12850,13 @@ static void pollTouch() {
     touchRawY = rawY;
     touchPressure = pressure;
 
-    if (!touchCalibrationMode) {
+    if (touchPixelTestMode) {
+      mapTouchDefaultPixels(
+          rawX,
+          rawY,
+          touchX,
+          touchY);
+    } else if (!touchCalibrationMode) {
       mapTouchCoordinates(
           rawX,
           rawY,
@@ -12259,6 +12886,38 @@ static void pollTouch() {
     touchChangedAt = now;
     touchPressStartedAt = now;
     touchPendingSlot = -1;
+
+    if (touchPixelTestMode) {
+      lastUserActivityAt = now;
+
+      drawTouchPixelPoint(
+          touchX,
+          touchY,
+          touchRawX,
+          touchRawY);
+
+      char testOut[112] = {};
+      snprintf(
+          testOut,
+          sizeof(testOut),
+          "TOUCH_TEST|RAWX=%u|RAWY=%u|X=%d|Y=%d|W=%u|H=%u",
+          static_cast<unsigned>(
+              touchRawX),
+          static_cast<unsigned>(
+              touchRawY),
+          static_cast<int>(
+              touchX),
+          static_cast<int>(
+              touchY),
+          static_cast<unsigned>(
+              TFT_WIDTH),
+          static_cast<unsigned>(
+              TFT_HEIGHT));
+
+      cdcPrintln(
+          testOut);
+      return;
+    }
 
     if (touchCalibrationMode) {
       lastUserActivityAt = now;
@@ -12387,6 +13046,11 @@ static void pollTouch() {
 
   touchPressStartedAt = 0;
   touchPendingSlot = -1;
+
+  if (touchPixelTestMode) {
+    lastUserActivityAt = now;
+    return;
+  }
 
   // Calibration advances only after a complete press/release cycle. This
   // guarantees one physical touch can capture exactly one target.
@@ -12527,6 +13191,21 @@ void setup() {
   loadRgbProfiles();
   loadMainMenuConfig();
   loadActiveProfileState();
+
+  menuLastContentProfile =
+      preferences.getUChar(
+          "menulast",
+          activeProfile);
+
+  if (menuLastContentProfile >=
+      PROFILE_COUNT) {
+    menuLastContentProfile =
+        activeProfile;
+  }
+
+  menuRenderedProfile =
+      activeProfile;
+
   loadTouchCalibration();
 
   menuHostOs =
@@ -12784,9 +13463,11 @@ void setup() {
 
   if (!PIXEL_DIAG_TOUCH_OFF &&
       touchCalibrationRequired) {
+    // Do not force the device into four-point calibration at boot. This panel
+    // can still use the known 480x320 legacy mapping immediately, while
+    // LumiPad's Touch Test explicitly exercises the raw panel when requested.
     cdcPrintln(
-        "TOUCH_CAL_REQUIRED|AFFINE");
-    startAutomaticTouchCalibration();
+        "TOUCH_CAL_REQUIRED|DEFAULT_480x320|USE_TOUCH_TEST");
   }
 }
 
