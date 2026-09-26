@@ -7354,7 +7354,8 @@ static void renderSaverFrame(uint8_t index) {
 static void startSaverNow() {
   // Calibration owns the display until all four targets have been captured
   // and the final finger release is observed.
-  if (touchCalibrationMode) {
+  if (touchCalibrationMode ||
+      touchPixelTestMode) {
     return;
   }
 
@@ -7436,7 +7437,8 @@ static void stopSaver() {
 
   if (wasActive &&
       displayReady &&
-      !touchCalibrationMode) {
+      !touchCalibrationMode &&
+      !touchPixelTestMode) {
     renderMainMenu();
   }
 }
@@ -7446,7 +7448,8 @@ static void pollSaver() {
 
   // Never allow inactivity timing or playback to take ownership of the TFT
   // while touch calibration is active.
-  if (touchCalibrationMode) {
+  if (touchCalibrationMode ||
+      touchPixelTestMode) {
     return;
   }
 
@@ -7931,6 +7934,69 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper == "TOUCH_TEST_START") {
+    touchCalibrationMode = false;
+    touchPixelTestMode = true;
+    touchCalibrationPoint = 0;
+    touchCalibrationPointCaptured = false;
+    touchRawPressed = false;
+    touchStablePressed = false;
+    touchPressConfirmations = 0;
+    touchReleaseMisses = 0;
+    touchCandidateRawX = 0;
+    touchCandidateRawY = 0;
+    touchPressStartedAt = 0;
+    touchPendingSlot = -1;
+    touchWakeOnly = false;
+    touchHeldFallbackSlot = -1;
+    touchChangedAt = millis();
+    lastUserActivityAt =
+        touchChangedAt;
+
+    stopSaver();
+    drawTouchPixelTestScreen();
+
+    cdcPrintln(
+        "OK|TOUCH_TEST_START|480|320");
+    return;
+  }
+
+  if (upper == "TOUCH_TEST_STOP") {
+    touchPixelTestMode = false;
+    touchRawPressed = false;
+    touchStablePressed = false;
+    touchPressConfirmations = 0;
+    touchReleaseMisses = 0;
+    touchCandidateRawX = 0;
+    touchCandidateRawY = 0;
+    touchPressStartedAt = 0;
+    touchPendingSlot = -1;
+    touchChangedAt = millis();
+    lastUserActivityAt =
+        touchChangedAt;
+
+    renderMainMenu();
+
+    cdcPrintln(
+        "OK|TOUCH_TEST_STOP");
+    return;
+  }
+
+  if (upper == "GET_TOUCH_TEST_STATE") {
+    char out[80] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "TOUCH_TEST_STATE|ACTIVE=%u|W=%u|H=%u",
+        touchPixelTestMode ? 1U : 0U,
+        static_cast<unsigned>(
+            TFT_WIDTH),
+        static_cast<unsigned>(
+            TFT_HEIGHT));
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper == "TOUCH_CAL_START") {
     startAutomaticTouchCalibration();
     cdcPrintln(
@@ -7965,7 +8031,7 @@ static void handleCommand(String command) {
     uint16_t pressure = 0;
 
     const bool pressed =
-        readTouchRaw(
+        readTouchRawCalibration(
             rawX,
             rawY,
             pressure);
@@ -7974,7 +8040,7 @@ static void handleCommand(String command) {
     int16_t y = -1;
 
     if (pressed) {
-      mapTouchCoordinates(
+      mapTouchDefaultPixels(
           rawX,
           rawY,
           x,
@@ -8105,7 +8171,7 @@ static void handleCommand(String command) {
   }
 
   if (upper == "PANEL") {
-    cdcPrintln("PANEL|HX8357B-MCUFRIEND|60|0|60");
+    cdcPrintln("PANEL|HX8357B-MCUFRIEND|60|0|60|VIVID=1|TOUCHTEST=480x320");
     return;
   }
 
@@ -10422,7 +10488,8 @@ static void handleCommand(String command) {
     sendMappedReports();
     applyRgbProfile();
 
-    if (profileChanged) {
+    if (profileChanged ||
+        !saverActive) {
       requestMainMenuRender(
           activeProfile);
     }
@@ -12534,6 +12601,7 @@ static bool finishAutomaticTouchCalibration() {
 }
 
 static void startAutomaticTouchCalibration() {
+  touchPixelTestMode = false;
   touchCalibrationMode = true;
   touchCalibrationPoint = 0;
   touchCalibrationPointCaptured = false;
@@ -12726,10 +12794,16 @@ static void pollTouch() {
   uint16_t pressure = 0;
 
   const bool pressed =
-      readTouchRaw(
-          rawX,
-          rawY,
-          pressure);
+      (touchCalibrationMode ||
+       touchPixelTestMode)
+          ? readTouchRawCalibration(
+                rawX,
+                rawY,
+                pressure)
+          : readTouchRaw(
+                rawX,
+                rawY,
+                pressure);
 
   touchRawPressed =
       pressed;
@@ -12776,7 +12850,13 @@ static void pollTouch() {
     touchRawY = rawY;
     touchPressure = pressure;
 
-    if (!touchCalibrationMode) {
+    if (touchPixelTestMode) {
+      mapTouchDefaultPixels(
+          rawX,
+          rawY,
+          touchX,
+          touchY);
+    } else if (!touchCalibrationMode) {
       mapTouchCoordinates(
           rawX,
           rawY,
@@ -12806,6 +12886,38 @@ static void pollTouch() {
     touchChangedAt = now;
     touchPressStartedAt = now;
     touchPendingSlot = -1;
+
+    if (touchPixelTestMode) {
+      lastUserActivityAt = now;
+
+      drawTouchPixelPoint(
+          touchX,
+          touchY,
+          touchRawX,
+          touchRawY);
+
+      char testOut[112] = {};
+      snprintf(
+          testOut,
+          sizeof(testOut),
+          "TOUCH_TEST|RAWX=%u|RAWY=%u|X=%d|Y=%d|W=%u|H=%u",
+          static_cast<unsigned>(
+              touchRawX),
+          static_cast<unsigned>(
+              touchRawY),
+          static_cast<int>(
+              touchX),
+          static_cast<int>(
+              touchY),
+          static_cast<unsigned>(
+              TFT_WIDTH),
+          static_cast<unsigned>(
+              TFT_HEIGHT));
+
+      cdcPrintln(
+          testOut);
+      return;
+    }
 
     if (touchCalibrationMode) {
       lastUserActivityAt = now;
@@ -12934,6 +13046,11 @@ static void pollTouch() {
 
   touchPressStartedAt = 0;
   touchPendingSlot = -1;
+
+  if (touchPixelTestMode) {
+    lastUserActivityAt = now;
+    return;
+  }
 
   // Calibration advances only after a complete press/release cycle. This
   // guarantees one physical touch can capture exactly one target.
@@ -13074,6 +13191,21 @@ void setup() {
   loadRgbProfiles();
   loadMainMenuConfig();
   loadActiveProfileState();
+
+  menuLastContentProfile =
+      preferences.getUChar(
+          "menulast",
+          activeProfile);
+
+  if (menuLastContentProfile >=
+      PROFILE_COUNT) {
+    menuLastContentProfile =
+        activeProfile;
+  }
+
+  menuRenderedProfile =
+      activeProfile;
+
   loadTouchCalibration();
 
   menuHostOs =
