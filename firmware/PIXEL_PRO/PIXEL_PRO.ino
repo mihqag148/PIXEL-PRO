@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.22";
+static constexpr char FW_VERSION[] = "1.10.23";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -577,6 +577,7 @@ static uint8_t menuBatchProfile = 0;
 static uint32_t menuBatchLastActivityAt = 0;
 static uint8_t menuLastContentProfile = 0;
 static uint8_t menuRenderedProfile = 0;
+static uint32_t menuCompositeMask = 0;
 
 RTC_DATA_ATTR static uint32_t bootSequence = 0;
 static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
@@ -2205,6 +2206,48 @@ static void menuBackgroundPath(
       static_cast<unsigned>(profile));
 }
 
+
+static bool mainMenuCompositeEnabled(
+    uint8_t profile) {
+  if (profile >= PROFILE_COUNT ||
+      !littleFsReady ||
+      (menuCompositeMask &
+       (1UL << profile)) == 0) {
+    return false;
+  }
+
+  char path[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      path,
+      sizeof(path));
+
+  return LittleFS.exists(path);
+}
+
+static bool setMainMenuCompositeEnabled(
+    uint8_t profile,
+    bool enabled) {
+  if (profile >= PROFILE_COUNT) {
+    return false;
+  }
+
+  const uint32_t bit =
+      1UL << profile;
+
+  if (enabled) {
+    menuCompositeMask |= bit;
+  } else {
+    menuCompositeMask &= ~bit;
+  }
+
+  return preferences.putUInt(
+             "menucomp",
+             menuCompositeMask) ==
+         sizeof(uint32_t);
+}
+
 static void menuIconPath(
     uint8_t profile,
     uint8_t slot,
@@ -3532,6 +3575,12 @@ static void renderMainMenu() {
   renderMainMenuBackground(
       profile);
 
+  if (mainMenuCompositeEnabled(
+          profile)) {
+    renderMainMenuStatusBar();
+    return;
+  }
+
   const int statusY =
       TFT_HEIGHT -
       MENU_STATUS_HEIGHT;
@@ -3667,113 +3716,6 @@ static void renderMainMenu() {
 
       tft->print(
           label);
-    }
-  }
-
-  if (!hasVisibleMenuItem) {
-    // Recovery UI: show the live keymap clearly. This is generated UI, not a
-    // factory wallpaper, so it stays useful even after all user assets were
-    // erased without reintroducing the removed default artwork.
-    for (uint8_t slot = 0;
-         slot < MENU_SLOT_COUNT;
-         ++slot) {
-      const int col =
-          slot % 4;
-      const int row =
-          slot / 4;
-
-      const int x =
-          marginX +
-          col *
-              (cellW + gapX);
-      const int y =
-          marginY +
-          row *
-              (cellH + gapY);
-
-      tft->fillRoundRect(
-          x + 3,
-          y + 3,
-          cellW - 6,
-          cellH - 6,
-          10,
-          0x18E3);
-
-      tft->drawRoundRect(
-          x + 3,
-          y + 3,
-          cellW - 6,
-          cellH - 6,
-          10,
-          0x528A);
-
-      char keyLabel[6] = {};
-      snprintf(
-          keyLabel,
-          sizeof(keyLabel),
-          "K%u",
-          static_cast<unsigned>(
-              slot + 1));
-
-      tft->setTextSize(1);
-      tft->setTextColor(
-          0x9CF3);
-      tft->setCursor(
-          x + 10,
-          y + 9);
-      tft->print(
-          keyLabel);
-
-      char bindingLabel[30] = {};
-      fallbackBindingLabel(
-          slot,
-          bindingLabel,
-          sizeof(bindingLabel));
-
-      size_t len =
-          strnlen(
-              bindingLabel,
-              sizeof(bindingLabel));
-
-      const bool largeText =
-          len <= 9;
-
-      const int textScale =
-          largeText
-              ? 2
-              : 1;
-
-      const int textWidth =
-          static_cast<int>(
-              len) *
-          6 *
-          textScale;
-
-      const int textHeight =
-          8 *
-          textScale;
-
-      tft->setTextSize(
-          textScale);
-      tft->setTextColor(
-          0xFFFF);
-
-      tft->setCursor(
-          x +
-              max(
-                  6,
-                  (cellW -
-                   textWidth) /
-                      2),
-          y +
-              max(
-                  24,
-                  (cellH -
-                   textHeight) /
-                      2));
-
-      tft->print(
-          bindingLabel);
     }
   }
 
@@ -4043,6 +3985,10 @@ static bool beginMenuBackgroundUpload(
   }
 
   closeMenuUpload();
+
+  (void)setMainMenuCompositeEnabled(
+      profile,
+      false);
 
   char finalPath[24] = {};
   char tempPath[24] = {};
@@ -4511,6 +4457,10 @@ static void clearMainMenuBackground(
   LittleFS.remove(tempPath);
   LittleFS.remove(backupPath);
   LittleFS.remove(finalPath);
+
+  (void)setMainMenuCompositeEnabled(
+      profile,
+      false);
 }
 
 static void clearMainMenuIcon(
@@ -8625,6 +8575,109 @@ static void handleCommand(String command) {
     return;
   }
 
+  if (upper.startsWith("MENUMODESTATE|")) {
+    int sep =
+        command.indexOf('|');
+
+    uint16_t profile = 0;
+
+    if (sep < 0 ||
+        !parseUnsigned(
+            command.substring(
+                sep + 1),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|MENUMODESTATE");
+      return;
+    }
+
+    const bool composite =
+        mainMenuCompositeEnabled(
+            static_cast<uint8_t>(
+                profile));
+
+    char out[72] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "MENUMODESTATE|PROFILE=%u|MODE=%s",
+        static_cast<unsigned>(
+            profile),
+        composite
+            ? "COMPOSITE"
+            : "LEGACY");
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper.startsWith("MENUMODE|")) {
+    int p1 =
+        command.indexOf('|');
+
+    int p2 =
+        command.indexOf(
+            '|',
+            p1 + 1);
+
+    uint16_t profile = 0;
+
+    if (p1 < 0 ||
+        p2 < 0 ||
+        !parseUnsigned(
+            command.substring(
+                p1 + 1,
+                p2),
+            PROFILE_COUNT - 1,
+            profile)) {
+      cdcPrintln(
+          "ERR|MENUMODE");
+      return;
+    }
+
+    String mode =
+        upper.substring(
+            p2 + 1);
+
+    const bool composite =
+        mode ==
+        "COMPOSITE";
+
+    const bool legacy =
+        mode ==
+        "LEGACY";
+
+    if ((!composite &&
+         !legacy) ||
+        !setMainMenuCompositeEnabled(
+            static_cast<uint8_t>(
+                profile),
+            composite)) {
+      cdcPrintln(
+          "ERR|MENUMODE");
+      return;
+    }
+
+    requestMainMenuRender(
+        static_cast<uint8_t>(
+            profile));
+
+    char out[64] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|MENUMODE|%u|%s",
+        static_cast<unsigned>(
+            profile),
+        composite
+            ? "COMPOSITE"
+            : "LEGACY");
+
+    cdcPrintln(out);
+    return;
+  }
+
   if (upper.startsWith("MENUBGSTATE|")) {
     int sep = command.indexOf('|');
     uint16_t profile = 0;
@@ -8962,7 +9015,7 @@ static void handleCommand(String command) {
     snprintf(
         out,
         sizeof(out),
-        "FSINFO|READY=%u|TOTAL=%lu|USED=%lu|FREE=%lu|PROFILE=%u|BG=%s|ICONS=%02X|SAVER=%s|FW=%s",
+        "FSINFO|READY=%u|TOTAL=%lu|USED=%lu|FREE=%lu|PROFILE=%u|BG=%s|ICONS=%02X|MODE=%s|SAVER=%s|FW=%s",
         littleFsReady ? 1U : 0U,
         static_cast<unsigned long>(total),
         static_cast<unsigned long>(used),
@@ -8970,6 +9023,10 @@ static void handleCommand(String command) {
         static_cast<unsigned>(activeProfile),
         customBackground ? "CUSTOM" : "EMPTY",
         static_cast<unsigned>(iconMask),
+        mainMenuCompositeEnabled(
+            activeProfile)
+            ? "COMPOSITE"
+            : "LEGACY",
         saverReady ? "CUSTOM" : "EMPTY",
         FW_VERSION);
 
@@ -12036,20 +12093,32 @@ static int8_t mainMenuSlotAt(
     const int row =
         slot / 4;
 
-    const int left =
+    const int cellX =
         marginX +
         col *
             (cellW + gapX);
 
-    const int top =
+    const int cellY =
         marginY +
         row *
             (cellH + gapY);
 
+    const int left =
+        cellX +
+        (cellW -
+         MENU_ICON_WIDTH) /
+            2;
+
+    const int top =
+        cellY +
+        (cellH -
+         MENU_ICON_HEIGHT) /
+            2;
+
     if (x >= left &&
-        x < left + cellW &&
+        x < left + MENU_ICON_WIDTH &&
         y >= top &&
-        y < top + cellH) {
+        y < top + MENU_ICON_HEIGHT) {
       return static_cast<int8_t>(
           slot);
     }
@@ -12093,30 +12162,40 @@ static void drawTouchSlotFeedback(
   const int row =
       slot / 4;
 
-  const int x =
+  const int cellX =
       marginX +
       col *
           (cellW + gapX);
 
-  const int y =
+  const int cellY =
       marginY +
       row *
           (cellH + gapY);
 
-  // A bright double border is visible on both empty K1-K8 fallback cells and
-  // user artwork. It is cleared by re-rendering the menu on TOUCH UP.
+  const int x =
+      cellX +
+      (cellW -
+       MENU_ICON_WIDTH) /
+          2;
+
+  const int y =
+      cellY +
+      (cellH -
+       MENU_ICON_HEIGHT) /
+          2;
+
   tft->drawRect(
       x,
       y,
-      cellW,
-      cellH,
+      MENU_ICON_WIDTH,
+      MENU_ICON_HEIGHT,
       0xFFFF);
 
   tft->drawRect(
       x + 1,
       y + 1,
-      cellW - 2,
-      cellH - 2,
+      MENU_ICON_WIDTH - 2,
+      MENU_ICON_HEIGHT - 2,
       0xFFFF);
 
   touchFeedbackSlot =
@@ -12794,16 +12873,10 @@ static void pollTouch() {
   uint16_t pressure = 0;
 
   const bool pressed =
-      (touchCalibrationMode ||
-       touchPixelTestMode)
-          ? readTouchRawCalibration(
-                rawX,
-                rawY,
-                pressure)
-          : readTouchRaw(
-                rawX,
-                rawY,
-                pressure);
+      readTouchRawCalibration(
+          rawX,
+          rawY,
+          pressure);
 
   touchRawPressed =
       pressed;
@@ -13205,6 +13278,11 @@ void setup() {
 
   menuRenderedProfile =
       activeProfile;
+
+  menuCompositeMask =
+      preferences.getUInt(
+          "menucomp",
+          0);
 
   loadTouchCalibration();
 
