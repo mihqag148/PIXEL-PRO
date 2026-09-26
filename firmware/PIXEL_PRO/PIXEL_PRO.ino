@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.23";
+static constexpr char FW_VERSION[] = "1.10.24";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -2207,23 +2207,54 @@ static void menuBackgroundPath(
 }
 
 
+static void menuCompositeFlagPath(
+    uint8_t profile,
+    char *out,
+    size_t outSize) {
+  snprintf(
+      out,
+      outSize,
+      "/mc%u.flag",
+      static_cast<unsigned>(
+          profile));
+}
+
+
 static bool mainMenuCompositeEnabled(
     uint8_t profile) {
   if (profile >= PROFILE_COUNT ||
-      !littleFsReady ||
-      (menuCompositeMask &
-       (1UL << profile)) == 0) {
+      !littleFsReady) {
     return false;
   }
 
-  char path[24] = {};
+  char backgroundPath[24] = {};
   menuBackgroundPath(
       profile,
       false,
-      path,
-      sizeof(path));
+      backgroundPath,
+      sizeof(backgroundPath));
 
-  return LittleFS.exists(path);
+  if (!LittleFS.exists(
+          backgroundPath)) {
+    return false;
+  }
+
+  char flagPath[24] = {};
+  menuCompositeFlagPath(
+      profile,
+      flagPath,
+      sizeof(flagPath));
+
+  const bool persistedWithAsset =
+      LittleFS.exists(
+          flagPath);
+
+  const bool persistedInNvs =
+      (menuCompositeMask &
+       (1UL << profile)) != 0;
+
+  return persistedWithAsset ||
+         persistedInNvs;
 }
 
 static bool setMainMenuCompositeEnabled(
@@ -2242,10 +2273,52 @@ static bool setMainMenuCompositeEnabled(
     menuCompositeMask &= ~bit;
   }
 
-  return preferences.putUInt(
-             "menucomp",
-             menuCompositeMask) ==
-         sizeof(uint32_t);
+  bool fsOk = true;
+
+  if (littleFsReady) {
+    char flagPath[24] = {};
+    menuCompositeFlagPath(
+        profile,
+        flagPath,
+        sizeof(flagPath));
+
+    if (enabled) {
+      File flag =
+          LittleFS.open(
+              flagPath,
+              "w");
+
+      if (!flag) {
+        fsOk = false;
+      } else {
+        const uint8_t marker[4] = {
+            'P',
+            'X',
+            'M',
+            '1'};
+
+        fsOk =
+            flag.write(
+                marker,
+                sizeof(marker)) ==
+            sizeof(marker);
+
+        flag.close();
+      }
+    } else {
+      LittleFS.remove(
+          flagPath);
+    }
+  }
+
+  const bool nvsOk =
+      preferences.putUInt(
+          "menucomp",
+          menuCompositeMask) ==
+      sizeof(uint32_t);
+
+  return fsOk &&
+         nvsOk;
 }
 
 static void menuIconPath(
@@ -2525,9 +2598,7 @@ static bool renderMainMenuBackground(
 
   if (!littleFsReady ||
       !LittleFS.exists(path)) {
-    tft->fillScreen(
-        RGB565_BLACK);
-    return true;
+    return false;
   }
 
   File file =
@@ -2536,27 +2607,30 @@ static bool renderMainMenuBackground(
           "r");
 
   if (!file) {
-    tft->fillScreen(
-        RGB565_BLACK);
-    return true;
+    return false;
   }
 
   JPEGDEC decoder;
-  if (!decoder.open(
+
+  const bool valid =
+      decoder.open(
           file,
-          mainMenuJpegDraw) ||
-      decoder.getWidth() != TFT_WIDTH ||
-      decoder.getHeight() != TFT_HEIGHT) {
+          mainMenuJpegDraw) &&
+      decoder.getWidth() ==
+          TFT_WIDTH &&
+      decoder.getHeight() ==
+          TFT_HEIGHT;
+
+  if (!valid) {
     decoder.close();
     file.close();
-    tft->fillScreen(
-        RGB565_BLACK);
-    return true;
+    return false;
   }
 
-  tft->fillScreen(RGB565_BLACK);
+  tft->fillScreen(
+      RGB565_BLACK);
 
-  int result =
+  const int result =
       decoder.decode(
           0,
           0,
@@ -2565,13 +2639,7 @@ static bool renderMainMenuBackground(
   decoder.close();
   file.close();
 
-  if (result == 0) {
-    tft->fillScreen(
-        RGB565_BLACK);
-    return true;
-  }
-
-  return true;
+  return result != 0;
 }
 
 static bool renderMainMenuIcon(
@@ -3555,6 +3623,84 @@ static void fallbackBindingLabel(
   }
 }
 
+static void drawMainMenuEmptyState(
+    uint8_t profile,
+    bool imageError) {
+  if (!displayReady) {
+    return;
+  }
+
+  // Never leave the panel looking dead. This is a diagnostic/status screen,
+  // not a default Main Menu asset and it contains no K1-K8 fallback keys.
+  tft->fillScreen(
+      0x1082);
+
+  tft->fillRoundRect(
+      28,
+      44,
+      TFT_WIDTH - 56,
+      TFT_HEIGHT - 88,
+      18,
+      0x18E3);
+
+  tft->drawRoundRect(
+      28,
+      44,
+      TFT_WIDTH - 56,
+      TFT_HEIGHT - 88,
+      18,
+      0x632C);
+
+  tft->setTextColor(
+      0xFFFF);
+
+  tft->setTextSize(3);
+  tft->setCursor(
+      134,
+      78);
+  tft->print(
+      "PIXEL PRO");
+
+  tft->setTextSize(2);
+  tft->setCursor(
+      imageError
+          ? 112
+          : 126,
+      132);
+
+  tft->print(
+      imageError
+          ? "MAIN MENU IMAGE ERROR"
+          : "MAIN MENU EMPTY");
+
+  tft->setTextSize(1);
+  tft->setTextColor(
+      0xC618);
+
+  tft->setCursor(
+      112,
+      181);
+
+  tft->print(
+      "Open LumiPad > Main Menu > Save");
+
+  char line[48] = {};
+  snprintf(
+      line,
+      sizeof(line),
+      "Profile %02u  FW %s",
+      static_cast<unsigned>(
+          profile + 1),
+      FW_VERSION);
+
+  tft->setCursor(
+      170,
+      211);
+
+  tft->print(
+      line);
+}
+
 static void renderMainMenu() {
   if (!displayReady ||
       saverActive) {
@@ -3572,13 +3718,25 @@ static void renderMainMenu() {
         profile);
   }
 
-  renderMainMenuBackground(
-      profile);
+  const bool backgroundDrawn =
+      renderMainMenuBackground(
+          profile);
 
   if (mainMenuCompositeEnabled(
           profile)) {
+    if (!backgroundDrawn) {
+      drawMainMenuEmptyState(
+          profile,
+          true);
+    }
+
     renderMainMenuStatusBar();
     return;
+  }
+
+  if (!backgroundDrawn) {
+    tft->fillScreen(
+        0x1082);
   }
 
   const int statusY =
@@ -3717,6 +3875,13 @@ static void renderMainMenu() {
       tft->print(
           label);
     }
+  }
+
+  if (!backgroundDrawn &&
+      !hasVisibleMenuItem) {
+    drawMainMenuEmptyState(
+        profile,
+        false);
   }
 
   renderMainMenuStatusBar();
@@ -3972,6 +4137,62 @@ static void recoverMainMenuAssets() {
       LittleFS.remove(iconTemp);
     }
   }
+
+  for (uint8_t profile = 0;
+       profile < PROFILE_COUNT;
+       ++profile) {
+    char bgPath[24] = {};
+    menuBackgroundPath(
+        profile,
+        false,
+        bgPath,
+        sizeof(bgPath));
+
+    char flagPath[24] = {};
+    menuCompositeFlagPath(
+        profile,
+        flagPath,
+        sizeof(flagPath));
+
+    if (!LittleFS.exists(
+            bgPath)) {
+      LittleFS.remove(
+          flagPath);
+
+      menuCompositeMask &=
+          ~(1UL << profile);
+
+      continue;
+    }
+
+    if ((menuCompositeMask &
+         (1UL << profile)) != 0 &&
+        !LittleFS.exists(
+            flagPath)) {
+      File flag =
+          LittleFS.open(
+              flagPath,
+              "w");
+
+      if (flag) {
+        const uint8_t marker[4] = {
+            'P',
+            'X',
+            'M',
+            '1'};
+
+        (void)flag.write(
+            marker,
+            sizeof(marker));
+
+        flag.close();
+      }
+    }
+  }
+
+  (void)preferences.putUInt(
+      "menucomp",
+      menuCompositeMask);
 }
 
 static bool beginMenuBackgroundUpload(
@@ -8570,6 +8791,44 @@ static void handleCommand(String command) {
         "MENUICONSTATE|PROFILE=%u|MASK=%02X",
         static_cast<unsigned>(profile),
         static_cast<unsigned>(mask));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "MENURENDERSTATE") {
+    const uint8_t profile =
+        resolveMainMenuRenderProfile();
+
+    char bgPath[24] = {};
+    menuBackgroundPath(
+        profile,
+        false,
+        bgPath,
+        sizeof(bgPath));
+
+    const bool bg =
+        littleFsReady &&
+        LittleFS.exists(
+            bgPath);
+
+    const bool composite =
+        mainMenuCompositeEnabled(
+            profile);
+
+    char out[140] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "MENURENDERSTATE|PROFILE=%u|ACTIVE=%u|BG=%u|COMPOSITE=%u|FS=%u|FW=%s",
+        static_cast<unsigned>(
+            profile),
+        static_cast<unsigned>(
+            activeProfile),
+        bg ? 1U : 0U,
+        composite ? 1U : 0U,
+        littleFsReady ? 1U : 0U,
+        FW_VERSION);
 
     cdcPrintln(out);
     return;
