@@ -8757,10 +8757,12 @@ static void pollRawMediaTransfer() {
 
     size_t want =
         static_cast<size_t>(
-            min<uint32_t>(
-                remaining,
-                static_cast<uint32_t>(
-                    sizeof(buffer))));
+            remaining <
+                    static_cast<uint32_t>(
+                        sizeof(buffer))
+                ? remaining
+                : static_cast<uint32_t>(
+                      sizeof(buffer)));
 
     want =
         min(
@@ -12948,14 +12950,21 @@ static bool readTouchPointMcufriend(
       TOUCH_YM_PIN,
       HIGH);
 
+  digitalWrite(
+      TOUCH_XM_PIN,
+      LOW);
   pinMode(
       TOUCH_XM_PIN,
       INPUT);
+
+  digitalWrite(
+      TOUCH_YP_PIN,
+      LOW);
   pinMode(
       TOUCH_YP_PIN,
       INPUT);
 
-  delayMicroseconds(10);
+  delayMicroseconds(20);
 
   const uint16_t z1 =
       readTouchAdc10(
@@ -12965,28 +12974,30 @@ static bool readTouchPointMcufriend(
       readTouchAdc10(
           TOUCH_YP_PIN);
 
-  const int32_t delta =
-      static_cast<int32_t>(
-          z2) -
-      static_cast<int32_t>(
-          z1);
+  uint32_t rtouch = 0;
 
-  int32_t z =
-      static_cast<int32_t>(
-          TOUCH_ADC_MAX) -
-      delta;
+  if (z1 > 0 &&
+      z2 > z1) {
+    // Adafruit TouchScreen.cpp with _rxplate=300:
+    // ((z2 / z1) - 1) * x * rxplate / 1024.
+    const uint64_t numerator =
+        static_cast<uint64_t>(
+            z2 - z1) *
+        rawX *
+        TOUCH_RXPLATE_OHMS;
 
-  if (z < 0) {
-    z = 0;
-  } else if (z >
-             TOUCH_ADC_MAX) {
-    z =
-        TOUCH_ADC_MAX;
+    rtouch =
+        static_cast<uint32_t>(
+            numerator /
+            z1 /
+            1024U);
   }
 
   pressure =
       static_cast<uint16_t>(
-          z);
+          rtouch > 65535UL
+              ? 65535UL
+              : rtouch);
 
   restoreTouchSharedPins();
 
@@ -12996,7 +13007,7 @@ static bool readTouchPointMcufriend(
       rawY >= 8 &&
       rawY <= TOUCH_ADC_MAX - 8;
 
-  // Use MCUFRIEND's proven pressure window for 300-ohm 4-wire shields.
+  // MCUFRIEND examples use this window with a 300-ohm 4-wire panel.
   const bool pressureValid =
       pressure > 200 &&
       pressure < 1000;
