@@ -4193,7 +4193,6 @@ static void recoverMainMenuAssets() {
   (void)preferences.putUInt(
       "menucomp",
       menuCompositeMask);
-  }
 }
 
 static bool beginMenuBackgroundUpload(
