@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.24";
+static constexpr char FW_VERSION[] = "1.10.25";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -67,7 +67,7 @@ static constexpr uint16_t GIF_NATIVE_HEIGHT = 480;
 static constexpr uint8_t DISPLAY_REFRESH_CAP_HZ = 60;
 static constexpr uint8_t GIF_MAX_FPS = 60;
 static constexpr uint16_t GIF_MIN_FRAME_MS = 17;
-static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 8UL * 1024UL * 1024UL;
+static constexpr uint32_t GIF_UPLOAD_LIMIT_BYTES = 2000UL * 1024UL;
 static constexpr uint32_t JPEG_UPLOAD_LIMIT_BYTES = 2UL * 1024UL * 1024UL;
 static constexpr uint32_t PACKED_UPLOAD_LIMIT_BYTES = 2000UL * 1024UL;
 
@@ -233,13 +233,12 @@ static constexpr uint16_t TOUCH_CONFIRM_MOVE_MAX = 70;
 static constexpr uint16_t TOUCH_CONTACT_RAIL_MARGIN = 24;
 static constexpr uint16_t TOUCH_CONTACT_DELTA_MIN = 10;
 static constexpr uint16_t TOUCH_CONTACT_STABILITY_MAX = 90;
-// Calibration and the on-screen pixel test use a deliberately looser
-// coordinate-only reader. Normal menu taps still use the strict contact gate.
+// Touch acquisition follows MCUFRIEND/TouchScreen semantics in 1.10.25.
 static constexpr uint16_t TOUCH_CAL_SAMPLE_STABILITY_MAX = 180;
 static constexpr uint16_t TOUCH_CAL_RAW_MARGIN = 36;
 static constexpr uint32_t TOUCH_TAP_MIN_MS = 45;
 static constexpr uint32_t TOUCH_TAP_MAX_MS = 1600;
-static constexpr uint8_t TOUCH_CAL_VERSION = 7;
+static constexpr uint8_t TOUCH_CAL_VERSION = 8;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
@@ -638,6 +637,21 @@ enum GifScaleMode : uint8_t {
   GIF_SCALE_SPAN = 5,
 };
 
+
+enum RawMediaKind : uint8_t {
+  RAW_MEDIA_NONE = 0,
+  RAW_MEDIA_MENU_BG = 1,
+  RAW_MEDIA_MENU_ICON = 2,
+  RAW_MEDIA_GIF = 3,
+  RAW_MEDIA_JPEG = 4,
+  RAW_MEDIA_PACKED = 5,
+  RAW_MEDIA_THUMB = 6,
+};
+
+static constexpr uint32_t RAW_MEDIA_ACK_BYTES = 8192UL;
+static constexpr uint32_t RAW_MEDIA_TIMEOUT_MS = 15000UL;
+static constexpr size_t RAW_MEDIA_RX_BUFFER_BYTES = 32768U;
+
 static bool displayReady = false;
 static uint16_t *renderBuffer = nullptr;
 static uint16_t displayVividLine[TFT_WIDTH] = {};
@@ -682,6 +696,16 @@ static uint32_t packedUploadExpectedBytes = 0;
 static File saverThumbUploadFile;
 static uint32_t saverThumbExpectedBytes = 0;
 static uint32_t saverThumbReceivedBytes = 0;
+static RawMediaKind rawMediaKind = RAW_MEDIA_NONE;
+static uint32_t rawMediaExpectedBytes = 0;
+static uint32_t rawMediaReceivedBytes = 0;
+static uint32_t rawMediaExpectedCrc = 0;
+static uint32_t rawMediaRunningCrc = 0xFFFFFFFFUL;
+static uint32_t rawMediaNextAckAt = 0;
+static uint32_t rawMediaLastActivityAt = 0;
+static uint8_t rawMediaProfile = 0;
+static uint8_t rawMediaSlot = 0;
+
 static uint16_t packedStorageWidth = 0;
 static uint16_t packedStorageHeight = 0;
 static uint16_t packedFrameCount = 0;
@@ -4917,6 +4941,77 @@ static bool parseUnsignedLong(
   return true;
 }
 
+
+static bool parseHexU32(
+    const String &text,
+    uint32_t &value) {
+  if (text.length() != 8) {
+    return false;
+  }
+
+  uint32_t parsed = 0;
+
+  for (size_t i = 0;
+       i < text.length();
+       ++i) {
+    char ch = text[i];
+    uint8_t nibble = 0;
+
+    if (ch >= '0' &&
+        ch <= '9') {
+      nibble =
+          static_cast<uint8_t>(
+              ch - '0');
+    } else if (ch >= 'A' &&
+               ch <= 'F') {
+      nibble =
+          static_cast<uint8_t>(
+              ch - 'A' + 10);
+    } else if (ch >= 'a' &&
+               ch <= 'f') {
+      nibble =
+          static_cast<uint8_t>(
+              ch - 'a' + 10);
+    } else {
+      return false;
+    }
+
+    parsed =
+        (parsed << 4) |
+        nibble;
+  }
+
+  value = parsed;
+  return true;
+}
+
+static uint32_t rawCrc32Update(
+    uint32_t crc,
+    const uint8_t *data,
+    size_t length) {
+  if (data == nullptr) {
+    return crc;
+  }
+
+  for (size_t i = 0;
+       i < length;
+       ++i) {
+    crc ^= data[i];
+
+    for (uint8_t bit = 0;
+         bit < 8;
+         ++bit) {
+      crc =
+          (crc & 1U) != 0
+              ? (crc >> 1) ^
+                    0xEDB88320UL
+              : crc >> 1;
+    }
+  }
+
+  return crc;
+}
+
 static bool parseBindingToken(String token, KeyBinding &binding) {
   token.trim();
   token.toUpperCase();
@@ -7850,7 +7945,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B-MCUFRIEND,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B-MCUFRIEND,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RAW_MEDIA_V1,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -7985,11 +8080,735 @@ static void applyLayerRelease(const KeyBinding &binding) {
   }
 }
 
+
+static const char *rawMediaKindName(
+    RawMediaKind kind) {
+  switch (kind) {
+    case RAW_MEDIA_MENU_BG:
+      return "MENUBG";
+    case RAW_MEDIA_MENU_ICON:
+      return "ICON";
+    case RAW_MEDIA_GIF:
+      return "GIF";
+    case RAW_MEDIA_JPEG:
+      return "JPG";
+    case RAW_MEDIA_PACKED:
+      return "PX";
+    case RAW_MEDIA_THUMB:
+      return "THUMB";
+    case RAW_MEDIA_NONE:
+    default:
+      return "NONE";
+  }
+}
+
+static void resetRawMediaState() {
+  rawMediaKind = RAW_MEDIA_NONE;
+  rawMediaExpectedBytes = 0;
+  rawMediaReceivedBytes = 0;
+  rawMediaExpectedCrc = 0;
+  rawMediaRunningCrc = 0xFFFFFFFFUL;
+  rawMediaNextAckAt = 0;
+  rawMediaLastActivityAt = 0;
+  rawMediaProfile = 0;
+  rawMediaSlot = 0;
+}
+
+static void abortRawMediaTransfer(
+    const char *reason) {
+  const RawMediaKind failed =
+      rawMediaKind;
+
+  switch (failed) {
+    case RAW_MEDIA_MENU_BG:
+    case RAW_MEDIA_MENU_ICON:
+      closeMenuUpload();
+      if (littleFsReady) {
+        if (failed ==
+            RAW_MEDIA_MENU_BG) {
+          char path[24] = {};
+          menuBackgroundPath(
+              rawMediaProfile,
+              true,
+              path,
+              sizeof(path));
+          LittleFS.remove(path);
+        } else {
+          char path[24] = {};
+          menuIconPath(
+              rawMediaProfile,
+              rawMediaSlot,
+              true,
+              path,
+              sizeof(path));
+          LittleFS.remove(path);
+        }
+      }
+      break;
+
+    case RAW_MEDIA_GIF:
+      closeGifUploadFile();
+      if (littleFsReady) {
+        LittleFS.remove(
+            GIF_TMP_PATH);
+      }
+      saverUploading = false;
+      saverReady = false;
+      break;
+
+    case RAW_MEDIA_JPEG:
+      closeJpegUploadFile();
+      if (littleFsReady) {
+        LittleFS.remove(
+            JPEG_TMP_PATH);
+      }
+      saverUploading = false;
+      saverReady = false;
+      break;
+
+    case RAW_MEDIA_PACKED:
+      closePackedFiles();
+      if (littleFsReady) {
+        LittleFS.remove(
+            PACKED_TMP_PATH);
+      }
+      saverUploading = false;
+      saverReady = false;
+      break;
+
+    case RAW_MEDIA_THUMB:
+      closeSaverThumbUpload();
+      if (littleFsReady) {
+        LittleFS.remove(
+            SAVER_THUMB_TMP_PATH);
+      }
+      break;
+
+    case RAW_MEDIA_NONE:
+    default:
+      break;
+  }
+
+  resetRawMediaState();
+
+  if (reason != nullptr &&
+      reason[0] != '\0') {
+    cdcPrintln(
+        String("ERR|MEDIA_RAW|") +
+        reason);
+  }
+}
+
+static bool finishRawMediaTransfer() {
+  if (rawMediaKind ==
+          RAW_MEDIA_NONE ||
+      rawMediaReceivedBytes !=
+          rawMediaExpectedBytes) {
+    return false;
+  }
+
+  const uint32_t actualCrc =
+      rawMediaRunningCrc ^
+      0xFFFFFFFFUL;
+
+  if (actualCrc !=
+      rawMediaExpectedCrc) {
+    char error[80] = {};
+    snprintf(
+        error,
+        sizeof(error),
+        "CRC|EXPECTED=%08lX|ACTUAL=%08lX",
+        static_cast<unsigned long>(
+            rawMediaExpectedCrc),
+        static_cast<unsigned long>(
+            actualCrc));
+
+    abortRawMediaTransfer(
+        error);
+    return false;
+  }
+
+  const RawMediaKind completed =
+      rawMediaKind;
+
+  const uint32_t completedBytes =
+      rawMediaExpectedBytes;
+
+  const uint32_t completedCrc =
+      actualCrc;
+
+  bool ok = false;
+
+  switch (completed) {
+    case RAW_MEDIA_MENU_BG:
+      ok =
+          finishMenuBackgroundUpload();
+      break;
+
+    case RAW_MEDIA_MENU_ICON:
+      ok =
+          finishMenuIconUpload();
+      break;
+
+    case RAW_MEDIA_GIF:
+      ok =
+          finishGifUpload();
+      break;
+
+    case RAW_MEDIA_JPEG:
+      ok =
+          finishJpegUpload();
+      break;
+
+    case RAW_MEDIA_PACKED:
+      ok =
+          finishPackedUpload();
+      break;
+
+    case RAW_MEDIA_THUMB:
+      ok =
+          finishSaverThumbUpload();
+      break;
+
+    case RAW_MEDIA_NONE:
+    default:
+      ok = false;
+      break;
+  }
+
+  const char *kindName =
+      rawMediaKindName(
+          completed);
+
+  resetRawMediaState();
+
+  if (!ok) {
+    cdcPrintln(
+        String("ERR|MEDIA_RAW|FINALIZE|") +
+        kindName);
+    return false;
+  }
+
+  lastUserActivityAt =
+      millis();
+
+  char out[96] = {};
+  snprintf(
+      out,
+      sizeof(out),
+      "OK|MEDIA_RAW_DONE|%s|%lu|%08lX",
+      kindName,
+      static_cast<unsigned long>(
+          completedBytes),
+      static_cast<unsigned long>(
+          completedCrc));
+
+  cdcPrintln(out);
+  return true;
+}
+
+static bool writeRawMediaBytes(
+    const uint8_t *data,
+    size_t length) {
+  if (rawMediaKind ==
+          RAW_MEDIA_NONE ||
+      data == nullptr ||
+      length == 0 ||
+      rawMediaReceivedBytes +
+              length >
+          rawMediaExpectedBytes) {
+    return false;
+  }
+
+  size_t written = 0;
+
+  switch (rawMediaKind) {
+    case RAW_MEDIA_MENU_BG:
+    case RAW_MEDIA_MENU_ICON:
+      if (!menuUploadFile) {
+        return false;
+      }
+      written =
+          menuUploadFile.write(
+              data,
+              length);
+      if (written ==
+          length) {
+        menuUploadReceivedBytes +=
+            static_cast<uint32_t>(
+                length);
+      }
+      break;
+
+    case RAW_MEDIA_GIF:
+      if (!gifUploadFile) {
+        return false;
+      }
+      written =
+          gifUploadFile.write(
+              data,
+              length);
+      if (written ==
+          length) {
+        saverBytesReceived +=
+            length;
+      }
+      break;
+
+    case RAW_MEDIA_JPEG:
+      if (!jpegUploadFile) {
+        return false;
+      }
+      written =
+          jpegUploadFile.write(
+              data,
+              length);
+      if (written ==
+          length) {
+        saverBytesReceived +=
+            length;
+      }
+      break;
+
+    case RAW_MEDIA_PACKED:
+      if (!packedUploadFile) {
+        return false;
+      }
+      written =
+          packedUploadFile.write(
+              data,
+              length);
+      if (written ==
+          length) {
+        saverBytesReceived +=
+            length;
+      }
+      break;
+
+    case RAW_MEDIA_THUMB:
+      if (!saverThumbUploadFile) {
+        return false;
+      }
+      written =
+          saverThumbUploadFile.write(
+              data,
+              length);
+      if (written ==
+          length) {
+        saverThumbReceivedBytes +=
+            static_cast<uint32_t>(
+                length);
+      }
+      break;
+
+    case RAW_MEDIA_NONE:
+    default:
+      return false;
+  }
+
+  if (written != length) {
+    return false;
+  }
+
+  rawMediaRunningCrc =
+      rawCrc32Update(
+          rawMediaRunningCrc,
+          data,
+          length);
+
+  rawMediaReceivedBytes +=
+      static_cast<uint32_t>(
+          length);
+
+  rawMediaLastActivityAt =
+      millis();
+
+  if (rawMediaReceivedBytes ==
+      rawMediaExpectedBytes) {
+    return finishRawMediaTransfer();
+  }
+
+  if (rawMediaReceivedBytes ==
+      rawMediaNextAckAt) {
+    char out[48] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|MEDIA_RAW_DATA|%lu",
+        static_cast<unsigned long>(
+            rawMediaReceivedBytes));
+
+    cdcPrintln(out);
+
+    rawMediaNextAckAt =
+        min(
+            rawMediaExpectedBytes,
+            rawMediaNextAckAt +
+                RAW_MEDIA_ACK_BYTES);
+  }
+
+  return true;
+}
+
+static bool beginRawMediaTransfer(
+    const String &command) {
+  if (rawMediaKind !=
+      RAW_MEDIA_NONE) {
+    cdcPrintln(
+        "ERR|MEDIA_RAW|BUSY");
+    return false;
+  }
+
+  String parts[8];
+  uint8_t partCount = 0;
+  int start = 0;
+
+  while (start <=
+             static_cast<int>(
+                 command.length()) &&
+         partCount <
+             static_cast<uint8_t>(
+                 sizeof(parts) /
+                 sizeof(parts[0]))) {
+    int sep =
+        command.indexOf(
+            '|',
+            start);
+
+    if (sep < 0) {
+      parts[partCount++] =
+          command.substring(
+              start);
+      break;
+    }
+
+    parts[partCount++] =
+        command.substring(
+            start,
+            sep);
+
+    start =
+        sep + 1;
+  }
+
+  if (partCount < 4 ||
+      !parts[0].equalsIgnoreCase(
+          "MEDIA_RAW_BEGIN")) {
+    cdcPrintln(
+        "ERR|MEDIA_RAW|BAD_BEGIN");
+    return false;
+  }
+
+  parts[1].toUpperCase();
+
+  RawMediaKind kind =
+      RAW_MEDIA_NONE;
+
+  uint32_t expectedBytes = 0;
+  uint32_t expectedCrc = 0;
+  bool started = false;
+
+  if (parts[1] == "MENUBG" &&
+      partCount == 5) {
+    uint16_t profile = 0;
+
+    if (parseUnsigned(
+            parts[2],
+            PROFILE_COUNT - 1,
+            profile) &&
+        parseUnsignedLong(
+            parts[3],
+            MENU_BACKGROUND_LIMIT_BYTES,
+            expectedBytes) &&
+        parseHexU32(
+            parts[4],
+            expectedCrc)) {
+      started =
+          beginMenuBackgroundUpload(
+              static_cast<uint8_t>(
+                  profile),
+              expectedBytes);
+
+      if (started) {
+        kind =
+            RAW_MEDIA_MENU_BG;
+        rawMediaProfile =
+            static_cast<uint8_t>(
+                profile);
+      }
+    }
+  } else if (
+      parts[1] == "ICON" &&
+      partCount == 6) {
+    uint16_t profile = 0;
+    uint16_t slot = 0;
+
+    if (parseUnsigned(
+            parts[2],
+            PROFILE_COUNT - 1,
+            profile) &&
+        parseUnsigned(
+            parts[3],
+            MENU_SLOT_COUNT - 1,
+            slot) &&
+        parseUnsignedLong(
+            parts[4],
+            MENU_ICON_MAX_BYTES,
+            expectedBytes) &&
+        parseHexU32(
+            parts[5],
+            expectedCrc)) {
+      started =
+          beginMenuIconUpload(
+              static_cast<uint8_t>(
+                  profile),
+              static_cast<uint8_t>(
+                  slot),
+              expectedBytes);
+
+      if (started) {
+        kind =
+            RAW_MEDIA_MENU_ICON;
+        rawMediaProfile =
+            static_cast<uint8_t>(
+                profile);
+        rawMediaSlot =
+            static_cast<uint8_t>(
+                slot);
+      }
+    }
+  } else if (
+      parts[1] == "GIF" &&
+      partCount == 6) {
+    uint16_t width = 0;
+    uint16_t height = 0;
+
+    if (parseUnsignedLong(
+            parts[2],
+            GIF_UPLOAD_LIMIT_BYTES,
+            expectedBytes) &&
+        parseUnsigned(
+            parts[3],
+            1024,
+            width) &&
+        parseUnsigned(
+            parts[4],
+            1024,
+            height) &&
+        parseHexU32(
+            parts[5],
+            expectedCrc)) {
+      started =
+          beginGifUpload(
+              expectedBytes,
+              width,
+              height,
+              GIF_SCALE_CENTER);
+
+      if (started) {
+        kind =
+            RAW_MEDIA_GIF;
+      }
+    }
+  } else if (
+      parts[1] == "JPG" &&
+      partCount == 6) {
+    uint16_t width = 0;
+    uint16_t height = 0;
+
+    if (parseUnsignedLong(
+            parts[2],
+            JPEG_UPLOAD_LIMIT_BYTES,
+            expectedBytes) &&
+        parseUnsigned(
+            parts[3],
+            TFT_WIDTH,
+            width) &&
+        parseUnsigned(
+            parts[4],
+            TFT_HEIGHT,
+            height) &&
+        parseHexU32(
+            parts[5],
+            expectedCrc)) {
+      started =
+          beginJpegUpload(
+              expectedBytes,
+              width,
+              height);
+
+      if (started) {
+        kind =
+            RAW_MEDIA_JPEG;
+      }
+    }
+  } else if (
+      parts[1] == "PX" &&
+      partCount == 4) {
+    if (parseUnsignedLong(
+            parts[2],
+            PACKED_UPLOAD_LIMIT_BYTES,
+            expectedBytes) &&
+        parseHexU32(
+            parts[3],
+            expectedCrc)) {
+      started =
+          beginPackedUpload(
+              expectedBytes);
+
+      if (started) {
+        kind =
+            RAW_MEDIA_PACKED;
+      }
+    }
+  } else if (
+      parts[1] == "THUMB" &&
+      partCount == 4) {
+    if (parseUnsignedLong(
+            parts[2],
+            SAVER_THUMB_LIMIT_BYTES,
+            expectedBytes) &&
+        parseHexU32(
+            parts[3],
+            expectedCrc)) {
+      started =
+          beginSaverThumbUpload(
+              expectedBytes);
+
+      if (started) {
+        kind =
+            RAW_MEDIA_THUMB;
+      }
+    }
+  }
+
+  if (!started ||
+      kind ==
+          RAW_MEDIA_NONE ||
+      expectedBytes == 0) {
+    cdcPrintln(
+        "ERR|MEDIA_RAW|BEGIN");
+    return false;
+  }
+
+  rawMediaKind = kind;
+  rawMediaExpectedBytes =
+      expectedBytes;
+  rawMediaReceivedBytes = 0;
+  rawMediaExpectedCrc =
+      expectedCrc;
+  rawMediaRunningCrc =
+      0xFFFFFFFFUL;
+  rawMediaNextAckAt =
+      min(
+          expectedBytes,
+          RAW_MEDIA_ACK_BYTES);
+  rawMediaLastActivityAt =
+      millis();
+
+  char out[80] = {};
+  snprintf(
+      out,
+      sizeof(out),
+      "OK|MEDIA_RAW_BEGIN|%s|%lu",
+      rawMediaKindName(kind),
+      static_cast<unsigned long>(
+          expectedBytes));
+
+  cdcPrintln(out);
+  return true;
+}
+
+static void pollRawMediaTransfer() {
+  if (rawMediaKind ==
+      RAW_MEDIA_NONE) {
+    return;
+  }
+
+  if (static_cast<uint32_t>(
+          millis() -
+          rawMediaLastActivityAt) >
+      RAW_MEDIA_TIMEOUT_MS) {
+    abortRawMediaTransfer(
+        "TIMEOUT");
+    return;
+  }
+
+  static uint8_t buffer[2048];
+
+  while (rawMediaKind !=
+             RAW_MEDIA_NONE &&
+         USBSerial.available() > 0) {
+    const uint32_t remaining =
+        rawMediaExpectedBytes -
+        rawMediaReceivedBytes;
+
+    if (remaining == 0) {
+      (void)finishRawMediaTransfer();
+      break;
+    }
+
+    const int available =
+        USBSerial.available();
+
+    if (available <= 0) {
+      break;
+    }
+
+    size_t want =
+        static_cast<size_t>(
+            min<uint32_t>(
+                remaining,
+                static_cast<uint32_t>(
+                    sizeof(buffer))));
+
+    want =
+        min(
+            want,
+            static_cast<size_t>(
+                available));
+
+    const size_t got =
+        USBSerial.read(
+            buffer,
+            want);
+
+    if (got == 0) {
+      break;
+    }
+
+    if (!writeRawMediaBytes(
+            buffer,
+            got)) {
+      if (rawMediaKind !=
+          RAW_MEDIA_NONE) {
+        abortRawMediaTransfer(
+            "WRITE");
+      }
+      break;
+    }
+  }
+}
+
 static void handleCommand(String command) {
   command.trim();
 
   String upper = command;
   upper.toUpperCase();
+
+
+  if (upper.startsWith(
+          "MEDIA_RAW_BEGIN|")) {
+    (void)beginRawMediaTransfer(
+        command);
+    return;
+  }
+
+  if (upper == "MEDIA_RAW_CAPS") {
+    cdcPrintln(
+        "MEDIA_RAW_CAPS|V=1|ACK=8192|CRC=CRC32|KINDS=MENUBG,ICON,GIF,JPG,PX,THUMB");
+    return;
+  }
 
   if (upper == "HELLO" || upper == "GET_INFO") {
     cdcPrintln(deviceHello());
@@ -8202,7 +9021,7 @@ static void handleCommand(String command) {
     uint16_t pressure = 0;
 
     const bool pressed =
-        readTouchRawCalibration(
+        readTouchPointMcufriend(
             rawX,
             rawY,
             pressure);
@@ -10852,8 +11671,32 @@ static void handleCommand(String command) {
 }
 
 static void pollCdc() {
+  if (rawMediaKind !=
+      RAW_MEDIA_NONE) {
+    pollRawMediaTransfer();
+
+    if (rawMediaKind !=
+        RAW_MEDIA_NONE) {
+      return;
+    }
+  }
+
   while (USBSerial.available()) {
-    char ch = static_cast<char>(USBSerial.read());
+    if (rawMediaKind !=
+        RAW_MEDIA_NONE) {
+      pollRawMediaTransfer();
+
+      if (rawMediaKind !=
+          RAW_MEDIA_NONE) {
+        return;
+      }
+
+      continue;
+    }
+
+    char ch =
+        static_cast<char>(
+            USBSerial.read());
 
     if (ch == '\r') {
       continue;
@@ -10871,7 +11714,8 @@ static void pollCdc() {
       cdcLine += ch;
     } else {
       cdcLine = "";
-      cdcPrintln("ERR|LINE_TOO_LONG");
+      cdcPrintln(
+          "ERR|LINE_TOO_LONG");
     }
   }
 }
@@ -12045,7 +12889,7 @@ static bool readTouchRaw(
 }
 
 
-static bool readTouchRawCalibration(
+static bool readTouchPointMcufriend(
     uint16_t &rawX,
     uint16_t &rawY,
     uint16_t &pressure) {
@@ -12053,9 +12897,6 @@ static bool readTouchRawCalibration(
     return false;
   }
 
-  // For calibration/testing do not depend on the pressure-divider thresholds
-  // that have been rejecting real presses on this shield. We still demand
-  // three coherent coordinate samples so floating-bus noise is filtered.
   pinMode(
       TFT_CS,
       OUTPUT);
@@ -12073,13 +12914,9 @@ static bool readTouchRawCalibration(
   sampleTouchCoordinates(
       x1,
       y1);
-  delayMicroseconds(90);
-
   sampleTouchCoordinates(
       x2,
       y2);
-  delayMicroseconds(90);
-
   sampleTouchCoordinates(
       x3,
       y3);
@@ -12096,63 +12933,76 @@ static bool readTouchRawCalibration(
           y2,
           y3);
 
-  const uint16_t minX =
-      min(
-          x1,
-          min(
-              x2,
-              x3));
+  // Match TouchScreen.cpp pressure topology: XP=LOW, YM=HIGH, read XM/YP.
+  pinMode(
+      TOUCH_XP_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_XP_PIN,
+      LOW);
 
-  const uint16_t maxX =
-      max(
-          x1,
-          max(
-              x2,
-              x3));
+  pinMode(
+      TOUCH_YM_PIN,
+      OUTPUT);
+  digitalWrite(
+      TOUCH_YM_PIN,
+      HIGH);
 
-  const uint16_t minY =
-      min(
-          y1,
-          min(
-              y2,
-              y3));
+  pinMode(
+      TOUCH_XM_PIN,
+      INPUT);
+  pinMode(
+      TOUCH_YP_PIN,
+      INPUT);
 
-  const uint16_t maxY =
-      max(
-          y1,
-          max(
-              y2,
-              y3));
+  delayMicroseconds(10);
+
+  const uint16_t z1 =
+      readTouchAdc10(
+          TOUCH_XM_PIN);
+
+  const uint16_t z2 =
+      readTouchAdc10(
+          TOUCH_YP_PIN);
+
+  const int32_t delta =
+      static_cast<int32_t>(
+          z2) -
+      static_cast<int32_t>(
+          z1);
+
+  int32_t z =
+      static_cast<int32_t>(
+          TOUCH_ADC_MAX) -
+      delta;
+
+  if (z < 0) {
+    z = 0;
+  } else if (z >
+             TOUCH_ADC_MAX) {
+    z =
+        TOUCH_ADC_MAX;
+  }
+
+  pressure =
+      static_cast<uint16_t>(
+          z);
 
   restoreTouchSharedPins();
 
-  const bool inside =
-      rawX >=
-          TOUCH_CAL_RAW_MARGIN &&
-      rawX <=
-          TOUCH_ADC_MAX -
-              TOUCH_CAL_RAW_MARGIN &&
-      rawY >=
-          TOUCH_CAL_RAW_MARGIN &&
-      rawY <=
-          TOUCH_ADC_MAX -
-              TOUCH_CAL_RAW_MARGIN;
+  const bool coordinatesValid =
+      rawX >= 8 &&
+      rawX <= TOUCH_ADC_MAX - 8 &&
+      rawY >= 8 &&
+      rawY <= TOUCH_ADC_MAX - 8;
 
-  const bool stable =
-      static_cast<uint16_t>(
-          maxX - minX) <=
-          TOUCH_CAL_SAMPLE_STABILITY_MAX &&
-      static_cast<uint16_t>(
-          maxY - minY) <=
-          TOUCH_CAL_SAMPLE_STABILITY_MAX;
+  // Use MCUFRIEND's proven pressure window for 300-ohm 4-wire shields.
+  const bool pressureValid =
+      pressure > 200 &&
+      pressure < 1000;
 
-  pressure =
-      inside && stable
-          ? 1
-          : 0;
-
-  return inside &&
-         stable;
+  return coordinatesValid &&
+         pressureValid;
 }
 
 static void mapTouchDefaultPixels(
@@ -13132,7 +13982,7 @@ static void pollTouch() {
   uint16_t pressure = 0;
 
   const bool pressed =
-      readTouchRawCalibration(
+      readTouchPointMcufriend(
           rawX,
           rawY,
           pressure);
@@ -13680,6 +14530,8 @@ void setup() {
   USB.serialNumber(diagSerial);
   USB.firmwareVersion(0x01A1);
   USBSerial.enableReboot(false);
+  USBSerial.setRxBufferSize(
+      RAW_MEDIA_RX_BUFFER_BYTES);
   USBSerial.begin();
   Keyboard.begin();
   ConsumerControl.begin();
@@ -13774,6 +14626,8 @@ void setup() {
   // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
   // BOOT/esptool path instead.
   USBSerial.enableReboot(false);
+  USBSerial.setRxBufferSize(
+      RAW_MEDIA_RX_BUFFER_BYTES);
   USBSerial.begin();
   Keyboard.begin();
   ConsumerControl.begin();
