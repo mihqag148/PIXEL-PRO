@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.25";
+static constexpr char FW_VERSION[] = "1.10.26";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -648,9 +648,9 @@ enum RawMediaKind : uint8_t {
   RAW_MEDIA_THUMB = 6,
 };
 
-static constexpr uint32_t RAW_MEDIA_ACK_BYTES = 8192UL;
+static constexpr uint32_t RAW_MEDIA_ACK_BYTES = 512UL;
 static constexpr uint32_t RAW_MEDIA_TIMEOUT_MS = 15000UL;
-static constexpr size_t RAW_MEDIA_RX_BUFFER_BYTES = 32768U;
+static constexpr size_t RAW_MEDIA_RX_BUFFER_BYTES = 8192U;
 
 static bool displayReady = false;
 static uint16_t *renderBuffer = nullptr;
@@ -8734,62 +8734,64 @@ static void pollRawMediaTransfer() {
     return;
   }
 
-  static uint8_t buffer[2048];
+  // Keep each loop iteration short. Large reads followed by repeated
+  // LittleFS writes can starve TinyUSB/WDT on ESP32-S2 and make a reconnect
+  // upload turn into a reset loop.
+  static uint8_t buffer[512];
 
-  while (rawMediaKind !=
-             RAW_MEDIA_NONE &&
-         USBSerial.available() > 0) {
-    const uint32_t remaining =
-        rawMediaExpectedBytes -
-        rawMediaReceivedBytes;
-
-    if (remaining == 0) {
-      (void)finishRawMediaTransfer();
-      break;
-    }
-
-    const int available =
-        USBSerial.available();
-
-    if (available <= 0) {
-      break;
-    }
-
-    size_t want =
-        static_cast<size_t>(
-            remaining <
-                    static_cast<uint32_t>(
-                        sizeof(buffer))
-                ? remaining
-                : static_cast<uint32_t>(
-                      sizeof(buffer)));
-
-    want =
-        min(
-            want,
-            static_cast<size_t>(
-                available));
-
-    const size_t got =
-        USBSerial.read(
-            buffer,
-            want);
-
-    if (got == 0) {
-      break;
-    }
-
-    if (!writeRawMediaBytes(
-            buffer,
-            got)) {
-      if (rawMediaKind !=
-          RAW_MEDIA_NONE) {
-        abortRawMediaTransfer(
-            "WRITE");
-      }
-      break;
-    }
+  if (USBSerial.available() <= 0) {
+    return;
   }
+
+  const uint32_t remaining =
+      rawMediaExpectedBytes -
+      rawMediaReceivedBytes;
+
+  if (remaining == 0) {
+    (void)finishRawMediaTransfer();
+    return;
+  }
+
+  const int available =
+      USBSerial.available();
+
+  size_t want =
+      static_cast<size_t>(
+          remaining <
+                  static_cast<uint32_t>(
+                      sizeof(buffer))
+              ? remaining
+              : static_cast<uint32_t>(
+                    sizeof(buffer)));
+
+  want =
+      min(
+          want,
+          static_cast<size_t>(
+              available));
+
+  const size_t got =
+      USBSerial.read(
+          buffer,
+          want);
+
+  if (got == 0) {
+    return;
+  }
+
+  if (!writeRawMediaBytes(
+          buffer,
+          got)) {
+    if (rawMediaKind !=
+        RAW_MEDIA_NONE) {
+      abortRawMediaTransfer(
+          "WRITE");
+    }
+    return;
+  }
+
+  // Let the USB task and watchdog run before accepting the next 512 bytes.
+  delay(1);
 }
 
 static void handleCommand(String command) {
@@ -8808,7 +8810,7 @@ static void handleCommand(String command) {
 
   if (upper == "MEDIA_RAW_CAPS") {
     cdcPrintln(
-        "MEDIA_RAW_CAPS|V=1|ACK=8192|CRC=CRC32|KINDS=MENUBG,ICON,GIF,JPG,PX,THUMB");
+        "MEDIA_RAW_CAPS|V=1|ACK=512|CRC=CRC32|KINDS=MENUBG,ICON,GIF,JPG,PX,THUMB");
     return;
   }
 
@@ -14677,6 +14679,16 @@ void loop() {
   pollKeys();
   pollRoller();
   pollCdc();
+
+  // While a file is crossing USB, do not reconfigure the shared TFT/touch
+  // pins, decode a saver frame, animate RGB, or poll I2C modules. This keeps
+  // the native USB task serviced and prevents upload-triggered reboot loops.
+  if (rawMediaKind !=
+      RAW_MEDIA_NONE) {
+    delay(1);
+    return;
+  }
+
   pollMainMenuBatchTimeout();
   pollRgbEffect();
   pollSaver();
