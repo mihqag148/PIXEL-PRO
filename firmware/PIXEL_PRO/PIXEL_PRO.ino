@@ -32,6 +32,8 @@
 #define PIXEL_DIAG_POST_INIT_STAGE 0
 #endif
 
+#include "PixelStablePAR8.h"
+
 #if PIXEL_DIAG_SAFE_PAR8
 #include "PixelSafePAR8.h"
 #endif
@@ -42,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.19";
+static constexpr char FW_VERSION[] = "1.10.20";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -469,97 +471,12 @@ class PixelHX8357BMcufriend : public Arduino_TFT {
     _bus->sendCommand(0x29);
     delay(50);
 
-    // With the shield 3V3 rail now correctly powered, apply the standard
-    // HX8357-B analog power/VCOM/panel/gamma sequence after the proven
-    // MCUFRIEND wake path. Earlier analog tests were done while shield 3V3
-    // floated near 2.55 V, so they could not validate these settings.
-    _bus->sendCommand(0x28);
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xD0);
-    _bus->write(0x44);
-    _bus->write(0x41);
-    _bus->write(0x06);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xD1);
-    _bus->write(0x40);
-    _bus->write(0x10);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xD2);
-    _bus->write(0x05);
-    _bus->write(0x12);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xC0);
-    _bus->write(0x14);
-    _bus->write(0x3B);
-    _bus->write(0x00);
-    _bus->write(0x02);
-    _bus->write(0x11);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xC5);
-    _bus->write(0x0C);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xE9);
-    _bus->write(0x01);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xEA);
-    _bus->write(0x03);
-    _bus->write(0x00);
-    _bus->write(0x00);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xEB);
-    _bus->write(0x40);
-    _bus->write(0x54);
-    _bus->write(0x26);
-    _bus->write(0xDB);
-    _bus->endWrite();
-
-    static const uint8_t gamma8357b[12] = {
-        0x00, 0x15, 0x00, 0x22,
-        0x00, 0x08, 0x77, 0x26,
-        0x66, 0x22, 0x04, 0x00};
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xC8);
-    for (uint8_t value : gamma8357b) {
-      _bus->write(value);
-    }
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0xB4);
-    _bus->write(0x00);
-    _bus->endWrite();
-
-    // Restore the production write format, landscape MADCTL and REV_SCREEN
-    // polarity after analog tuning.
-    _bus->beginWrite();
-    _bus->writeCommand(0x3A);
-    _bus->write(0x55);
-    _bus->endWrite();
-
-    _bus->beginWrite();
-    _bus->writeCommand(0x36);
-    _bus->write(0x28);
-    _bus->endWrite();
-
-    _bus->sendCommand(0x21);
-    _bus->sendCommand(0x29);
-    delay(50);
+    // Stop here intentionally. The measured ID 0x8357 MCUFRIEND path does
+    // not program the Adafruit HX8357-B POWER/VCOM/PANEL/GAMMA table.
+    // PIXEL PRO diagnostics showed no visual benefit from forcing that table,
+    // and production has since shown washed-out / low-contrast colour.
+    // initDisplay() now applies only landscape MADCTL + REV_SCREEN INVON after
+    // this proven wake sequence.
   }
 };
 
@@ -585,7 +502,7 @@ Arduino_DataBus *tftBus =
         TFT_D7);
 #else
 Arduino_DataBus *tftBus =
-    new Arduino_ESP32PAR8(
+    new PixelStablePAR8(
         TFT_DC,
         TFT_CS,
         TFT_WR,
@@ -7125,8 +7042,9 @@ static void initDisplay() {
   delay(20);
 
   // PixelHX8357BMcufriend intentionally mirrors MCUFRIEND_kbv's minimal
-  // ID 0x8357 initialization. The native Arduino_HX8357B power/timing table
-  // is not used on this shield revision.
+  // ID 0x8357 initialization. Production also uses PixelStablePAR8 so D33-D40
+  // settle before every WR edge; this avoids the washed-out/flickering output
+  // seen with the stock zero-wait Arduino_ESP32PAR8 path.
 
   tft->fillScreen(RGB565_BLACK);
 
