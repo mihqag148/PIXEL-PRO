@@ -233,9 +233,13 @@ static constexpr uint16_t TOUCH_CONFIRM_MOVE_MAX = 70;
 static constexpr uint16_t TOUCH_CONTACT_RAIL_MARGIN = 24;
 static constexpr uint16_t TOUCH_CONTACT_DELTA_MIN = 10;
 static constexpr uint16_t TOUCH_CONTACT_STABILITY_MAX = 90;
+// Calibration and the on-screen pixel test use a deliberately looser
+// coordinate-only reader. Normal menu taps still use the strict contact gate.
+static constexpr uint16_t TOUCH_CAL_SAMPLE_STABILITY_MAX = 180;
+static constexpr uint16_t TOUCH_CAL_RAW_MARGIN = 36;
 static constexpr uint32_t TOUCH_TAP_MIN_MS = 45;
 static constexpr uint32_t TOUCH_TAP_MAX_MS = 1600;
-static constexpr uint8_t TOUCH_CAL_VERSION = 6;
+static constexpr uint8_t TOUCH_CAL_VERSION = 7;
 static constexpr uint8_t TOUCH_FLAG_SWAP_XY = 0x01;
 static constexpr uint8_t TOUCH_FLAG_INVERT_X = 0x02;
 static constexpr uint8_t TOUCH_FLAG_INVERT_Y = 0x04;
@@ -544,6 +548,7 @@ static bool touchWakeOnly = false;
 static int8_t touchHeldFallbackSlot = -1;
 static int8_t touchFeedbackSlot = -1;
 static bool touchCalibrationMode = false;
+static bool touchPixelTestMode = false;
 static uint8_t touchCalibrationPoint = 0;
 static bool touchCalibrationPointCaptured = false;
 static uint16_t touchCalibrationRawX[4] = {};
@@ -11656,6 +11661,165 @@ static bool readTouchRaw(
          stableCoordinates;
 }
 
+
+static bool readTouchRawCalibration(
+    uint16_t &rawX,
+    uint16_t &rawY,
+    uint16_t &pressure) {
+  if (!displayReady) {
+    return false;
+  }
+
+  // For calibration/testing do not depend on the pressure-divider thresholds
+  // that have been rejecting real presses on this shield. We still demand
+  // three coherent coordinate samples so floating-bus noise is filtered.
+  pinMode(
+      TFT_CS,
+      OUTPUT);
+  digitalWrite(
+      TFT_CS,
+      HIGH);
+
+  uint16_t x1 = 0;
+  uint16_t y1 = 0;
+  uint16_t x2 = 0;
+  uint16_t y2 = 0;
+  uint16_t x3 = 0;
+  uint16_t y3 = 0;
+
+  sampleTouchCoordinates(
+      x1,
+      y1);
+  delayMicroseconds(90);
+
+  sampleTouchCoordinates(
+      x2,
+      y2);
+  delayMicroseconds(90);
+
+  sampleTouchCoordinates(
+      x3,
+      y3);
+
+  rawX =
+      touchMedian3(
+          x1,
+          x2,
+          x3);
+
+  rawY =
+      touchMedian3(
+          y1,
+          y2,
+          y3);
+
+  const uint16_t minX =
+      min(
+          x1,
+          min(
+              x2,
+              x3));
+
+  const uint16_t maxX =
+      max(
+          x1,
+          max(
+              x2,
+              x3));
+
+  const uint16_t minY =
+      min(
+          y1,
+          min(
+              y2,
+              y3));
+
+  const uint16_t maxY =
+      max(
+          y1,
+          max(
+              y2,
+              y3));
+
+  restoreTouchSharedPins();
+
+  const bool inside =
+      rawX >=
+          TOUCH_CAL_RAW_MARGIN &&
+      rawX <=
+          TOUCH_ADC_MAX -
+              TOUCH_CAL_RAW_MARGIN &&
+      rawY >=
+          TOUCH_CAL_RAW_MARGIN &&
+      rawY <=
+          TOUCH_ADC_MAX -
+              TOUCH_CAL_RAW_MARGIN;
+
+  const bool stable =
+      static_cast<uint16_t>(
+          maxX - minX) <=
+          TOUCH_CAL_SAMPLE_STABILITY_MAX &&
+      static_cast<uint16_t>(
+          maxY - minY) <=
+          TOUCH_CAL_SAMPLE_STABILITY_MAX;
+
+  pressure =
+      inside && stable
+          ? 1
+          : 0;
+
+  return inside &&
+         stable;
+}
+
+static void mapTouchDefaultPixels(
+    uint16_t rawX,
+    uint16_t rawY,
+    int16_t &screenX,
+    int16_t &screenY) {
+  // Known-working MCUFRIEND Orientation=1 mapping for this exact 480x320
+  // shield: screen X follows tp.y reversed, screen Y follows tp.x.
+  long mappedX =
+      map(
+          static_cast<long>(
+              rawY),
+          static_cast<long>(
+              TOUCH_Y_MAX_DEFAULT),
+          static_cast<long>(
+              TOUCH_Y_MIN_DEFAULT),
+          0L,
+          static_cast<long>(
+              TFT_WIDTH - 1));
+
+  long mappedY =
+      map(
+          static_cast<long>(
+              rawX),
+          static_cast<long>(
+              TOUCH_X_MIN_DEFAULT),
+          static_cast<long>(
+              TOUCH_X_MAX_DEFAULT),
+          0L,
+          static_cast<long>(
+              TFT_HEIGHT - 1));
+
+  screenX =
+      static_cast<int16_t>(
+          constrain(
+              mappedX,
+              0L,
+              static_cast<long>(
+                  TFT_WIDTH - 1)));
+
+  screenY =
+      static_cast<int16_t>(
+          constrain(
+              mappedY,
+              0L,
+              static_cast<long>(
+                  TFT_HEIGHT - 1)));
+}
+
 static uint16_t normalizeTouchAxis(
     uint16_t raw,
     uint16_t minimum,
@@ -11970,6 +12134,156 @@ static void drawTouchCalibrationTarget() {
       x,
       y + 24,
       0xFFFF);
+}
+
+static void drawTouchPixelTestScreen() {
+  if (!displayReady ||
+      !touchPixelTestMode) {
+    return;
+  }
+
+  tft->fillScreen(
+      RGB565_BLACK);
+
+  tft->drawRect(
+      0,
+      0,
+      TFT_WIDTH,
+      TFT_HEIGHT,
+      0xFFFF);
+
+  for (int x = 80;
+       x < TFT_WIDTH;
+       x += 80) {
+    tft->drawLine(
+        x,
+        0,
+        x,
+        TFT_HEIGHT - 1,
+        0x2104);
+  }
+
+  for (int y = 80;
+       y < TFT_HEIGHT;
+       y += 80) {
+    tft->drawLine(
+        0,
+        y,
+        TFT_WIDTH - 1,
+        y,
+        0x2104);
+  }
+
+  tft->drawLine(
+      TFT_WIDTH / 2,
+      0,
+      TFT_WIDTH / 2,
+      TFT_HEIGHT - 1,
+      0x39E7);
+
+  tft->drawLine(
+      0,
+      TFT_HEIGHT / 2,
+      TFT_WIDTH - 1,
+      TFT_HEIGHT / 2,
+      0x39E7);
+
+  tft->setTextSize(2);
+  tft->setTextColor(
+      0xFFFF);
+  tft->setCursor(
+      12,
+      10);
+  tft->print(
+      "TOUCH PIXEL TEST 480x320");
+
+  tft->setTextSize(1);
+  tft->setCursor(
+      12,
+      34);
+  tft->print(
+      "Touch anywhere - green crosshair is mapped pixel");
+}
+
+static void drawTouchPixelPoint(
+    int16_t x,
+    int16_t y,
+    uint16_t rawX,
+    uint16_t rawY) {
+  if (!displayReady ||
+      !touchPixelTestMode) {
+    return;
+  }
+
+  drawTouchPixelTestScreen();
+
+  const int left =
+      max(
+          0,
+          static_cast<int>(x) - 16);
+
+  const int right =
+      min(
+          static_cast<int>(
+              TFT_WIDTH - 1),
+          static_cast<int>(x) + 16);
+
+  const int top =
+      max(
+          0,
+          static_cast<int>(y) - 16);
+
+  const int bottom =
+      min(
+          static_cast<int>(
+              TFT_HEIGHT - 1),
+          static_cast<int>(y) + 16);
+
+  tft->drawCircle(
+      x,
+      y,
+      9,
+      0x07E0);
+
+  tft->drawLine(
+      left,
+      y,
+      right,
+      y,
+      0x07E0);
+
+  tft->drawLine(
+      x,
+      top,
+      x,
+      bottom,
+      0x07E0);
+
+  char line[88] = {};
+  snprintf(
+      line,
+      sizeof(line),
+      "PIXEL X=%d Y=%d   RAW X=%u Y=%u",
+      static_cast<int>(x),
+      static_cast<int>(y),
+      static_cast<unsigned>(rawX),
+      static_cast<unsigned>(rawY));
+
+  tft->fillRect(
+      8,
+      TFT_HEIGHT - 24,
+      TFT_WIDTH - 16,
+      18,
+      RGB565_BLACK);
+
+  tft->setTextSize(1);
+  tft->setTextColor(
+      0xFFFF);
+  tft->setCursor(
+      12,
+      TFT_HEIGHT - 20);
+  tft->print(
+      line);
 }
 
 static bool finishAutomaticTouchCalibration() {
