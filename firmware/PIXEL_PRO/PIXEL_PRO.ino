@@ -12256,7 +12256,7 @@ static void pollTouch() {
     if (!touchStablePressed) {
       // A single electrically-plausible sample is not enough. Require three
       // consecutive polls whose median coordinates stay close together.
-      // This is ~48 ms at the normal poll rate: fast enough for a tap, but
+      // This is ~60 ms at the normal poll rate: fast enough for a tap, but
       // long enough to reject TFT-bus transients and floating ADC ghosts.
       if (touchPressConfirmations == 0) {
         touchPressConfirmations = 1;
@@ -12447,8 +12447,6 @@ static void pollTouch() {
   touchPressConfirmations = 0;
   touchCandidateRawX = 0;
   touchCandidateRawY = 0;
-  touchPressStartedAt = 0;
-  touchPendingSlot = -1;
 
   if (!touchStablePressed) {
     touchReleaseMisses = 0;
