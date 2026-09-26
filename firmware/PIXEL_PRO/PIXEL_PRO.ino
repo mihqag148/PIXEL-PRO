@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.20";
+static constexpr char FW_VERSION[] = "1.10.21";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -545,6 +545,7 @@ static int8_t touchHeldFallbackSlot = -1;
 static int8_t touchFeedbackSlot = -1;
 static bool touchCalibrationMode = false;
 static uint8_t touchCalibrationPoint = 0;
+static bool touchCalibrationPointCaptured = false;
 static uint16_t touchCalibrationRawX[4] = {};
 static uint16_t touchCalibrationRawY[4] = {};
 static uint32_t touchChangedAt = 0;
@@ -7132,6 +7133,12 @@ static void renderSaverFrame(uint8_t index) {
 }
 
 static void startSaverNow() {
+  // Calibration owns the display until all four targets have been captured
+  // and the final finger release is observed.
+  if (touchCalibrationMode) {
+    return;
+  }
+
   if (!saverReady || !displayReady) {
     return;
   }
@@ -7208,13 +7215,21 @@ static void stopSaver() {
     packedPlaybackFile.close();
   }
 
-  if (wasActive && displayReady) {
+  if (wasActive &&
+      displayReady &&
+      !touchCalibrationMode) {
     renderMainMenu();
   }
 }
 
 static void pollSaver() {
   uint32_t now = millis();
+
+  // Never allow inactivity timing or playback to take ownership of the TFT
+  // while touch calibration is active.
+  if (touchCalibrationMode) {
+    return;
+  }
 
   if (!saverActive) {
     if (saverReady &&
@@ -11977,6 +11992,7 @@ static bool finishAutomaticTouchCalibration() {
 static void startAutomaticTouchCalibration() {
   touchCalibrationMode = true;
   touchCalibrationPoint = 0;
+  touchCalibrationPointCaptured = false;
 
   memset(
       touchCalibrationRawX,
@@ -11999,6 +12015,7 @@ static void startAutomaticTouchCalibration() {
   touchPressStartedAt = 0;
   touchPendingSlot = -1;
   touchChangedAt = millis();
+  lastUserActivityAt = touchChangedAt;
   touchWakeOnly = false;
   touchHeldFallbackSlot = -1;
   touchFeedbackSlot = -1;
@@ -12010,6 +12027,7 @@ static void startAutomaticTouchCalibration() {
 static void cancelAutomaticTouchCalibration() {
   touchCalibrationMode = false;
   touchCalibrationPoint = 0;
+  touchCalibrationPointCaptured = false;
   touchRawPressed = false;
   touchStablePressed = false;
   touchPressConfirmations = 0;
@@ -12019,6 +12037,7 @@ static void cancelAutomaticTouchCalibration() {
   touchPressStartedAt = 0;
   touchPendingSlot = -1;
   touchChangedAt = millis();
+  lastUserActivityAt = touchChangedAt;
   renderMainMenu();
 }
 
@@ -12242,7 +12261,10 @@ static void pollTouch() {
     touchPendingSlot = -1;
 
     if (touchCalibrationMode) {
-      if (touchCalibrationPoint < 4) {
+      lastUserActivityAt = now;
+
+      if (touchCalibrationPoint < 4 &&
+          !touchCalibrationPointCaptured) {
         touchCalibrationRawX[
             touchCalibrationPoint] =
             touchRawX;
@@ -12251,11 +12273,14 @@ static void pollTouch() {
             touchCalibrationPoint] =
             touchRawY;
 
+        touchCalibrationPointCaptured =
+            true;
+
         char pointOut[96] = {};
         snprintf(
             pointOut,
             sizeof(pointOut),
-            "TOUCH_CAL_AUTO|POINT=%u|RAWX=%u|RAWY=%u",
+            "TOUCH_CAL_AUTO|CAPTURE=%u|RAWX=%u|RAWY=%u",
             static_cast<unsigned>(
                 touchCalibrationPoint + 1),
             static_cast<unsigned>(
@@ -12264,47 +12289,10 @@ static void pollTouch() {
                 touchRawY));
         cdcPrintln(
             pointOut);
-
-        touchCalibrationPoint++;
-
-        if (touchCalibrationPoint >= 4) {
-          const bool ok =
-              finishAutomaticTouchCalibration();
-
-          touchCalibrationMode = false;
-          touchCalibrationPoint = 0;
-
-          if (ok) {
-            char done[192] = {};
-            snprintf(
-                done,
-                sizeof(done),
-                "TOUCH_CAL_AUTO|DONE|AFFINE|%.6f|%.6f|%.3f|%.6f|%.6f|%.3f",
-                static_cast<double>(
-                    touchAffine.ax),
-                static_cast<double>(
-                    touchAffine.bx),
-                static_cast<double>(
-                    touchAffine.cx),
-                static_cast<double>(
-                    touchAffine.ay),
-                static_cast<double>(
-                    touchAffine.by),
-                static_cast<double>(
-                    touchAffine.cy));
-            cdcPrintln(
-                done);
-          } else {
-            cdcPrintln(
-                "TOUCH_CAL_AUTO|ERR|BAD_GEOMETRY");
-          }
-
-          renderMainMenu();
-        } else {
-          drawTouchCalibrationTarget();
-        }
       }
 
+      // Keep showing the current target until this finger is released.
+      // Advancement happens only in the UP path below.
       return;
     }
 
@@ -12400,9 +12388,59 @@ static void pollTouch() {
   touchPressStartedAt = 0;
   touchPendingSlot = -1;
 
-  // In calibration mode release simply arms the next target. One held finger
-  // can therefore never advance through multiple calibration points.
+  // Calibration advances only after a complete press/release cycle. This
+  // guarantees one physical touch can capture exactly one target.
   if (touchCalibrationMode) {
+    lastUserActivityAt = now;
+
+    if (!touchCalibrationPointCaptured) {
+      return;
+    }
+
+    touchCalibrationPointCaptured = false;
+
+    if (touchCalibrationPoint < 4) {
+      touchCalibrationPoint++;
+    }
+
+    if (touchCalibrationPoint >= 4) {
+      const bool ok =
+          finishAutomaticTouchCalibration();
+
+      touchCalibrationMode = false;
+      touchCalibrationPoint = 0;
+      lastUserActivityAt = now;
+
+      if (ok) {
+        char done[192] = {};
+        snprintf(
+            done,
+            sizeof(done),
+            "TOUCH_CAL_AUTO|DONE|AFFINE|%.6f|%.6f|%.3f|%.6f|%.6f|%.3f",
+            static_cast<double>(
+                touchAffine.ax),
+            static_cast<double>(
+                touchAffine.bx),
+            static_cast<double>(
+                touchAffine.cx),
+            static_cast<double>(
+                touchAffine.ay),
+            static_cast<double>(
+                touchAffine.by),
+            static_cast<double>(
+                touchAffine.cy));
+        cdcPrintln(
+            done);
+      } else {
+        cdcPrintln(
+            "TOUCH_CAL_AUTO|ERR|BAD_GEOMETRY");
+      }
+
+      renderMainMenu();
+    } else {
+      drawTouchCalibrationTarget();
+    }
+
     return;
   }
 
