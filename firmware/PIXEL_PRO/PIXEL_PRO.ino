@@ -13463,9 +13463,11 @@ void setup() {
 
   if (!PIXEL_DIAG_TOUCH_OFF &&
       touchCalibrationRequired) {
+    // Do not force the device into four-point calibration at boot. This panel
+    // can still use the known 480x320 legacy mapping immediately, while
+    // LumiPad's Touch Test explicitly exercises the raw panel when requested.
     cdcPrintln(
-        "TOUCH_CAL_REQUIRED|AFFINE");
-    startAutomaticTouchCalibration();
+        "TOUCH_CAL_REQUIRED|DEFAULT_480x320|USE_TOUCH_TEST");
   }
 }
 
