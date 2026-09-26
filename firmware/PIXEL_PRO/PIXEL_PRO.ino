@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.21";
+static constexpr char FW_VERSION[] = "1.10.22";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -570,6 +570,8 @@ static bool menuBatchActive = false;
 static bool menuBatchDirty = false;
 static uint8_t menuBatchProfile = 0;
 static uint32_t menuBatchLastActivityAt = 0;
+static uint8_t menuLastContentProfile = 0;
+static uint8_t menuRenderedProfile = 0;
 
 RTC_DATA_ATTR static uint32_t bootSequence = 0;
 static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
@@ -632,6 +634,8 @@ enum GifScaleMode : uint8_t {
 
 static bool displayReady = false;
 static uint16_t *renderBuffer = nullptr;
+static uint16_t displayVividLine[TFT_WIDTH] = {};
+
 
 static uint8_t *saverData = nullptr;
 static size_t saverDataBytes = 0;
@@ -2248,6 +2252,181 @@ static void menuLegacyIconJpegPath(
       static_cast<unsigned>(slot));
 }
 
+
+static uint8_t vividClamp8(
+    int value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 255) {
+    return 255;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+static uint16_t vividRgb565(
+    uint16_t color) {
+  int r =
+      static_cast<int>((color >> 11) & 0x1F) *
+      255 / 31;
+  int g =
+      static_cast<int>((color >> 5) & 0x3F) *
+      255 / 63;
+  int b =
+      static_cast<int>(color & 0x1F) *
+      255 / 31;
+
+  const int luma =
+      (r * 77 +
+       g * 150 +
+       b * 29) >>
+      8;
+
+  r = luma + (r - luma) * 118 / 100;
+  g = luma + (g - luma) * 118 / 100;
+  b = luma + (b - luma) * 118 / 100;
+
+  r = 128 + (r - 128) * 112 / 100;
+  g = 128 + (g - 128) * 112 / 100;
+  b = 128 + (b - 128) * 112 / 100;
+
+  const uint8_t rr = vividClamp8(r);
+  const uint8_t gg = vividClamp8(g);
+  const uint8_t bb = vividClamp8(b);
+
+  return static_cast<uint16_t>(
+      ((static_cast<uint16_t>(rr) * 31U / 255U) << 11) |
+      ((static_cast<uint16_t>(gg) * 63U / 255U) << 5) |
+      (static_cast<uint16_t>(bb) * 31U / 255U));
+}
+
+static void drawVividRgb565Row(
+    int16_t x,
+    int16_t y,
+    const uint16_t *pixels,
+    uint16_t width) {
+  if (pixels == nullptr ||
+      width == 0 ||
+      width > TFT_WIDTH) {
+    return;
+  }
+
+  for (uint16_t i = 0;
+       i < width;
+       ++i) {
+    displayVividLine[i] =
+        vividRgb565(
+            pixels[i]);
+  }
+
+  tft->draw16bitRGBBitmap(
+      x,
+      y,
+      displayVividLine,
+      width,
+      1);
+}
+
+static bool profileHasMainMenuContent(
+    uint8_t profile) {
+  if (profile >= PROFILE_COUNT) {
+    return false;
+  }
+
+  for (uint8_t slot = 0;
+       slot < MENU_SLOT_COUNT;
+       ++slot) {
+    if (effectiveMainMenuAction(
+            profile,
+            slot) > 0) {
+      return true;
+    }
+  }
+
+  if (!littleFsReady) {
+    return false;
+  }
+
+  char bgPath[24] = {};
+  menuBackgroundPath(
+      profile,
+      false,
+      bgPath,
+      sizeof(bgPath));
+
+  if (LittleFS.exists(bgPath)) {
+    return true;
+  }
+
+  for (uint8_t slot = 0;
+       slot < MENU_SLOT_COUNT;
+       ++slot) {
+    char iconPath[24] = {};
+    menuIconPath(
+        profile,
+        slot,
+        false,
+        iconPath,
+        sizeof(iconPath));
+
+    if (LittleFS.exists(iconPath)) {
+      return true;
+    }
+
+    char legacyPath[24] = {};
+    menuLegacyIconJpegPath(
+        profile,
+        slot,
+        legacyPath,
+        sizeof(legacyPath));
+
+    if (LittleFS.exists(legacyPath)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static void rememberMainMenuContentProfile(
+    uint8_t profile) {
+  if (profile >= PROFILE_COUNT) {
+    return;
+  }
+
+  menuLastContentProfile = profile;
+  preferences.putUChar(
+      "menulast",
+      profile);
+}
+
+static uint8_t resolveMainMenuRenderProfile() {
+  if (activeProfile < PROFILE_COUNT &&
+      profileHasMainMenuContent(
+          activeProfile)) {
+    return activeProfile;
+  }
+
+  if (menuLastContentProfile < PROFILE_COUNT &&
+      profileHasMainMenuContent(
+          menuLastContentProfile)) {
+    return menuLastContentProfile;
+  }
+
+  for (uint8_t profile = 0;
+       profile < PROFILE_COUNT;
+       ++profile) {
+    if (profileHasMainMenuContent(
+            profile)) {
+      return profile;
+    }
+  }
+
+  return activeProfile < PROFILE_COUNT
+      ? activeProfile
+      : 0;
+}
+
 static int mainMenuJpegDraw(JPEGDRAW *draw) {
   if (draw == nullptr ||
       draw->pPixels == nullptr ||
@@ -2270,14 +2449,14 @@ static int mainMenuJpegDraw(JPEGDRAW *draw) {
   for (int row = 0;
        row < draw->iHeight;
        ++row) {
-    tft->draw16bitRGBBitmap(
+    drawVividRgb565Row(
         draw->x,
         draw->y + row,
         draw->pPixels +
             static_cast<size_t>(row) *
                 draw->iWidth,
-        width,
-        1);
+        static_cast<uint16_t>(
+            width));
   }
 
   return 1;
@@ -2421,6 +2600,17 @@ static bool renderMainMenuIcon(
               sizeof(rowPixels)) {
             valid = false;
             break;
+          }
+
+          for (uint16_t col = 0;
+               col < MENU_ICON_WIDTH;
+               ++col) {
+            if (rowPixels[col] !=
+                MENU_ICON_TRANSPARENT) {
+              rowPixels[col] =
+                  vividRgb565(
+                      rowPixels[col]);
+            }
           }
 
           int runStart = -1;
@@ -3324,9 +3514,15 @@ static void renderMainMenu() {
   }
 
   const uint8_t profile =
-      activeProfile < PROFILE_COUNT
-          ? activeProfile
-          : 0;
+      resolveMainMenuRenderProfile();
+
+  menuRenderedProfile = profile;
+
+  if (profileHasMainMenuContent(
+          profile)) {
+    rememberMainMenuContentProfile(
+        profile);
+  }
 
   renderMainMenuBackground(
       profile);
@@ -4132,6 +4328,9 @@ static bool finishMenuBackgroundUpload() {
 
   closeMenuUpload();
 
+  rememberMainMenuContentProfile(
+      profile);
+
   requestMainMenuRender(
       profile);
 
@@ -4266,6 +4465,9 @@ static bool finishMenuIconUpload() {
       legacyBinPath);
 
   closeMenuUpload();
+
+  rememberMainMenuContentProfile(
+      profile);
 
   requestMainMenuRender(
       profile);
@@ -4963,7 +5165,9 @@ static void gifDraw(GIFDRAW *draw) {
             ? TFT_HEIGHT - 1
             : dy1;
 
-    uint16_t color = pixels[x];
+    uint16_t color =
+        vividRgb565(
+            pixels[x]);
 
     for (int dy = dy0; dy <= dy1; ++dy) {
       uint16_t *row =
@@ -6194,6 +6398,10 @@ static void setPackedScaledPixel(
     return;
   }
 
+  color =
+      vividRgb565(
+          color);
+
   uint16_t dx0 =
       static_cast<uint16_t>(
           (static_cast<uint32_t>(sourceX) *
@@ -6572,14 +6780,16 @@ static int jpegDraw(JPEGDRAW *draw) {
   // iWidthUsed can be smaller than the MCU row stride on odd image widths.
   // Draw row-by-row so edge padding never writes outside the centered image.
   for (int row = 0; row < height; ++row) {
-    tft->draw16bitRGBBitmap(
-        x,
-        y + row,
+    drawVividRgb565Row(
+        static_cast<int16_t>(
+            x),
+        static_cast<int16_t>(
+            y + row),
         draw->pPixels +
             static_cast<size_t>(row) *
             sourceStride,
-        width,
-        1);
+        static_cast<uint16_t>(
+            width));
   }
 
   return 1;
@@ -7074,7 +7284,11 @@ static uint16_t rgb332To565(uint8_t value) {
   uint16_t g6 = static_cast<uint16_t>((g3 * 63 + 3) / 7);
   uint16_t b5 = static_cast<uint16_t>((b2 * 31 + 1) / 3);
 
-  return static_cast<uint16_t>((r5 << 11) | (g6 << 5) | b5);
+  return vividRgb565(
+      static_cast<uint16_t>(
+          (r5 << 11) |
+          (g6 << 5) |
+          b5));
 }
 
 static void renderSaverFrame(uint8_t index) {
@@ -8257,6 +8471,22 @@ static void handleCommand(String command) {
     if (!saveMainMenuConfig()) {
       cdcPrintln("ERR|MENUCFG_SAVE");
       return;
+    }
+
+    bool hasAction = false;
+    for (uint8_t slot = 0;
+         slot < MENU_SLOT_COUNT;
+         ++slot) {
+      if (mainMenuConfig.actions[profile][slot] > 0) {
+        hasAction = true;
+        break;
+      }
+    }
+
+    if (hasAction) {
+      rememberMainMenuContentProfile(
+          static_cast<uint8_t>(
+              profile));
     }
 
     requestMainMenuRender(
@@ -12048,10 +12278,13 @@ static bool emitTouchAction(
   }
 
   const uint8_t profile =
-      activeProfile <
+      menuRenderedProfile <
               PROFILE_COUNT
-          ? activeProfile
-          : 0;
+          ? menuRenderedProfile
+          : (activeProfile <
+                     PROFILE_COUNT
+                 ? activeProfile
+                 : 0);
 
   const uint8_t action =
       effectiveMainMenuAction(
