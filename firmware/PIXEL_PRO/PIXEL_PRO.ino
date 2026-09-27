@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.31";
+static constexpr char FW_VERSION[] = "1.10.32";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -590,7 +590,10 @@ static uint8_t menuLastContentProfile = 0;
 static uint8_t menuRenderedProfile = 0;
 static uint32_t menuCompositeMask = 0;
 
+static constexpr uint32_t USB_SAFE_BOOT_GUARD_MAGIC = 0x011032A5UL;
 RTC_DATA_ATTR static uint32_t bootSequence = 0;
+RTC_DATA_ATTR static uint32_t usbSafeBootGuardMagic = 0;
+RTC_DATA_ATTR static uint8_t usbSafeBootStage = 0;
 static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 static bool usbSafeRecoveryMode = false;
 static String usbSafeRecoveryLine;
@@ -14664,6 +14667,22 @@ static void handleUsbSafeRecoveryCommand(
     return;
   }
 
+  if (upper == "NORMAL_BOOT" ||
+      upper == "EXIT_SAFE_USB") {
+    // Explicitly clear this build's RTC crash guard before rebooting so the
+    // next start gets one full normal-boot attempt without reflashing.
+    usbSafeBootGuardMagic = 0;
+    usbSafeBootStage = 0;
+
+    cdcPrintln(
+        "OK|NORMAL_BOOT");
+
+    USBSerial.flush();
+    delay(50);
+    ESP.restart();
+    return;
+  }
+
   if (upper == "REBOOT") {
     cdcPrintln(
         "OK|REBOOT");
@@ -14775,12 +14794,31 @@ void setup() {
       esp_reset_reason();
   bootSequence++;
 
+  // Only treat a watchdog/panic reset as belonging to this exact firmware
+  // build when this build had already armed its RTC boot guard. This prevents
+  // a stale reset reason from an older image / flashing session from forcing a
+  // freshly flashed build straight into USB-only recovery with an uninitialized
+  // grey TFT.
+  const uint32_t previousGuardMagic =
+      usbSafeBootGuardMagic;
+  const uint8_t previousBootStage =
+      usbSafeBootStage;
+  const bool priorBootWasThisFirmware =
+      previousGuardMagic ==
+          USB_SAFE_BOOT_GUARD_MAGIC &&
+      previousBootStage != 0;
+
+  usbSafeBootGuardMagic =
+      USB_SAFE_BOOT_GUARD_MAGIC;
+  usbSafeBootStage = 1;
+
   // USB-first recovery path: enumerate native CDC/HID before touching NVS,
   // the TFT, SD, I2C or LittleFS. A bad persisted media file must never be
   // able to prevent Windows from seeing PIXEL PRO.
   startUsbCompositeEarly();
 
   const bool crashRecovery =
+      priorBootWasThisFirmware &&
       resetReasonNeedsUsbSafeRecovery(
           bootResetReason);
 
@@ -15102,6 +15140,10 @@ void setup() {
     cdcPrintln(
         "TOUCH_CAL_REQUIRED|DEFAULT_480x320|USE_TOUCH_TEST");
   }
+
+  // Mark that this exact firmware reached normal runtime. A later WDT/PANIC
+  // from this same build may then legitimately request USB-safe recovery.
+  usbSafeBootStage = 2;
 }
 
 void loop() {
