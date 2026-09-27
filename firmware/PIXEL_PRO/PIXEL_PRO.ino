@@ -15041,15 +15041,22 @@ void setup() {
 
 #if PIXEL_DIAG_DISPLAY_ONLY_IDLE
   // Diagnostic: stop immediately after the exact production display init.
-  // Draw a bright constant frame once, then leave the LCD bus completely idle.
-  // No SD, I2C module bus, LittleFS, USB, RGB animation, keys, saver or touch
-  // runtime is started after this point.
+  // Draw a bright constant frame once, then keep only the already-started
+  // native USB CDC service alive. Do not start SD, I2C, LittleFS, RGB, touch,
+  // saver, menu rendering or normal key runtime.
   if (displayReady) {
     tft->fillScreen(0xFFFF);
   }
 
+  cdcPrintln(
+      "BOOT|PIXELPRO|DISPLAY_ONLY_USB_TFT|READY=1");
+
   while (true) {
-    delay(1000);
+    // Reuse the tiny SAFE_USB command parser so Lumi Macropad can issue
+    // HELLO/GET_INFO/PING/MEM/PANEL and keep seeing the COM port while the
+    // TFT remains untouched after the one white fill.
+    pollUsbSafeRecoveryCdc();
+    delay(1);
   }
 #endif
   if (!PIXEL_DIAG_TOUCH_OFF) {
