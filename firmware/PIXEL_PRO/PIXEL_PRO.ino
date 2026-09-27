@@ -32,6 +32,10 @@
 #define PIXEL_DIAG_POST_INIT_STAGE 0
 #endif
 
+#ifndef PIXEL_DIAG_USB_TFT_MINIMAL
+#define PIXEL_DIAG_USB_TFT_MINIMAL 0
+#endif
+
 #include "PixelStablePAR8.h"
 
 #if PIXEL_DIAG_SAFE_PAR8
@@ -14816,6 +14820,25 @@ void setup() {
   // the TFT, SD, I2C or LittleFS. A bad persisted media file must never be
   // able to prevent Windows from seeing PIXEL PRO.
   startUsbCompositeEarly();
+
+#if PIXEL_DIAG_USB_TFT_MINIMAL
+  // Earliest possible combined USB + TFT diagnostic. Deliberately bypass
+  // Preferences, persisted config, keys, roller, RGB, touch, SD, I2C,
+  // LittleFS and SAFE_USB recovery classification.
+  initDisplay();
+
+  if (displayReady) {
+    tft->fillScreen(0xFFFF);
+  }
+
+  cdcPrintln(
+      "BOOT|PIXELPRO|USB_TFT_MINIMAL|READY=1");
+
+  while (true) {
+    pollUsbSafeRecoveryCdc();
+    delay(1);
+  }
+#endif
 
   const bool crashRecovery =
       priorBootWasThisFirmware &&
