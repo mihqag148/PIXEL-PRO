@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.29";
+static constexpr char FW_VERSION[] = "1.10.30";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -660,9 +660,8 @@ enum RawMediaKind : uint8_t {
   RAW_MEDIA_THUMB = 6,
 };
 
-static constexpr uint32_t RAW_MEDIA_ACK_BYTES = 512UL;
+static constexpr uint32_t RAW_MEDIA_ACK_BYTES = 128UL;
 static constexpr uint32_t RAW_MEDIA_TIMEOUT_MS = 15000UL;
-static constexpr size_t RAW_MEDIA_RX_BUFFER_BYTES = 8192U;
 
 static bool displayReady = false;
 static uint16_t *renderBuffer = nullptr;
@@ -8934,7 +8933,7 @@ static void handleCommand(String command) {
 
   if (upper == "MEDIA_RAW_CAPS") {
     cdcPrintln(
-        "MEDIA_RAW_CAPS|V=1|ACK=512|CRC=CRC32|KINDS=MENUBG,ICON,GIF,JPG,PX,THUMB");
+        "MEDIA_RAW_CAPS|V=1|ACK=128|CRC=CRC32|KINDS=MENUBG,ICON,GIF,JPG,PX,THUMB");
     return;
   }
 
@@ -14538,10 +14537,63 @@ static void pollKeys() {
   }
 }
 
+static bool usbCompositeStarted = false;
+
+static void startUsbCompositeEarly() {
+  if (usbCompositeStarted) {
+    return;
+  }
+
+  uint64_t mac =
+      ESP.getEfuseMac();
+
+  char serial[24] = {};
+  snprintf(
+      serial,
+      sizeof(serial),
+      "PIXELPRO-%012llX",
+      static_cast<unsigned long long>(
+          mac));
+
+  USB.VID(
+      USB_VID_PIXEL);
+  USB.PID(
+      USB_PID_PIXEL);
+  USB.productName(
+      "PIXEL PRO");
+  USB.manufacturerName(
+      "Lumi3D");
+  USB.serialNumber(
+      serial);
+  USB.firmwareVersion(
+      0x01A1);
+
+  USBSerial.enableReboot(
+      false);
+
+  // Do not pre-size the CDC queue. On ESP32-S2 the default 256-byte queue is
+  // the conservative/proven path; media chunks are kept below that size.
+  USBSerial.begin();
+  Keyboard.begin();
+  ConsumerControl.begin();
+  USB.begin();
+
+  usbCompositeStarted = true;
+
+  // Give Windows/TinyUSB a scheduling window before any display, SD, I2C or
+  // filesystem work starts.
+  delay(300);
+}
+
 void setup() {
   bootResetReason =
       esp_reset_reason();
   bootSequence++;
+
+  // USB-first recovery path: enumerate native CDC/HID before touching NVS,
+  // the TFT, SD, I2C or LittleFS. A bad persisted media file must never be
+  // able to prevent Windows from seeing PIXEL PRO.
+  startUsbCompositeEarly();
 
   preferences.begin("pixelpro", false);
   loadKeymap();
@@ -14689,29 +14741,8 @@ void setup() {
   }
   holdStage(5000, false, false, false, false);
 
-  // Stage 5: start the same USB composite stack as production.
-  uint64_t diagMac = ESP.getEfuseMac();
-  char diagSerial[24];
-  snprintf(
-      diagSerial,
-      sizeof(diagSerial),
-      "PIXELPRO-%012llX",
-      static_cast<unsigned long long>(
-          diagMac));
-
-  USB.VID(USB_VID_PIXEL);
-  USB.PID(USB_PID_PIXEL);
-  USB.productName("PIXEL PRO");
-  USB.manufacturerName("Lumi3D");
-  USB.serialNumber(diagSerial);
-  USB.firmwareVersion(0x01A1);
-  USBSerial.enableReboot(false);
-  USBSerial.setRxBufferSize(
-      RAW_MEDIA_RX_BUFFER_BYTES);
-  USBSerial.begin();
-  Keyboard.begin();
-  ConsumerControl.begin();
-  USB.begin();
+  // Stage 5: USB was already started at the top of setup.
+  startUsbCompositeEarly();
 
   delay(500);
   showStage(0xF81F, "5 USB");
@@ -14772,16 +14803,21 @@ void setup() {
     }
 
     (void)recoverMainMenuActionsFromKeymap();
-    recoverMainMenuAssets();
-    loadPersistedMedia();
+
+    // Do not recover/open/decode persisted Main Menu or screensaver media in
+    // setup(). If an old asset is corrupt, CDC must still remain available so
+    // LumiPad can replace or clear it explicitly.
+    saverReady = false;
+    saverActive = false;
+    saverFormat = SAVER_NONE;
   } else {
     saverReady = false;
     saverActive = false;
     saverFormat = SAVER_NONE;
   }
 
-  // USB recovery rule: never decode persisted visual media before native USB
-  // has enumerated. A bad legacy JPEG must not be able to hide the CDC port.
+  // USB is already enumerating/running at this point. Keep visual media idle
+  // until an explicit app/user command requests it.
   if (displayReady) {
     tft->fillScreen(
         0x1082);
@@ -14813,36 +14849,10 @@ void setup() {
   menuRenderNotBeforeAt = 0;
   lastUserActivityAt = millis();
 
-  uint64_t mac = ESP.getEfuseMac();
-  char serial[24];
-  snprintf(
-      serial,
-      sizeof(serial),
-      "PIXELPRO-%012llX",
-      static_cast<unsigned long long>(mac));
+  startUsbCompositeEarly();
 
-  USB.VID(USB_VID_PIXEL);
-  USB.PID(USB_PID_PIXEL);
-  USB.productName("PIXEL PRO");
-  USB.manufacturerName("Lumi3D");
-  USB.serialNumber(serial);
-  USB.firmwareVersion(0x01A1);
-
-  // Normal Lumi Macropad CDC traffic must never be interpreted as a request
-  // to enter the ESP32-S2 bootloader. Firmware updates use the dedicated ROM
-  // BOOT/esptool path instead.
-  USBSerial.enableReboot(false);
-  USBSerial.setRxBufferSize(
-      RAW_MEDIA_RX_BUFFER_BYTES);
-  USBSerial.begin();
-  Keyboard.begin();
-  ConsumerControl.begin();
-
-  USB.begin();
-
-  // Keep the panel/media path idle while Windows enumerates the composite USB
-  // device. No persisted artwork is touched during this window.
-  delay(1500);
+  // USB started at the top of setup; just yield once before normal reports.
+  delay(50);
   applyRgbProfile();
   sendMappedReports();
 
