@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.28";
+static constexpr char FW_VERSION[] = "1.10.29";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -82,7 +82,15 @@ static constexpr uint32_t MENU_ICON_MAX_BYTES = 24UL * 1024UL;
 static constexpr uint16_t MENU_ICON_TRANSPARENT = 0xF81F;
 static constexpr uint32_t MENU_ICON_ASSET_BYTES =
     8UL + MENU_ICON_WIDTH * MENU_ICON_HEIGHT * 2UL;
-static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 96UL * 1024UL;
+static constexpr uint32_t MENU_PXM2_HEADER_BYTES = 8UL;
+static constexpr uint32_t MENU_PXM2_PIXEL_BYTES =
+    static_cast<uint32_t>(TFT_WIDTH) *
+    static_cast<uint32_t>(TFT_HEIGHT) *
+    2UL;
+static constexpr uint32_t MENU_PXM2_ASSET_BYTES =
+    MENU_PXM2_HEADER_BYTES +
+    MENU_PXM2_PIXEL_BYTES;
+static constexpr uint32_t MENU_BACKGROUND_LIMIT_BYTES = 320UL * 1024UL;
 static constexpr uint8_t MENU_LABEL_MAX_LEN = 16;
 static constexpr uint8_t MENU_STORAGE_VERSION = 4;
 static constexpr uint8_t MENU_STATUS_HEIGHT = 0;
@@ -2642,36 +2650,77 @@ static bool renderMainMenuBackground(
     return false;
   }
 
-  JPEGDEC decoder;
+  uint8_t header[8] = {};
 
-  const bool valid =
-      decoder.open(
-          file,
-          mainMenuJpegDraw) &&
-      decoder.getWidth() ==
-          TFT_WIDTH &&
-      decoder.getHeight() ==
-          TFT_HEIGHT;
+  const bool headerOk =
+      file.size() ==
+          MENU_PXM2_ASSET_BYTES &&
+      file.read(
+          header,
+          sizeof(header)) ==
+          sizeof(header) &&
+      header[0] == 'P' &&
+      header[1] == 'X' &&
+      header[2] == 'M' &&
+      header[3] == '2';
 
-  if (!valid) {
-    decoder.close();
+  const uint16_t width =
+      static_cast<uint16_t>(
+          header[4] |
+          (static_cast<uint16_t>(
+               header[5]) <<
+           8));
+
+  const uint16_t height =
+      static_cast<uint16_t>(
+          header[6] |
+          (static_cast<uint16_t>(
+               header[7]) <<
+           8));
+
+  if (!headerOk ||
+      width != TFT_WIDTH ||
+      height != TFT_HEIGHT) {
+    // Never decode legacy Main Menu JPEG here. A corrupted/unsupported JPEG
+    // previously trapped the ESP32-S2 before USB CDC could enumerate.
     file.close();
     return false;
   }
 
-  tft->fillScreen(
-      RGB565_BLACK);
+  uint16_t rowPixels[TFT_WIDTH] = {};
 
-  const int result =
-      decoder.decode(
-          0,
-          0,
-          0);
+  for (uint16_t row = 0;
+       row < TFT_HEIGHT;
+       ++row) {
+    const size_t bytesRead =
+        file.read(
+            reinterpret_cast<uint8_t *>(
+                rowPixels),
+            sizeof(rowPixels));
 
-  decoder.close();
+    if (bytesRead !=
+        sizeof(rowPixels)) {
+      file.close();
+      return false;
+    }
+
+    // PXM2 is already native RGB565 from LumiPad. Draw it exactly as authored;
+    // do not apply the old vivid/gamma transform a second time.
+    tft->draw16bitRGBBitmap(
+        0,
+        row,
+        rowPixels,
+        TFT_WIDTH,
+        1);
+
+    if ((row & 0x07U) ==
+        0x07U) {
+      delay(0);
+    }
+  }
+
   file.close();
-
-  return result != 0;
+  return true;
 }
 
 static bool renderMainMenuIcon(
@@ -2799,52 +2848,10 @@ static bool renderMainMenuIcon(
     }
   }
 
-  // Preserve icons already uploaded by firmware 1.8.2 until the new app
-  // replaces them with transparent PXI1 assets.
-  char legacyPath[24] = {};
-  menuLegacyIconJpegPath(
-      profile,
-      slot,
-      legacyPath,
-      sizeof(legacyPath));
-
-  if (!LittleFS.exists(legacyPath)) {
-    return false;
-  }
-
-  File legacy =
-      LittleFS.open(
-          legacyPath,
-          "r");
-
-  if (!legacy) {
-    return false;
-  }
-
-  JPEGDEC decoder;
-  bool valid =
-      decoder.open(
-          legacy,
-          mainMenuJpegDraw) &&
-      decoder.getWidth() == MENU_ICON_WIDTH &&
-      decoder.getHeight() == MENU_ICON_HEIGHT;
-
-  if (!valid) {
-    decoder.close();
-    legacy.close();
-    return false;
-  }
-
-  int result =
-      decoder.decode(
-          x,
-          y,
-          0);
-
-  decoder.close();
-  legacy.close();
-
-  return result != 0;
+  // Legacy JPEG icons are intentionally quarantined. The current app uploads
+  // composite PXM2 artwork, while per-slot assets use PXI1 RGB565. Avoiding
+  // JPEGDEC here keeps unsupported old media from taking down native USB.
+  return false;
 }
 
 static void drawDockWindowsStart(
@@ -4543,9 +4550,6 @@ static bool finishMenuBackgroundUpload() {
       backupPath,
       sizeof(backupPath));
 
-  // Do not instantiate JPEGDEC or touch the TFT in the final raw-data
-  // callback. That path runs inline with native USB receive and was the last
-  // operation before the observed CDC disconnect around the final chunk.
   menuUploadFile.flush();
   menuUploadFile.close();
 
@@ -4562,26 +4566,55 @@ static bool finishMenuBackgroundUpload() {
   const size_t fileSize =
       file.size();
 
+  uint8_t header[8] = {};
+
   bool valid =
       fileSize ==
           menuUploadExpectedBytes &&
-      fileSize >= 4;
+      fileSize >= 4 &&
+      file.read(
+          header,
+          sizeof(header)) >= 4;
 
-  uint8_t first[2] = {};
-  uint8_t last[2] = {};
+  bool pxm2 = false;
 
-  if (valid) {
-    valid =
-        file.read(
-            first,
-            sizeof(first)) ==
-            sizeof(first) &&
-        first[0] == 0xFF &&
-        first[1] == 0xD8;
-  }
+  if (valid &&
+      fileSize ==
+          MENU_PXM2_ASSET_BYTES &&
+      header[0] == 'P' &&
+      header[1] == 'X' &&
+      header[2] == 'M' &&
+      header[3] == '2') {
+    const uint16_t width =
+        static_cast<uint16_t>(
+            header[4] |
+            (static_cast<uint16_t>(
+                 header[5]) <<
+             8));
 
-  if (valid) {
-    valid =
+    const uint16_t height =
+        static_cast<uint16_t>(
+            header[6] |
+            (static_cast<uint16_t>(
+                 header[7]) <<
+             8));
+
+    pxm2 =
+        width == TFT_WIDTH &&
+        height == TFT_HEIGHT;
+
+    valid = pxm2;
+  } else if (valid) {
+    // Keep old app uploads storable for recovery, but never decode them in
+    // the Main Menu renderer. This only validates the JPEG envelope.
+    const bool jpegStart =
+        header[0] == 0xFF &&
+        header[1] == 0xD8;
+
+    uint8_t last[2] = {};
+
+    const bool jpegEnd =
+        fileSize >= 4 &&
         file.seek(
             fileSize - 2) &&
         file.read(
@@ -4590,6 +4623,10 @@ static bool finishMenuBackgroundUpload() {
             sizeof(last) &&
         last[0] == 0xFF &&
         last[1] == 0xD9;
+
+    valid =
+        jpegStart &&
+        jpegEnd;
   }
 
   file.close();
@@ -4616,9 +4653,6 @@ static bool finishMenuBackgroundUpload() {
     return false;
   }
 
-  // Only commit the file here. The app sends MENUMODE / MENUCFG / MENUSHOW
-  // after MEDIA_RAW_DONE, so preferences and rendering happen outside the
-  // time-critical USB finalizer.
   closeMenuUpload();
   return true;
 }
@@ -8035,7 +8069,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B-MCUFRIEND,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RAW_MEDIA_V1,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B-MCUFRIEND,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RAW_MEDIA_V1,MENU_PXM2,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -9875,6 +9909,7 @@ static void handleCommand(String command) {
         LittleFS.exists(path);
 
     size_t bytes = 0;
+    bool pxm2 = false;
 
     if (custom) {
       File file =
@@ -9885,6 +9920,38 @@ static void handleCommand(String command) {
       if (file) {
         bytes =
             file.size();
+
+        uint8_t header[8] = {};
+
+        if (file.read(
+                header,
+                sizeof(header)) ==
+                sizeof(header)) {
+          const uint16_t width =
+              static_cast<uint16_t>(
+                  header[4] |
+                  (static_cast<uint16_t>(
+                       header[5]) <<
+                   8));
+
+          const uint16_t height =
+              static_cast<uint16_t>(
+                  header[6] |
+                  (static_cast<uint16_t>(
+                       header[7]) <<
+                   8));
+
+          pxm2 =
+              bytes ==
+                  MENU_PXM2_ASSET_BYTES &&
+              header[0] == 'P' &&
+              header[1] == 'X' &&
+              header[2] == 'M' &&
+              header[3] == '2' &&
+              width == TFT_WIDTH &&
+              height == TFT_HEIGHT;
+        }
+
         file.close();
       } else {
         custom = false;
@@ -9902,7 +9969,9 @@ static void handleCommand(String command) {
             ? "CUSTOM"
             : "EMPTY",
         custom
-            ? "USER_JPEG"
+            ? (pxm2
+                   ? "USER_PXM2"
+                   : "LEGACY_JPEG")
             : "NONE",
         static_cast<unsigned long>(bytes),
         static_cast<unsigned>(
@@ -14711,7 +14780,37 @@ void setup() {
     saverFormat = SAVER_NONE;
   }
 
-  renderMainMenu();
+  // USB recovery rule: never decode persisted visual media before native USB
+  // has enumerated. A bad legacy JPEG must not be able to hide the CDC port.
+  if (displayReady) {
+    tft->fillScreen(
+        0x1082);
+
+    tft->setTextColor(
+        0xFFFF);
+
+    tft->setTextSize(3);
+    tft->setCursor(
+        130,
+        118);
+
+    tft->print(
+        "PIXEL PRO");
+
+    tft->setTextSize(1);
+    tft->setTextColor(
+        0xC618);
+
+    tft->setCursor(
+        167,
+        165);
+
+    tft->print(
+        "USB RECOVERY READY");
+  }
+
+  menuRenderPending = false;
+  menuRenderNotBeforeAt = 0;
   lastUserActivityAt = millis();
 
   uint64_t mac = ESP.getEfuseMac();
@@ -14741,7 +14840,9 @@ void setup() {
 
   USB.begin();
 
-  delay(500);
+  // Keep the panel/media path idle while Windows enumerates the composite USB
+  // device. No persisted artwork is touched during this window.
+  delay(1500);
   applyRgbProfile();
   sendMappedReports();
 
