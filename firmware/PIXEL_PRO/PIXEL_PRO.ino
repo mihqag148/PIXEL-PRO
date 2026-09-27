@@ -44,7 +44,7 @@
 USBCDC USBSerial;
 #endif
 
-static constexpr char FW_VERSION[] = "1.10.30";
+static constexpr char FW_VERSION[] = "1.10.31";
 static constexpr uint16_t USB_VID_PIXEL = 0x303A;
 static constexpr uint16_t USB_PID_PIXEL = 0x80C2;
 static constexpr uint8_t KEY_COUNT = 8;
@@ -592,6 +592,8 @@ static uint32_t menuCompositeMask = 0;
 
 RTC_DATA_ATTR static uint32_t bootSequence = 0;
 static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
+static bool usbSafeRecoveryMode = false;
+static String usbSafeRecoveryLine;
 
 static int16_t menuCpuLoad = -1;
 static int16_t menuCpuTemp = -1;
@@ -8068,7 +8070,7 @@ static String deviceHello() {
   snprintf(
       out,
       sizeof(out),
-      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B-MCUFRIEND,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RAW_MEDIA_V1,MENU_PXM2,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT|VID=%04X|PID=%04X",
+      "PIXELPRO|1|FW=%s|MCU=ESP32S2|KEYS=8|PROFILES=20|LAYERS=4|MACROS=20|ACTIONS=32|DISPLAY=HX8357B-MCUFRIEND,480x320,i8080-8|CAPS=HID,CDC,KEYMAP,LAYERS,HOST_MACRO,HOST_ACTION,MEM,PANEL,SAVER,MEDIA,DIRECT_GIF,DIRECT_JPEG,PXQ,RLE,DELTA,RAW_MEDIA_V1,MENU_PXM2,RGB_PER_KEY,RGB_EFFECTS,MAIN_MENU,MAIN_MENU_ICONS,PCMON,MATRIX_2X4,ENCODER,ROLLER_EVQWGD001,TOUCH_RESISTIVE,SD_SPI,MODULE_I2C,PCA9546A,3PORT,ROM_BOOT,SAFE_USB_RECOVERY|VID=%04X|PID=%04X",
       FW_VERSION,
       USB_VID_PIXEL,
       USB_PID_PIXEL);
@@ -14537,6 +14539,189 @@ static void pollKeys() {
   }
 }
 
+static bool resetReasonNeedsUsbSafeRecovery(
+    esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_PANIC:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+static bool bootKeysRequestUsbSafeRecovery() {
+  // K1 + K8 are opposite corners of the 2x4 matrix and are otherwise unused
+  // during boot. Sampling after native USB starts gives a manual recovery path
+  // that does not touch TFT, LittleFS, SD, I2C, RGB or touch.
+  initKeys();
+
+  uint8_t heldSamples = 0;
+
+  for (uint8_t sample = 0;
+       sample < 12;
+       ++sample) {
+    const uint8_t mask =
+        readMatrixMask();
+
+    const bool held =
+        (mask & 0x01U) != 0 &&
+        (mask & 0x80U) != 0;
+
+    if (held) {
+      heldSamples++;
+    }
+
+    delay(10);
+  }
+
+  return heldSamples >= 8;
+}
+
+static void sendUsbSafeRecoveryHello() {
+  String hello =
+      deviceHello();
+
+  hello +=
+      "|SAFE_USB=1";
+
+  cdcPrintln(
+      hello);
+}
+
+static void handleUsbSafeRecoveryCommand(
+    String command) {
+  command.trim();
+
+  String upper =
+      command;
+
+  upper.toUpperCase();
+
+  if (upper == "HELLO" ||
+      upper == "GET_INFO") {
+    sendUsbSafeRecoveryHello();
+    return;
+  }
+
+  if (upper == "PING") {
+    cdcPrintln(
+        "PONG|PIXELPRO|SAFE_USB=1");
+    return;
+  }
+
+  if (upper == "RESETINFO") {
+    char out[112] = {};
+    snprintf(
+        out,
+        sizeof(out),
+        "RESETINFO|REASON=%s|CODE=%u|BOOT=%lu|SAFE_USB=1",
+        resetReasonName(
+            bootResetReason),
+        static_cast<unsigned>(
+            bootResetReason),
+        static_cast<unsigned long>(
+            bootSequence));
+
+    cdcPrintln(out);
+    return;
+  }
+
+  if (upper == "MEM" ||
+      upper == "GET_MEMORY") {
+    sendMemoryInfo();
+    return;
+  }
+
+  if (upper == "PANEL") {
+    cdcPrintln(
+        "PANEL|SAFE_USB_RECOVERY|0|0|0");
+    return;
+  }
+
+  if (upper.startsWith(
+          "HOSTOS|")) {
+    cdcPrintln(
+        "OK|HOSTOS|SAFE_USB");
+    return;
+  }
+
+  if (upper == "ARM_BOOTLOADER") {
+    bootloaderArmed = true;
+    bootloaderArmUntil =
+        millis() + 5000UL;
+
+    USBSerial.enableReboot(
+        true);
+
+    cdcPrintln(
+        "OK|BOOTLOADER_ARMED");
+
+    USBSerial.flush();
+    return;
+  }
+
+  if (upper == "REBOOT") {
+    cdcPrintln(
+        "OK|REBOOT");
+
+    USBSerial.flush();
+    delay(50);
+    ESP.restart();
+    return;
+  }
+
+  if (upper.length()) {
+    cdcPrintln(
+        "ERR|SAFE_USB_RECOVERY");
+  }
+}
+
+static void pollUsbSafeRecoveryCdc() {
+  while (USBSerial.available()) {
+    const char ch =
+        static_cast<char>(
+            USBSerial.read());
+
+    if (ch == '\r') {
+      continue;
+    }
+
+    if (ch == '\n') {
+      if (usbSafeRecoveryLine.length()) {
+        handleUsbSafeRecoveryCommand(
+            usbSafeRecoveryLine);
+
+        usbSafeRecoveryLine = "";
+      }
+
+      continue;
+    }
+
+    if (usbSafeRecoveryLine.length() <
+        512) {
+      usbSafeRecoveryLine += ch;
+    } else {
+      usbSafeRecoveryLine = "";
+      cdcPrintln(
+          "ERR|SAFE_USB_LINE_TOO_LONG");
+    }
+  }
+
+  if (bootloaderArmed &&
+      static_cast<int32_t>(
+          millis() -
+          bootloaderArmUntil) >= 0) {
+    USBSerial.enableReboot(
+        false);
+
+    bootloaderArmed = false;
+  }
+}
+
 static bool usbCompositeStarted = false;
 
 static void startUsbCompositeEarly() {
@@ -14594,6 +14779,45 @@ void setup() {
   // the TFT, SD, I2C or LittleFS. A bad persisted media file must never be
   // able to prevent Windows from seeing PIXEL PRO.
   startUsbCompositeEarly();
+
+  const bool crashRecovery =
+      resetReasonNeedsUsbSafeRecovery(
+          bootResetReason);
+
+  const bool keyRecovery =
+      bootKeysRequestUsbSafeRecovery();
+
+  if (crashRecovery ||
+      keyRecovery) {
+    usbSafeRecoveryMode = true;
+
+    char bootLine[144] = {};
+    snprintf(
+        bootLine,
+        sizeof(bootLine),
+        "BOOT|PIXELPRO|%s|RESET=%s|CODE=%u|BOOT=%lu|SAFE_USB=1|CAUSE=%s",
+        FW_VERSION,
+        resetReasonName(
+            bootResetReason),
+        static_cast<unsigned>(
+            bootResetReason),
+        static_cast<unsigned long>(
+            bootSequence),
+        crashRecovery
+            ? "CRASH"
+            : "KEYS");
+
+    cdcPrintln(
+        bootLine);
+
+    // Stay in a deliberately tiny USB-only runtime. This path never opens NVS
+    // or LittleFS and never initializes TFT/SD/I2C/RGB/touch, so LumiPad can
+    // always enumerate the CDC port and arm ROM BOOT for reflashing.
+    while (true) {
+      pollUsbSafeRecoveryCdc();
+      delay(1);
+    }
+  }
 
   preferences.begin("pixelpro", false);
   loadKeymap();
